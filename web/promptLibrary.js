@@ -267,10 +267,11 @@ function buildGallery(node, idWidget) {
       tile.appendChild(nm);
 
       tile.onclick = () => {
-        idWidget.value = p.id;
+        const wasSelected = idWidget.value === p.id;
+        idWidget.value = wasSelected ? "" : p.id;
         node.setDirtyCanvas(true, true);
         for (const t of grid.querySelectorAll(".pl-tile")) t.classList.remove("selected");
-        tile.classList.add("selected");
+        if (!wasSelected) tile.classList.add("selected");
       };
       tile.oncontextmenu = (e) => {
         e.preventDefault();
