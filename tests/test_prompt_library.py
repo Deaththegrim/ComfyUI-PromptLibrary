@@ -809,6 +809,25 @@ class PromptLibraryTests(unittest.TestCase):
         # Knight image preserved
         self.assertIsNotNone(self.mod._image_path_for(knight_id))
 
+    def test_export_route_returns_count_header(self):
+        # Two entries, no filter — header should report total count.
+        asyncio.run(self.mod.upsert_prompt(FakeRequest(post_data={"name": "A", "text": "a"})))
+        asyncio.run(self.mod.upsert_prompt(FakeRequest(post_data={"name": "B", "text": "b"})))
+        req = FakeRequest(json_data={"ids": []})
+        # FakeRequest needs body_exists so the route reads json
+        req.body_exists = True
+        resp = asyncio.run(self.mod.export_zip(req))
+        self.assertEqual(resp.headers["X-GrimmRibbity-Count"], "2")
+        self.assertEqual(resp.headers["Content-Type"], "application/zip")
+
+    def test_export_route_filters_by_ids(self):
+        a_id = json.loads(asyncio.run(self.mod.upsert_prompt(FakeRequest(post_data={"name": "A", "text": "a"}))).body)["id"]
+        json.loads(asyncio.run(self.mod.upsert_prompt(FakeRequest(post_data={"name": "B", "text": "b"}))).body)
+        req = FakeRequest(json_data={"ids": [a_id]})
+        req.body_exists = True
+        resp = asyncio.run(self.mod.export_zip(req))
+        self.assertEqual(resp.headers["X-GrimmRibbity-Count"], "1")
+
     def test_import_zip_updates_existing(self):
         # First entry
         req1 = FakeRequest(post_data={"name": "X", "text": "v1"})
