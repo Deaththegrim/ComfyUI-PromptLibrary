@@ -63,6 +63,13 @@ async function fetchList() {
   return data.prompts || [];
 }
 
+function slugify(name) {
+  return (name || "").trim().toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64);
+}
+
 async function upsert({ id, name, text, imageFile, clearImage }) {
   const body = new FormData();
   if (id) body.append("id", id);
@@ -116,6 +123,18 @@ function openPromptModal({ existing, onSave, onDelete }) {
   nameInput.type = "text";
   nameInput.value = existing?.name || "";
   nameLabel.appendChild(nameInput);
+
+  const idLabel = document.createElement("label");
+  idLabel.textContent = existing ? "ID (read-only)" : "ID (optional — auto from name)";
+  const idInput = document.createElement("input");
+  idInput.type = "text";
+  idInput.value = existing?.id || "";
+  if (existing) idInput.readOnly = true;
+  else nameInput.addEventListener("input", () => {
+    if (!idInput.dataset.userEdited) idInput.placeholder = slugify(nameInput.value);
+  });
+  idInput.addEventListener("input", () => { idInput.dataset.userEdited = "1"; });
+  idLabel.appendChild(idInput);
 
   const textLabel = document.createElement("label");
   textLabel.textContent = "Prompt text";
@@ -202,12 +221,18 @@ function openPromptModal({ existing, onSave, onDelete }) {
   saveBtn.onclick = async () => {
     const name = nameInput.value.trim();
     if (!name) { status.textContent = "name required"; status.classList.add("error"); return; }
+    const customId = idInput.value.trim();
+    if (customId && !/^[A-Za-z0-9_-]{1,64}$/.test(customId)) {
+      status.textContent = "id must be A-Z, 0-9, _ or - (max 64)";
+      status.classList.add("error");
+      return;
+    }
     saveBtn.disabled = true;
     status.classList.remove("error");
     status.textContent = "saving...";
     try {
       await onSave({
-        id: existing?.id,
+        id: existing?.id || customId,
         name,
         text: textArea.value,
         imageFile: imgInput.files[0] || null,
@@ -239,7 +264,7 @@ function openPromptModal({ existing, onSave, onDelete }) {
   actions.appendChild(cancelBtn);
   actions.appendChild(saveBtn);
 
-  modal.append(header, nameLabel, textLabel, imgLabel, status, actions);
+  modal.append(header, nameLabel, idLabel, textLabel, imgLabel, status, actions);
 
   // Initial position: cascade modals so stacked windows don't overlap exactly.
   const offset = (_modalStack++ % 6) * 24;

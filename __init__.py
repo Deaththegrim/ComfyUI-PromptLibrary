@@ -45,6 +45,27 @@ def _safe_id(value: str) -> str | None:
     return value if value and _ID_RE.match(value) else None
 
 
+def _slugify(name: str) -> str:
+    """Turn 'Cyberpunk Style 2!' into 'cyberpunk_style_2'. May return '' for all-symbol names."""
+    s = re.sub(r"[^A-Za-z0-9]+", "_", (name or "").strip().lower())
+    return s.strip("_")[:64]
+
+
+def _unique_id(base: str, existing_ids: set[str]) -> str:
+    """Append _2, _3, ... until the id is free; fall back to uuid for an empty base."""
+    if not base:
+        return uuid.uuid4().hex[:12]
+    if base not in existing_ids:
+        return base
+    n = 2
+    trunk = base[:60]
+    while True:
+        candidate = f"{trunk}_{n}"
+        if candidate not in existing_ids:
+            return candidate
+        n += 1
+
+
 def _image_path_for(prompt_id: str) -> Path | None:
     for ext in _ALLOWED_IMAGE_EXT:
         p = IMAGES_DIR / f"{prompt_id}{ext}"
@@ -177,7 +198,7 @@ class PromptLibrarySave:
                 existing = next((i for i in items if i.get("name") == name), None)
 
             if existing is None:
-                pid = prompt_id or uuid.uuid4().hex[:12]
+                pid = prompt_id or _unique_id(_slugify(name), {i.get("id") for i in items})
                 existing = {"id": pid}
                 items.append(existing)
 
@@ -236,13 +257,13 @@ async def upsert_prompt(request):
 
     if not name:
         return web.json_response({"error": "name required"}, status=400)
-    if not pid:
-        pid = uuid.uuid4().hex[:12]
-    if not _safe_id(pid):
+    if pid and not _safe_id(pid):
         return web.json_response({"error": "invalid id"}, status=400)
 
     with _lock:
         items = _load()
+        if not pid:
+            pid = _unique_id(_slugify(name), {i.get("id") for i in items})
         existing = next((i for i in items if i.get("id") == pid), None)
         if existing is None:
             existing = {"id": pid}
@@ -288,7 +309,7 @@ async def delete_prompt(request):
     return web.json_response({"ok": True})
 
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 NODE_CLASS_MAPPINGS = {
     "PromptLibrary": PromptLibrary,

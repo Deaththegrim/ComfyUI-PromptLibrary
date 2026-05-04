@@ -358,6 +358,65 @@ class PromptLibraryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             node.save(name="X", text="t", prompt_id="../etc")
 
+    # ---- slugify / unique id -------------------------------------------
+
+    def test_slugify_basic(self):
+        cases = {
+            "Cyberpunk Style": "cyberpunk_style",
+            "Cyberpunk Style 2!": "cyberpunk_style_2",
+            "  spaces  ": "spaces",
+            "Hello---World": "hello_world",
+            "café": "caf",
+            "": "",
+            "!!!": "",
+        }
+        for inp, expected in cases.items():
+            self.assertEqual(self.mod._slugify(inp), expected, f"input={inp!r}")
+
+    def test_slugify_truncates_to_64(self):
+        self.assertEqual(len(self.mod._slugify("a" * 200)), 64)
+
+    def test_unique_id_no_collision(self):
+        self.assertEqual(self.mod._unique_id("foo", set()), "foo")
+
+    def test_unique_id_with_collision(self):
+        self.assertEqual(self.mod._unique_id("foo", {"foo"}), "foo_2")
+        self.assertEqual(self.mod._unique_id("foo", {"foo", "foo_2"}), "foo_3")
+
+    def test_unique_id_empty_falls_back_to_uuid(self):
+        result = self.mod._unique_id("", set())
+        self.assertRegex(result, r"^[a-f0-9]{12}$")
+
+    def test_save_node_uses_slugified_name_as_id(self):
+        node = self.mod.PromptLibrarySave()
+        _, pid = node.save(name="Cyberpunk Style", text="t")
+        self.assertEqual(pid, "cyberpunk_style")
+
+    def test_save_node_collision_appends_suffix(self):
+        node = self.mod.PromptLibrarySave()
+        _, pid1 = node.save(name="Same Name", text="v1")
+        _, pid2 = node.save(name="Same Name", text="v2")
+        self.assertEqual(pid1, "same_name")
+        self.assertEqual(pid2, "same_name_2")
+
+    def test_upsert_uses_slugified_id_when_unspecified(self):
+        req = FakeRequest(post_data={"name": "Movie Poster", "text": "x"})
+        body = json.loads(asyncio.run(self.mod.upsert_prompt(req)).body)
+        self.assertEqual(body["id"], "movie_poster")
+
+    def test_upsert_collision_appends_suffix(self):
+        req1 = FakeRequest(post_data={"name": "Foo", "text": "a"})
+        body1 = json.loads(asyncio.run(self.mod.upsert_prompt(req1)).body)
+        req2 = FakeRequest(post_data={"name": "Foo", "text": "b"})
+        body2 = json.loads(asyncio.run(self.mod.upsert_prompt(req2)).body)
+        self.assertEqual(body1["id"], "foo")
+        self.assertEqual(body2["id"], "foo_2")
+
+    def test_upsert_all_symbol_name_falls_back_to_uuid(self):
+        req = FakeRequest(post_data={"name": "!!!", "text": "x"})
+        body = json.loads(asyncio.run(self.mod.upsert_prompt(req)).body)
+        self.assertRegex(body["id"], r"^[a-f0-9]{12}$")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
