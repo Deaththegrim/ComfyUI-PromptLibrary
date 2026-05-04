@@ -153,10 +153,12 @@ python3 -m venv .testenv
 
 ## Credits
 
-Built by **[Deaththegrim](https://github.com/Deaththegrim)**, pair-programmed
-with **[Claude Code](https://claude.com/claude-code)** (Anthropic's CLI for
-Claude). Design decisions, scope calls, UX direction, and final review are
-the maintainer's; Claude wrote most of the code under that direction.
+Co-created by **[Deaththegrim](https://github.com/Deaththegrim)** and
+**RibbityRabbit** (whose feedback shaped most of the feature set — the
+branding is theirs too). Pair-programmed with **[Claude Code](https://claude.com/claude-code)**
+(Anthropic's CLI for Claude). Design decisions, scope calls, UX direction,
+and final review are the maintainers'; Claude wrote most of the code under
+that direction.
 
 If you fork, remix, or publish a derivative, a credit line back to
 [Deaththegrim/ComfyUI-PromptLibrary](https://github.com/Deaththegrim/ComfyUI-PromptLibrary)
@@ -166,4 +168,5 @@ is appreciated.
 
 MIT — see [LICENSE](LICENSE). You're free to use, modify, redistribute, and
 include this in commercial work. The one ask: keep the copyright notice
-("Copyright (c) 2026 Deaththegrim") intact in copies and substantial portions.
+("Copyright (c) 2026 Deaththegrim and RibbityRabbit") intact in copies and
+substantial portions.
