@@ -848,7 +848,7 @@ async def delete_prompt(request):
     return web.json_response({"ok": True})
 
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 
 
 def _autobackup_on_version_change() -> None:

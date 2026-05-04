@@ -15,10 +15,25 @@ const CSS = `
   border-radius: 3px; font-size: 12px; }
 .pl-btn:hover { background: #383838; }
 .pl-grid { flex: 1; overflow-y: auto; display: grid; gap: 6px; align-content: start;
-  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); padding-right: 2px; }
+  grid-template-columns: repeat(auto-fill, minmax(var(--pl-tile-size, 96px), 1fr));
+  padding-right: 2px; }
 .pl-tile { position: relative; aspect-ratio: 1 / 1; background: #2a2a2a; border: 2px solid transparent;
-  border-radius: 4px; cursor: pointer; overflow: hidden; }
-.pl-tile.selected { border-color: #6cf; }
+  border-radius: 4px; cursor: pointer; overflow: hidden;
+  transition: border-color 80ms ease, transform 80ms ease; }
+.pl-tile:hover { border-color: #555; transform: scale(1.02); }
+.pl-tile.selected, .pl-tile.selected:hover { border-color: #6cf; }
+.pl-empty-state { grid-column: 1 / -1; padding: 24px 12px; text-align: center;
+  color: #888; font-size: 12px; line-height: 1.5; background: #232323;
+  border: 1px dashed #444; border-radius: 4px; }
+.pl-empty-state strong { color: #ddd; display: block; margin-bottom: 4px; font-size: 13px; }
+.pl-search-wrap { position: relative; flex: 1; min-width: 0; display: flex; }
+.pl-search-wrap input { width: 100%; padding-right: 22px; }
+.pl-search-clear { position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  background: transparent; border: none; color: #888; font-size: 14px;
+  cursor: pointer; padding: 0 4px; line-height: 1; }
+.pl-search-clear:hover { color: #fff; }
+.pl-tile-size { display: flex; align-items: center; gap: 4px; }
+.pl-tile-size input { width: 70px; }
 .pl-tags-row { display: flex; flex-direction: column; gap: 3px; padding: 0 2px 2px; }
 .pl-tag-group { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .pl-tag-group-label { color: #888; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
@@ -38,8 +53,10 @@ const CSS = `
   background: #232323; border: 2px dashed #555; }
 .pl-add:hover { color: #ddd; border-color: #888; }
 .pl-modal { position: fixed; z-index: 10000; background: #2a2a2a; color: #ddd; padding: 0 14px 14px;
-  border-radius: 6px; width: 460px; box-shadow: 0 8px 32px rgba(0,0,0,0.6); border: 1px solid #444;
+  border-radius: 6px; width: 460px; max-height: 80vh; overflow-y: auto;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6); border: 1px solid #444;
   display: flex; flex-direction: column; gap: 10px; font-family: sans-serif; font-size: 13px; }
+.pl-modal-header { position: sticky; top: 0; z-index: 1; }
 .pl-modal-header { display: flex; align-items: center; gap: 8px; cursor: move;
   user-select: none; padding: 6px 10px; margin: 0 -14px 4px; background: #1f1f1f;
   border-radius: 6px 6px 0 0; border-bottom: 1px solid #444; }
@@ -199,9 +216,13 @@ const SORT_MODES = {
 };
 const SORT_KEY = "comfy.PromptLibrary.sort";
 
+// Cache-buster shared across the page. Bumped on websocket update events;
+// keeps the same value across re-renders so the browser can cache thumbnails
+// instead of re-downloading them every time the gallery refreshes.
+let _imageCacheKey = Date.now();
 function imageUrl(id) {
-  return api.apiURL ? api.apiURL(`/prompt_library/image/${id}?t=${Date.now()}`)
-                    : `/prompt_library/image/${id}?t=${Date.now()}`;
+  const path = `/prompt_library/image/${id}?v=${_imageCacheKey}`;
+  return api.apiURL ? api.apiURL(path) : path;
 }
 
 let _modalStack = 0;
@@ -229,12 +250,23 @@ function openPromptModal({ existing, onSave, onDelete }) {
   nameLabel.appendChild(nameInput);
 
   const tagsLabel = document.createElement("label");
-  tagsLabel.textContent = "Tags (comma-separated)";
+  tagsLabel.textContent = "Tags (comma-separated; supports category:value)";
   const tagsInput = document.createElement("input");
   tagsInput.type = "text";
   tagsInput.value = (existing?.tags || []).join(", ");
-  tagsInput.placeholder = "character, fantasy, sci-fi";
-  tagsLabel.appendChild(tagsInput);
+  tagsInput.placeholder = "character, style:cyberpunk, model:anima";
+  // Datalist suggests existing tags as the user types — populated lazily.
+  const tagsDataList = document.createElement("datalist");
+  tagsDataList.id = `pl-tags-${Math.random().toString(36).slice(2, 9)}`;
+  tagsInput.setAttribute("list", tagsDataList.id);
+  tagsLabel.append(tagsInput, tagsDataList);
+  api.fetchApi("/prompt_library/tags").then(r => r.json()).then(d => {
+    for (const t of d.tags || []) {
+      const opt = document.createElement("option");
+      opt.value = t;
+      tagsDataList.appendChild(opt);
+    }
+  }).catch(() => {});
 
   const idLabel = document.createElement("label");
   idLabel.textContent = existing ? "ID (read-only)" : "ID (optional — auto from name)";
@@ -517,13 +549,26 @@ function buildGallery(node, idWidget) {
 
   const toolbar = document.createElement("div");
   toolbar.className = "pl-toolbar";
+
+  const searchWrap = document.createElement("div");
+  searchWrap.className = "pl-search-wrap";
   const filter = document.createElement("input");
   filter.type = "text";
   filter.placeholder = "search name, text, tags...";
-  // Stop key events bubbling to LiteGraph (otherwise typing triggers canvas shortcuts).
   for (const ev of ["keydown", "keyup", "keypress"]) {
     filter.addEventListener(ev, (e) => e.stopPropagation());
   }
+  const clearBtn = document.createElement("button");
+  clearBtn.type = "button";
+  clearBtn.className = "pl-search-clear";
+  clearBtn.textContent = "×";
+  clearBtn.title = "Clear search";
+  clearBtn.style.display = "none";
+  clearBtn.onclick = () => { filter.value = ""; clearBtn.style.display = "none"; render(); };
+  filter.addEventListener("input", () => {
+    clearBtn.style.display = filter.value ? "block" : "none";
+  });
+  searchWrap.append(filter, clearBtn);
   const modelSelect = document.createElement("select");
   modelSelect.title = "Filter by model (model:* tags)";
   // populated in render() once we know the data
@@ -556,7 +601,27 @@ function buildGallery(node, idWidget) {
   const refreshBtn = document.createElement("button");
   refreshBtn.className = "pl-btn";
   refreshBtn.textContent = "Refresh";
-  toolbar.append(filter, modelSelect, sortSelect, importBtn, exportBtn, refreshBtn, fileInput);
+
+  const SIZE_KEY = "comfy.PromptLibrary.tileSize";
+  const sizeWrap = document.createElement("div");
+  sizeWrap.className = "pl-tile-size";
+  const sizeInput = document.createElement("input");
+  sizeInput.type = "range";
+  sizeInput.min = "60";
+  sizeInput.max = "200";
+  sizeInput.step = "8";
+  sizeInput.value = localStorage.getItem(SIZE_KEY) || "96";
+  sizeInput.title = "Tile size";
+  const applySize = () => {
+    container.style.setProperty("--pl-tile-size", `${sizeInput.value}px`);
+  };
+  sizeInput.oninput = () => {
+    applySize();
+    localStorage.setItem(SIZE_KEY, sizeInput.value);
+  };
+  sizeWrap.appendChild(sizeInput);
+
+  toolbar.append(searchWrap, modelSelect, sortSelect, sizeWrap, importBtn, exportBtn, refreshBtn, fileInput);
 
   const tagsRow = document.createElement("div");
   tagsRow.className = "pl-tags-row";
@@ -678,6 +743,28 @@ function buildGallery(node, idWidget) {
     const mode = SORT_MODES[sortSelect.value] || SORT_MODES.name_asc;
     visible = [...visible].sort(mode.cmp);
     lastVisible = visible;
+
+    if (prompts.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "pl-empty-state";
+      const head = document.createElement("strong");
+      head.textContent = "No prompts yet";
+      empty.appendChild(head);
+      empty.appendChild(document.createTextNode(
+        "Click the + tile to add one, or use Import to seed the library from a CSV/ZIP."
+      ));
+      grid.appendChild(empty);
+    } else if (visible.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "pl-empty-state";
+      const head = document.createElement("strong");
+      head.textContent = "No matches";
+      empty.appendChild(head);
+      empty.appendChild(document.createTextNode(
+        "Clear the search/filter or pick a different model."
+      ));
+      grid.appendChild(empty);
+    }
     for (const p of visible) {
       const tile = document.createElement("div");
       tile.className = "pl-tile" + (p.id === idWidget.value ? " selected" : "");
@@ -686,6 +773,12 @@ function buildGallery(node, idWidget) {
         const img = document.createElement("img");
         img.src = imageUrl(p.id);
         img.loading = "lazy";
+        img.alt = p.name;
+        img.onerror = () => {
+          // Replace broken image with a placeholder on load failure.
+          img.replaceWith(Object.assign(document.createElement("div"),
+            { className: "pl-placeholder", textContent: "?" }));
+        };
         tile.appendChild(img);
       } else {
         const ph = document.createElement("div");
@@ -749,8 +842,9 @@ function buildGallery(node, idWidget) {
     }
   };
 
-  filter.oninput = render;
+  filter.addEventListener("input", render);
   refreshBtn.onclick = refresh;
+  applySize();
   sortSelect.onchange = () => {
     localStorage.setItem(SORT_KEY, sortSelect.value);
     render();
@@ -820,6 +914,7 @@ function installWebsocketBridge() {
   if (_wsListenerInstalled) return;
   _wsListenerInstalled = true;
   api.addEventListener("prompt_library.updated", () => {
+    _imageCacheKey = Date.now();  // bust thumbnail cache on any change
     window.dispatchEvent(new CustomEvent("prompt-library-updated"));
   });
 }
