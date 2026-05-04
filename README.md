@@ -8,10 +8,15 @@ Four nodes, one shared library, no third-party dependencies.
 
 ## Install
 
+> **Get it from one of these — don't grab the unversioned `Code → Download ZIP` button or random commits.**
+> - **ComfyUI-Manager** — easiest. Search *GrimmRibbity* (or *Ribbity — Prompt Library*) and install. Manager always pulls the latest tagged release.
+> - **GitHub Releases** — [latest release](https://github.com/Deaththegrim/ComfyUI-PromptLibrary/releases/latest). Use the *Source code (zip)* asset, not random older versions.
+> - **git clone** — see below; tracks `main`, which is the same as the latest tag.
+
 ### Comfy Portable (Windows)
 
-1. Download the latest [release zip](https://github.com/Deaththegrim/ComfyUI-PromptLibrary/releases/latest).
-2. Extract into `ComfyUI_windows_portable\ComfyUI\custom_nodes\` so the path becomes `…\custom_nodes\ComfyUI-GrimmRibbity\__init__.py`.
+1. Download the *Source code (zip)* asset from the [latest release](https://github.com/Deaththegrim/ComfyUI-PromptLibrary/releases/latest).
+2. Extract into `ComfyUI_windows_portable\ComfyUI\custom_nodes\`. The zip extracts as `ComfyUI-PromptLibrary-<version>\` — **rename it to `ComfyUI-GrimmRibbity`** so the path becomes `…\custom_nodes\ComfyUI-GrimmRibbity\__init__.py`.
 3. Restart ComfyUI.
 
 ### Linux / Mac (git clone)
@@ -21,6 +26,8 @@ cd ComfyUI/custom_nodes
 git clone https://github.com/Deaththegrim/ComfyUI-PromptLibrary ComfyUI-GrimmRibbity
 # restart ComfyUI
 ```
+
+The `ComfyUI-GrimmRibbity` argument at the end is the local folder name — keep it as shown.
 
 To update later:
 ```sh
@@ -44,11 +51,13 @@ After install, find them in the node menu under **utils/**:
 
 The Library node embeds a full gallery in the node body:
 
-- Click a thumbnail to select it as the prompt output. Click again to deselect.
-- Right-click for **Edit / Duplicate / Export this / Delete**.
-- Hover a tile and click the corner checkbox to multi-select. Shift-click extends the range; Ctrl/Cmd-click toggles individuals. With one or more selected, the bulk bar appears with **Tag / Export / Delete**.
+- Click a thumbnail to toggle it in the selection. The output is the **joined text** of every selected entry, separated by the node's `separator` input (default `, `).
+- Shift-click range-extends the selection from the last-clicked tile.
+- The same selection drives the bulk bar at the top — with one or more selected you get **Tag / Export / Delete**.
+- Right-click a tile for **Edit / Duplicate / Export this / Delete**.
+- Toolbar **▦ / ≡** switches between thumbnail grid and single-column list view (the list is good for dense libraries — 56 px thumb on the left, full name on the right).
 - Drag-and-drop tiles to reorder when sort mode is **Manual**.
-- Keyboard: arrow keys move focus, **Enter** selects, **Delete** removes, **/** focuses search, **Esc** clears the bulk selection.
+- Keyboard: arrow keys move focus, **Enter** toggles selection on the focused tile, **Delete** removes, **/** focuses search, **Esc** clears the selection.
 
 ### Toolbar
 
