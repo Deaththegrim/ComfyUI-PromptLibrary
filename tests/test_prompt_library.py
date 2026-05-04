@@ -365,18 +365,18 @@ class PromptLibraryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             node.save(name="  ", text="x")
 
-    def test_save_node_with_thumbnail_writes_png(self):
+    def test_save_node_with_thumbnail_writes_jpg(self):
         try:
             import numpy  # noqa: F401
             from PIL import Image  # noqa: F401
         except ImportError:
             self.skipTest("PIL/numpy not available")
         node = self.mod.PromptLibrarySave()
-        img = self._fake_image()
+        img = self._fake_image()  # 3-channel RGB -> saved as JPEG by the resizer
         _, pid = node.save(name="ThumbTest", text="t", thumbnail=img)
         path = self.mod._image_path_for(pid)
         self.assertIsNotNone(path)
-        self.assertEqual(path.suffix, ".png")
+        self.assertEqual(path.suffix, ".jpg")
         self.assertGreater(path.stat().st_size, 0)
 
     def test_save_node_updates_existing_by_id(self):
