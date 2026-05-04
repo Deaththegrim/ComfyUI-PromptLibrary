@@ -277,7 +277,86 @@ class PromptLibraryTests(unittest.TestCase):
 
     def test_node_class_mappings_exposed(self):
         self.assertIn("PromptLibrary", self.mod.NODE_CLASS_MAPPINGS)
+        self.assertIn("PromptLibrarySave", self.mod.NODE_CLASS_MAPPINGS)
         self.assertEqual(self.mod.WEB_DIRECTORY, "./web")
+
+    def test_version_exposed(self):
+        self.assertRegex(self.mod.__version__, r"^\d+\.\d+\.\d+$")
+
+    # ---- save node ------------------------------------------------------
+
+    def _fake_image(self, h=4, w=4):
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy not available")
+        return np.full((1, h, w, 3), 0.5, dtype=np.float32)
+
+    def test_save_node_input_shape(self):
+        spec = self.mod.PromptLibrarySave.INPUT_TYPES()
+        self.assertIn("name", spec["required"])
+        self.assertIn("text", spec["required"])
+        self.assertIn("thumbnail", spec["optional"])
+        self.assertEqual(self.mod.PromptLibrarySave.RETURN_TYPES, ("STRING", "STRING"))
+        self.assertTrue(self.mod.PromptLibrarySave.OUTPUT_NODE)
+
+    def test_save_node_creates_entry(self):
+        node = self.mod.PromptLibrarySave()
+        text, pid = node.save(name="From Workflow", text="generated prompt")
+        self.assertTrue(pid)
+        self.assertEqual(text, "generated prompt")
+        items = self.mod._load()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["name"], "From Workflow")
+        self.assertEqual(items[0]["text"], "generated prompt")
+
+    def test_save_node_requires_name(self):
+        node = self.mod.PromptLibrarySave()
+        with self.assertRaises(ValueError):
+            node.save(name="  ", text="x")
+
+    def test_save_node_with_thumbnail_writes_png(self):
+        try:
+            import numpy  # noqa: F401
+            from PIL import Image  # noqa: F401
+        except ImportError:
+            self.skipTest("PIL/numpy not available")
+        node = self.mod.PromptLibrarySave()
+        img = self._fake_image()
+        _, pid = node.save(name="ThumbTest", text="t", thumbnail=img)
+        path = self.mod._image_path_for(pid)
+        self.assertIsNotNone(path)
+        self.assertEqual(path.suffix, ".png")
+        self.assertGreater(path.stat().st_size, 0)
+
+    def test_save_node_updates_existing_by_id(self):
+        node = self.mod.PromptLibrarySave()
+        _, pid = node.save(name="A", text="v1")
+        _, pid2 = node.save(name="A", text="v2", prompt_id=pid)
+        self.assertEqual(pid, pid2)
+        items = self.mod._load()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["text"], "v2")
+
+    def test_save_node_overwrite_by_name_replaces(self):
+        node = self.mod.PromptLibrarySave()
+        node.save(name="Same Name", text="v1")
+        node.save(name="Same Name", text="v2", overwrite_by_name=True)
+        items = self.mod._load()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["text"], "v2")
+
+    def test_save_node_no_overwrite_creates_second_entry(self):
+        node = self.mod.PromptLibrarySave()
+        node.save(name="Same Name", text="v1")
+        node.save(name="Same Name", text="v2")  # overwrite_by_name defaults to False
+        items = self.mod._load()
+        self.assertEqual(len(items), 2)
+
+    def test_save_node_rejects_invalid_prompt_id(self):
+        node = self.mod.PromptLibrarySave()
+        with self.assertRaises(ValueError):
+            node.save(name="X", text="t", prompt_id="../etc")
 
 
 if __name__ == "__main__":

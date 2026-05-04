@@ -63,6 +63,43 @@ def _delete_image_files(prompt_id: str) -> None:
                 pass
 
 
+def _save_image_tensor(prompt_id: str, image) -> bool:
+    """Save the first frame of a ComfyUI IMAGE batch as PNG. Returns True on success."""
+    if image is None:
+        return False
+    try:
+        import numpy as np
+        from PIL import Image
+    except ImportError as e:
+        print(f"[PromptLibrary] PIL/numpy unavailable, can't save thumbnail: {e}")
+        return False
+    try:
+        frame = image[0]
+        if hasattr(frame, "cpu"):
+            frame = frame.cpu().numpy()
+        arr = (frame.clip(0, 1) * 255).astype(np.uint8)
+        if arr.ndim == 2:
+            pil = Image.fromarray(arr, mode="L")
+        elif arr.shape[-1] == 4:
+            pil = Image.fromarray(arr, mode="RGBA")
+        else:
+            pil = Image.fromarray(arr[..., :3], mode="RGB")
+        _delete_image_files(prompt_id)
+        pil.save(IMAGES_DIR / f"{prompt_id}.png", format="PNG")
+        return True
+    except Exception as e:
+        print(f"[PromptLibrary] failed to save thumbnail for {prompt_id!r}: {e}")
+        return False
+
+
+def _notify_change() -> None:
+    """Push a websocket event so any open gallery widgets can refresh themselves."""
+    try:
+        PromptServer.instance.send_sync("prompt_library.updated", {})
+    except Exception:
+        pass
+
+
 class PromptLibrary:
     @classmethod
     def INPUT_TYPES(cls):
@@ -93,6 +130,69 @@ class PromptLibrary:
         if prompt_id:
             print(f"[PromptLibrary] no prompt with id={prompt_id!r}; returning empty string")
         return ("",)
+
+
+class PromptLibrarySave:
+    """Save a prompt to the library when the workflow runs.
+
+    Wire any STRING source into `text`, an IMAGE source into `thumbnail` (optional),
+    type the name as a widget. On Queue, the entry is appended/updated and the
+    open gallery widgets refresh automatically.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "name": ("STRING", {"default": "", "multiline": False}),
+                "text": ("STRING", {"default": "", "multiline": True}),
+            },
+            "optional": {
+                "thumbnail": ("IMAGE",),
+                "prompt_id": ("STRING", {"default": "", "multiline": False}),
+                "overwrite_by_name": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("text", "id")
+    FUNCTION = "save"
+    CATEGORY = "utils"
+    OUTPUT_NODE = True
+
+    def save(self, name, text, thumbnail=None, prompt_id="", overwrite_by_name=False):
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("PromptLibrarySave: name is required")
+        prompt_id = (prompt_id or "").strip()
+        if prompt_id and not _safe_id(prompt_id):
+            raise ValueError(f"PromptLibrarySave: invalid prompt_id {prompt_id!r}")
+
+        with _lock:
+            items = _load()
+            existing = None
+            if prompt_id:
+                existing = next((i for i in items if i.get("id") == prompt_id), None)
+            elif overwrite_by_name:
+                existing = next((i for i in items if i.get("name") == name), None)
+
+            if existing is None:
+                pid = prompt_id or uuid.uuid4().hex[:12]
+                existing = {"id": pid}
+                items.append(existing)
+
+            existing["name"] = name
+            existing["text"] = text or ""
+
+            if thumbnail is not None:
+                _save_image_tensor(existing["id"], thumbnail)
+
+            _save(items)
+            saved_id = existing["id"]
+
+        _notify_change()
+        print(f"[PromptLibrary] saved id={saved_id!r} name={name!r}")
+        return (text or "", saved_id)
 
 
 routes = PromptServer.instance.routes
@@ -165,6 +265,7 @@ async def upsert_prompt(request):
 
         _save(items)
 
+    _notify_change()
     return web.json_response({
         "id": pid,
         "name": name,
@@ -183,10 +284,19 @@ async def delete_prompt(request):
         items = [i for i in _load() if i.get("id") != pid]
         _save(items)
         _delete_image_files(pid)
+    _notify_change()
     return web.json_response({"ok": True})
 
 
-NODE_CLASS_MAPPINGS = {"PromptLibrary": PromptLibrary}
-NODE_DISPLAY_NAME_MAPPINGS = {"PromptLibrary": "Prompt Library"}
+__version__ = "0.2.0"
+
+NODE_CLASS_MAPPINGS = {
+    "PromptLibrary": PromptLibrary,
+    "PromptLibrarySave": PromptLibrarySave,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "PromptLibrary": "Prompt Library",
+    "PromptLibrarySave": "Prompt Library — Save",
+}
 WEB_DIRECTORY = "./web"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]

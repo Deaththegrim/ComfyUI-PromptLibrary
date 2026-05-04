@@ -392,6 +392,13 @@ function buildGallery(node, idWidget) {
   filter.oninput = render;
   refreshBtn.onclick = refresh;
 
+  // Refresh whenever any save/delete fires server-side (incl. the Save node).
+  const onExternal = () => refresh();
+  window.addEventListener("prompt-library-updated", onExternal);
+  container._promptLibraryCleanup = () => {
+    window.removeEventListener("prompt-library-updated", onExternal);
+  };
+
   grid.replaceChildren(Object.assign(document.createElement("div"), {
     className: "pl-status", textContent: "loading...",
   }));
@@ -400,8 +407,20 @@ function buildGallery(node, idWidget) {
   return { container, refresh, render };
 }
 
+let _wsListenerInstalled = false;
+function installWebsocketBridge() {
+  if (_wsListenerInstalled) return;
+  _wsListenerInstalled = true;
+  api.addEventListener("prompt_library.updated", () => {
+    window.dispatchEvent(new CustomEvent("prompt-library-updated"));
+  });
+}
+
 app.registerExtension({
   name: "comfy.PromptLibrary",
+  async setup() {
+    installWebsocketBridge();
+  },
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== NODE_NAME) return;
     injectStyle();
