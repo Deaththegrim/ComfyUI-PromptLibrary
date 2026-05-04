@@ -206,9 +206,55 @@ _LORA_LOADER_TYPES = {
 # rgthree's Power Lora Loader stores any number of LoRAs as `lora_1`, `lora_2`,
 # … inputs whose values are dicts: {on, lora, strength, strengthTwo?}.
 _RGTHREE_POWER_LORA_TYPE = "Power Lora Loader (rgthree)"
-_KSAMPLER_TYPES = {"KSampler", "KSamplerAdvanced", "SamplerCustom",
-                   "SamplerCustomAdvanced", "KSampler (Efficient)"}
-_TEXT_ENCODE_TYPES = {"CLIPTextEncode", "CLIPTextEncodeSDXL", "BNK_CLIPTextEncodeAdvanced"}
+# rgthree's Lora Loader Stack uses fixed slots `lora_01`/`strength_01` …
+# `lora_04`/`strength_04`. Skipped when the value is "None".
+_RGTHREE_LORA_STACK_TYPE = "Lora Loader Stack (rgthree)"
+_KSAMPLER_TYPES = {
+    "KSampler", "KSamplerAdvanced",
+    "SamplerCustom", "SamplerCustomAdvanced",
+    "KSampler (Efficient)",
+    "KSampler SDXL (Eff.)",
+    "KSampler Adv. (Efficient)",
+    # ComfyUI-Easy-Use samplers — they take a `pipe` instead of model/positive/
+    # negative; pipe traces back to an easy* loader that holds the prompts.
+    "easy fullkSampler", "easy kSampler", "easy kSamplerCustom",
+    "easy kSamplerTiled", "easy kSamplerInpainting",
+    "easy kSamplerDownscaleUnet", "easy kSamplerSDTurbo",
+    "easy unSampler",
+}
+# The set above that uses a `pipe` input rather than direct model/pos/neg links.
+_EASY_PIPE_SAMPLER_TYPES = {
+    "easy fullkSampler", "easy kSampler", "easy kSamplerCustom",
+    "easy kSamplerTiled", "easy kSamplerInpainting",
+    "easy kSamplerDownscaleUnet", "easy kSamplerSDTurbo",
+    "easy unSampler",
+}
+# Easy-Use loaders bundle ckpt_name, lora_name, positive, negative as direct
+# inputs and emit a `pipe`. The samplers above read everything via that pipe.
+_EASY_PIPE_LOADER_TYPES = {
+    "easy fullLoader", "easy a1111Loader", "easy comfyLoader",
+    "easy fluxLoader", "easy hunyuanDiTLoader", "easy pixArtLoader",
+    "easy cascadeLoader", "easy kolorsLoader", "easy mochiLoader",
+}
+_TEXT_ENCODE_TYPES = {
+    "CLIPTextEncode", "CLIPTextEncodeSDXL",
+    "BNK_CLIPTextEncodeAdvanced",
+    "ImpactWildcardEncode",  # Impact Pack — has populated_text + wildcard_text
+}
+# Passthrough nodes whose `model` input chains back toward the loader. We walk
+# straight through them when looking for the checkpoint, ignoring the node's
+# own params. Helpful for things like ModelSamplingDiscrete or wildcard
+# encoders that pass MODEL through unchanged.
+_MODEL_PASSTHROUGH_TYPES = {
+    "ImpactWildcardEncode",
+    "ModelSamplingDiscrete", "ModelSamplingSD3", "ModelSamplingFlux",
+    "ModelSamplingStableCascade", "ModelSamplingAuraFlow",
+    "FreeU", "FreeU_V2", "PerturbedAttentionGuidance",
+    "RescaleCFG", "PerpNeg",
+}
+# `Pack SDXL Tuple` (Efficiency Nodes) packs base_model/base_positive/base_negative
+# into a single tuple. The SDXL Eff. sampler reads them via `sdxl_tuple`.
+_SDXL_TUPLE_PACK_TYPE = "Pack SDXL Tuple"
 
 
 def _link_source(value):
@@ -216,6 +262,27 @@ def _link_source(value):
     if isinstance(value, list) and len(value) == 2 and isinstance(value[0], (str, int)):
         return str(value[0])
     return None
+
+
+def _resolve_sampler_links(prompt: dict, sampler_node: dict) -> tuple:
+    """Return (model_link, positive_link, negative_link) for a sampler, hopping
+    through `Pack SDXL Tuple` when an Efficiency-Nodes SDXL sampler routes
+    everything through `sdxl_tuple`."""
+    inputs = sampler_node.get("inputs") or {}
+    model_link = inputs.get("model")
+    pos_link = inputs.get("positive")
+    neg_link = inputs.get("negative")
+    if model_link is not None or pos_link is not None or neg_link is not None:
+        return model_link, pos_link, neg_link
+    tuple_src = _link_source(inputs.get("sdxl_tuple"))
+    if tuple_src and tuple_src in prompt:
+        pack = prompt[tuple_src]
+        if (pack or {}).get("class_type") == _SDXL_TUPLE_PACK_TYPE:
+            p_in = pack.get("inputs") or {}
+            return (p_in.get("base_model"),
+                    p_in.get("base_positive"),
+                    p_in.get("base_negative"))
+    return model_link, pos_link, neg_link
 
 
 def _walk_model_chain(prompt: dict, start_node_id: str | None):
@@ -244,6 +311,28 @@ def _walk_model_chain(prompt: dict, start_node_id: str | None):
                 strength = 1.0
             if isinstance(lname, str) and lname:
                 loras.append((lname, strength))
+            current = _link_source(inputs.get("model"))
+            continue
+
+        if ctype == _RGTHREE_LORA_STACK_TYPE:
+            # Fixed 4-slot stack: lora_01..lora_04 + strength_01..strength_04.
+            # Apply order is 01 -> 04, so collect in reverse for the outer
+            # `reversed()` to flip back into application order.
+            slot_loras: list[tuple[str, float]] = []
+            for i in range(1, 5):
+                lname = inputs.get(f"lora_0{i}") or inputs.get(f"lora_{i:02d}")
+                if not isinstance(lname, str) or lname in (None, "None", ""):
+                    continue
+                strength_raw = inputs.get(f"strength_0{i}", inputs.get(f"strength_{i:02d}", 1.0))
+                try:
+                    strength = float(strength_raw)
+                except (TypeError, ValueError):
+                    strength = 1.0
+                if strength == 0:
+                    continue
+                slot_loras.append((lname, strength))
+            for entry in reversed(slot_loras):
+                loras.append(entry)
             current = _link_source(inputs.get("model"))
             continue
 
@@ -284,37 +373,157 @@ def _walk_model_chain(prompt: dict, start_node_id: str | None):
                 return f"{folder}{_PREFIX_SEP}{mname}", list(reversed(loras))
             return None, list(reversed(loras))
 
-        # Unknown node in the chain — try its `model` input if it has one.
+        if ctype == _SDXL_TUPLE_PACK_TYPE:
+            current = _link_source(inputs.get("base_model"))
+            continue
+
+        if ctype in _MODEL_PASSTHROUGH_TYPES:
+            current = _link_source(inputs.get("model"))
+            continue
+
+        # Unknown node — give the `model` input one last try (covers most
+        # third-party passthroughs we haven't catalogued).
         current = _link_source(inputs.get("model"))
     return None, list(reversed(loras))
 
 
 def _resolve_text_link(prompt: dict, link_value, depth: int = 0) -> str:
-    """Follow a CLIPTextEncode link and return its `text` input. Tolerates one
-    level of indirection (e.g. a primitive Text node feeding the encoder)."""
+    """Follow a CLIPTextEncode (or wildcard / Searge text node) link and
+    return the prompt text. Tolerates a few levels of indirection — primitive
+    Text nodes feeding encoders, Searge prompt nodes, etc.
+    """
     if depth > 4:
         return ""
     src = _link_source(link_value)
     if not src or src not in prompt:
         return ""
     node = prompt[src] or {}
+    ctype = node.get("class_type") or ""
     inputs = node.get("inputs") or {}
-    if node.get("class_type") in _TEXT_ENCODE_TYPES:
-        text = inputs.get("text")
-        if isinstance(text, str):
-            return text
-        if isinstance(text, list):
-            return _resolve_text_link(prompt, text, depth + 1)
-    # Plain string-output node — most have a `text` or `string` field.
-    for key in ("text", "string", "value"):
+
+    # Impact's wildcard encoder fills `populated_text` with the resolved
+    # output (after wildcard substitution); fall back to the template if
+    # populated_text is empty (workflow saved before first run).
+    if ctype == "ImpactWildcardEncode":
+        for key in ("populated_text", "wildcard_text"):
+            v = inputs.get(key)
+            if isinstance(v, str) and v.strip():
+                return v
+            if isinstance(v, list):
+                resolved = _resolve_text_link(prompt, v, depth + 1)
+                if resolved:
+                    return resolved
+
+    # pythongosssss/comfyui-custom-scripts StringFunction concatenates or
+    # replaces — preserve the result by joining text_a/b/c on the action.
+    if ctype == "StringFunction|pysssss":
+        action = inputs.get("action", "append")
+        parts = []
+        for key in ("text_a", "text_b", "text_c"):
+            v = inputs.get(key)
+            if isinstance(v, str) and v.strip():
+                parts.append(v)
+            elif isinstance(v, list):
+                resolved = _resolve_text_link(prompt, v, depth + 1)
+                if resolved:
+                    parts.append(resolved)
+        if not parts:
+            return ""
+        if action == "replace" and len(parts) >= 1:
+            # Best-effort: emit the source text; the substitution semantics
+            # need runtime evaluation to reproduce exactly.
+            return parts[0]
+        return ", ".join(parts)
+
+    if ctype in _TEXT_ENCODE_TYPES:
+        for key in ("text", "text_g", "text_l"):
+            v = inputs.get(key)
+            if isinstance(v, str) and v.strip():
+                return v
+            if isinstance(v, list):
+                resolved = _resolve_text_link(prompt, v, depth + 1)
+                if resolved:
+                    return resolved
+
+    # Generic string-output nodes — Searge uses `prompt`, others use `text`/
+    # `string`/`value`. Try all.
+    for key in ("text", "prompt", "string", "value", "wildcard_text"):
         v = inputs.get(key)
-        if isinstance(v, str):
+        if isinstance(v, str) and v.strip():
             return v
+        if isinstance(v, list):
+            resolved = _resolve_text_link(prompt, v, depth + 1)
+            if resolved:
+                return resolved
     return ""
 
 
 _SAMPLER_PARAM_KEYS = ("seed", "steps", "cfg", "sampler_name", "scheduler",
                         "noise_seed")
+
+
+def _trace_pipe_to_loader(prompt: dict, pipe_link, depth: int = 0):
+    """Follow a `pipe` link back to the originating Easy-Use loader. Easy-Use
+    samplers may chain through intermediate pipe-routing nodes (e.g. branch,
+    edit), all of which expose a `pipe` input pointing upstream."""
+    if depth > 8:
+        return None
+    src = _link_source(pipe_link)
+    if not src or src not in prompt:
+        return None
+    node = prompt[src] or {}
+    if (node.get("class_type") or "") in _EASY_PIPE_LOADER_TYPES:
+        return node
+    inputs = node.get("inputs") or {}
+    return _trace_pipe_to_loader(prompt, inputs.get("pipe"), depth + 1)
+
+
+def _populate_from_easy_loader(out: dict, prompt: dict, loader: dict) -> None:
+    inputs = loader.get("inputs") or {}
+    ckpt = inputs.get("ckpt_name")
+    if isinstance(ckpt, str) and ckpt and ckpt != "None":
+        out["model_label"] = f"checkpoints{_PREFIX_SEP}{ckpt}"
+
+    loras: list[tuple[str, float]] = []
+    lname = inputs.get("lora_name")
+    if isinstance(lname, str) and lname not in (None, "None", ""):
+        try:
+            strength = float(inputs.get("lora_model_strength", 1.0))
+        except (TypeError, ValueError):
+            strength = 1.0
+        if strength != 0:
+            loras.append((lname, strength))
+
+    # `optional_lora_stack` may chain through an `easy loraStack` or rgthree
+    # `Lora Loader Stack`; walk the same model-chain logic against that link
+    # to collect more.
+    stack_link = inputs.get("optional_lora_stack")
+    stack_src = _link_source(stack_link)
+    if stack_src:
+        # Reuse _walk_model_chain: it'll handle LoraLoader / LoraLoaderStack /
+        # PowerLoraLoader uniformly. The chain stops as soon as it can't find
+        # a `model` link, which is fine for STACK-typed nodes that don't
+        # forward a model.
+        _, stack_loras = _walk_model_chain(prompt, stack_src)
+        loras.extend(stack_loras)
+
+    if loras:
+        out["loras"] = loras
+
+    pos = inputs.get("positive")
+    if isinstance(pos, str) and pos.strip():
+        out["positive"] = pos
+    elif isinstance(pos, list):
+        resolved = _resolve_text_link(prompt, pos)
+        if resolved:
+            out["positive"] = resolved
+    neg = inputs.get("negative")
+    if isinstance(neg, str) and neg.strip():
+        out["negative"] = neg
+    elif isinstance(neg, list):
+        resolved = _resolve_text_link(prompt, neg)
+        if resolved:
+            out["negative"] = resolved
 
 
 def _find_primary_sampler(prompt: dict) -> tuple[str | None, dict | None]:
@@ -349,23 +558,29 @@ def extract_workflow_metadata(prompt: dict | None) -> dict:
 
     sampler_id, sampler = _find_primary_sampler(prompt)
     if sampler is not None:
+        ctype = sampler.get("class_type")
         s_in = sampler.get("inputs") or {}
         for key in _SAMPLER_PARAM_KEYS:
             if key in s_in and not isinstance(s_in[key], list):
                 out[key] = s_in[key]
-        # Walk the model chain back from this sampler.
-        model_label, loras = _walk_model_chain(prompt, _link_source(s_in.get("model")))
-        if model_label:
-            out["model_label"] = model_label
-        if loras:
-            out["loras"] = loras
-        # Resolve positive / negative prompt text via the linked encoders.
-        pos = _resolve_text_link(prompt, s_in.get("positive"))
-        neg = _resolve_text_link(prompt, s_in.get("negative"))
-        if pos:
-            out["positive"] = pos
-        if neg:
-            out["negative"] = neg
+
+        if ctype in _EASY_PIPE_SAMPLER_TYPES:
+            loader = _trace_pipe_to_loader(prompt, s_in.get("pipe"))
+            if loader is not None:
+                _populate_from_easy_loader(out, prompt, loader)
+        else:
+            model_link, pos_link, neg_link = _resolve_sampler_links(prompt, sampler)
+            model_label, loras = _walk_model_chain(prompt, _link_source(model_link))
+            if model_label:
+                out["model_label"] = model_label
+            if loras:
+                out["loras"] = loras
+            pos = _resolve_text_link(prompt, pos_link)
+            neg = _resolve_text_link(prompt, neg_link)
+            if pos:
+                out["positive"] = pos
+            if neg:
+                out["negative"] = neg
 
     # Fallback: if no sampler found, still try to find a model loader.
     if "model_label" not in out:

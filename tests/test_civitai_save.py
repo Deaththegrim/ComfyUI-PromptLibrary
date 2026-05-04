@@ -152,6 +152,131 @@ class WorkflowExtractionTests(unittest.TestCase):
         self.assertEqual(extract_workflow_metadata(None), {})
         self.assertEqual(extract_workflow_metadata({}), {})
 
+    def test_efficiency_sdxl_sampler_via_pack_tuple(self):
+        # The user's high-rez workflow shape: Eff. SDXL sampler reads model /
+        # positive / negative through `sdxl_tuple` -> Pack SDXL Tuple ->
+        # ImpactWildcardEncode -> PowerLoraLoader -> CheckpointLoaderSimple.
+        from civitai_save import extract_workflow_metadata
+        prompt = {
+            "2": {"class_type": "CheckpointLoaderSimple",
+                   "inputs": {"ckpt_name": "krakenNOIR_v3.safetensors"}},
+            "113": {"class_type": "Power Lora Loader (rgthree)", "inputs": {
+                "model": ["2", 0], "clip": ["2", 1],
+                "lora_1": {"on": True, "lora": "EldritchComicsXL1.2.safetensors",
+                           "strength": 0.5},
+                "lora_2": {"on": True, "lora": "InkArtXL_1.2.safetensors",
+                           "strength": 0.5},
+            }},
+            "56": {"class_type": "ImpactWildcardEncode", "inputs": {
+                "wildcard_text": "(Solo:1.2), __character__, ponytail",
+                "populated_text": "(Solo:1.2), brunette female, ponytail",
+                "model": ["113", 0], "clip": ["113", 1],
+            }},
+            "101": {"class_type": "CLIPTextEncode",
+                     "inputs": {"text": "bad anatomy", "clip": ["56", 1]}},
+            "189": {"class_type": "Pack SDXL Tuple", "inputs": {
+                "base_model": ["56", 0], "base_clip": ["56", 1],
+                "base_positive": ["56", 2], "base_negative": ["101", 0],
+            }},
+            "4": {"class_type": "KSampler SDXL (Eff.)", "inputs": {
+                "noise_seed": 311603508439804, "steps": 30, "cfg": 5.0,
+                "sampler_name": "dpmpp_2m", "scheduler": "karras",
+                "sdxl_tuple": ["189", 0],
+            }},
+        }
+        m = extract_workflow_metadata(prompt)
+        self.assertEqual(m["model_label"], "checkpoints::krakenNOIR_v3.safetensors")
+        self.assertEqual(m["loras"], [
+            ("EldritchComicsXL1.2.safetensors", 0.5),
+            ("InkArtXL_1.2.safetensors", 0.5),
+        ])
+        # populated_text wins over wildcard_text (resolved value).
+        self.assertEqual(m["positive"], "(Solo:1.2), brunette female, ponytail")
+        self.assertEqual(m["negative"], "bad anatomy")
+        self.assertEqual(m["seed"], 311603508439804)
+        self.assertEqual(m["steps"], 30)
+        self.assertEqual(m["sampler_name"], "dpmpp_2m")
+        self.assertEqual(m["scheduler"], "karras")
+
+    def test_rgthree_lora_loader_stack(self):
+        from civitai_save import extract_workflow_metadata
+        prompt = {
+            "1": {"class_type": "CheckpointLoaderSimple",
+                   "inputs": {"ckpt_name": "model.safetensors"}},
+            "2": {"class_type": "Lora Loader Stack (rgthree)", "inputs": {
+                "model": ["1", 0], "clip": ["1", 1],
+                "lora_01": "first.safetensors", "strength_01": 0.7,
+                "lora_02": "None", "strength_02": 1.0,
+                "lora_03": "third.safetensors", "strength_03": 0.5,
+                "lora_04": "fourth.safetensors", "strength_04": 0,
+            }},
+            "9": {"class_type": "KSampler",
+                   "inputs": {"model": ["2", 0]}},
+        }
+        m = extract_workflow_metadata(prompt)
+        # Slot 02 ("None") and slot 04 (zero strength) are skipped.
+        self.assertEqual(m["loras"],
+                          [("first.safetensors", 0.7), ("third.safetensors", 0.5)])
+
+    def test_easy_use_pipe_sampler_with_full_loader(self):
+        from civitai_save import extract_workflow_metadata
+        prompt = {
+            "1": {"class_type": "easy fullLoader", "inputs": {
+                "ckpt_name": "model.safetensors",
+                "lora_name": "detail.safetensors",
+                "lora_model_strength": 0.8, "lora_clip_strength": 0.8,
+                "positive": "masterpiece anime girl",
+                "negative": "low quality",
+            }},
+            "9": {"class_type": "easy fullkSampler", "inputs": {
+                "pipe": ["1", 0],
+                "seed": 12345, "steps": 25, "cfg": 6.5,
+                "sampler_name": "dpmpp_2m_sde", "scheduler": "karras",
+            }},
+        }
+        m = extract_workflow_metadata(prompt)
+        self.assertEqual(m["model_label"], "checkpoints::model.safetensors")
+        self.assertEqual(m["loras"], [("detail.safetensors", 0.8)])
+        self.assertEqual(m["positive"], "masterpiece anime girl")
+        self.assertEqual(m["negative"], "low quality")
+        self.assertEqual(m["seed"], 12345)
+        self.assertEqual(m["steps"], 25)
+        self.assertEqual(m["sampler_name"], "dpmpp_2m_sde")
+
+    def test_pysssss_string_function_concatenates(self):
+        from civitai_save import extract_workflow_metadata
+        prompt = {
+            "1": {"class_type": "CheckpointLoaderSimple",
+                   "inputs": {"ckpt_name": "m.safetensors"}},
+            "10": {"class_type": "StringFunction|pysssss", "inputs": {
+                "action": "append", "tidy_tags": "yes",
+                "text_a": "anime girl", "text_b": "blue hair", "text_c": "smile",
+            }},
+            "11": {"class_type": "CLIPTextEncode",
+                    "inputs": {"text": ["10", 0], "clip": ["1", 1]}},
+            "12": {"class_type": "CLIPTextEncode",
+                    "inputs": {"text": "bad", "clip": ["1", 1]}},
+            "9": {"class_type": "KSampler",
+                   "inputs": {"model": ["1", 0],
+                              "positive": ["11", 0], "negative": ["12", 0]}},
+        }
+        m = extract_workflow_metadata(prompt)
+        self.assertEqual(m["positive"], "anime girl, blue hair, smile")
+        self.assertEqual(m["negative"], "bad")
+
+    def test_passthrough_through_modelsamplingdiscrete(self):
+        from civitai_save import extract_workflow_metadata
+        prompt = {
+            "1": {"class_type": "CheckpointLoaderSimple",
+                   "inputs": {"ckpt_name": "model.safetensors"}},
+            "2": {"class_type": "ModelSamplingDiscrete",
+                   "inputs": {"sampling": "v_prediction", "model": ["1", 0]}},
+            "9": {"class_type": "KSampler",
+                   "inputs": {"model": ["2", 0]}},
+        }
+        m = extract_workflow_metadata(prompt)
+        self.assertEqual(m["model_label"], "checkpoints::model.safetensors")
+
 
 class HashCacheTests(unittest.TestCase):
     def test_signature_changes_with_mtime(self):
