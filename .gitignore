@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Local prompt library (user data, not source)
+data/prompts.json
+data/images/*
+!data/images/.gitkeep
+
+# Editor / OS junk
+.vscode/
+.idea/
+.DS_Store
