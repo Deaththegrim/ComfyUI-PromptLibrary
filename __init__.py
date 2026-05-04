@@ -66,6 +66,24 @@ def _unique_id(base: str, existing_ids: set[str]) -> str:
         n += 1
 
 
+def _parse_tags(value) -> list[str]:
+    """Accept a comma-separated string or a list; return cleaned, deduped, lowercased tags."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        parts = value
+    else:
+        return []
+    seen = []
+    for p in parts:
+        t = str(p).strip().lower()
+        if t and t not in seen:
+            seen.append(t)
+    return seen
+
+
 def _image_path_for(prompt_id: str) -> Path | None:
     for ext in _ALLOWED_IMAGE_EXT:
         p = IMAGES_DIR / f"{prompt_id}{ext}"
@@ -170,6 +188,7 @@ class PromptLibrarySave:
             },
             "optional": {
                 "thumbnail": ("IMAGE",),
+                "tags": ("STRING", {"default": "", "multiline": False}),
                 "prompt_id": ("STRING", {"default": "", "multiline": False}),
                 "overwrite_by_name": ("BOOLEAN", {"default": False}),
             },
@@ -181,13 +200,14 @@ class PromptLibrarySave:
     CATEGORY = "utils"
     OUTPUT_NODE = True
 
-    def save(self, name, text, thumbnail=None, prompt_id="", overwrite_by_name=False):
+    def save(self, name, text, thumbnail=None, tags="", prompt_id="", overwrite_by_name=False):
         name = (name or "").strip()
         if not name:
             raise ValueError("PromptLibrarySave: name is required")
         prompt_id = (prompt_id or "").strip()
         if prompt_id and not _safe_id(prompt_id):
             raise ValueError(f"PromptLibrarySave: invalid prompt_id {prompt_id!r}")
+        parsed_tags = _parse_tags(tags)
 
         with _lock:
             items = _load()
@@ -204,6 +224,7 @@ class PromptLibrarySave:
 
             existing["name"] = name
             existing["text"] = text or ""
+            existing["tags"] = parsed_tags
 
             if thumbnail is not None:
                 _save_image_tensor(existing["id"], thumbnail)
@@ -212,7 +233,7 @@ class PromptLibrarySave:
             saved_id = existing["id"]
 
         _notify_change()
-        print(f"[PromptLibrary] saved id={saved_id!r} name={name!r}")
+        print(f"[PromptLibrary] saved id={saved_id!r} name={name!r} tags={parsed_tags}")
         return (text or "", saved_id)
 
 
@@ -230,9 +251,21 @@ async def list_prompts(_request):
             "id": pid,
             "name": item.get("name", ""),
             "text": item.get("text", ""),
+            "tags": item.get("tags", []),
             "has_image": _image_path_for(pid) is not None,
         })
     return web.json_response({"prompts": out})
+
+
+@routes.get("/prompt_library/tags")
+async def list_tags(_request):
+    with _lock:
+        items = _load()
+    seen = set()
+    for item in items:
+        for t in item.get("tags", []) or []:
+            seen.add(str(t).strip().lower())
+    return web.json_response({"tags": sorted(t for t in seen if t)})
 
 
 @routes.get("/prompt_library/image/{prompt_id}")
@@ -252,6 +285,7 @@ async def upsert_prompt(request):
     pid = (reader.get("id") or "").strip()
     name = (reader.get("name") or "").strip()
     text = reader.get("text") or ""
+    tags = _parse_tags(reader.get("tags"))
     clear_image = (reader.get("clear_image") or "") == "1"
     image_field = reader.get("image")
 
@@ -270,6 +304,7 @@ async def upsert_prompt(request):
             items.append(existing)
         existing["name"] = name
         existing["text"] = text
+        existing["tags"] = tags
 
         if clear_image:
             _delete_image_files(pid)
@@ -291,6 +326,7 @@ async def upsert_prompt(request):
         "id": pid,
         "name": name,
         "text": text,
+        "tags": tags,
         "has_image": _image_path_for(pid) is not None,
     })
 
@@ -309,7 +345,7 @@ async def delete_prompt(request):
     return web.json_response({"ok": True})
 
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 NODE_CLASS_MAPPINGS = {
     "PromptLibrary": PromptLibrary,

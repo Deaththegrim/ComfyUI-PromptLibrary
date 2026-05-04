@@ -417,6 +417,50 @@ class PromptLibraryTests(unittest.TestCase):
         body = json.loads(asyncio.run(self.mod.upsert_prompt(req)).body)
         self.assertRegex(body["id"], r"^[a-f0-9]{12}$")
 
+    # ---- tags ----------------------------------------------------------
+
+    def test_parse_tags_string_normalizes(self):
+        self.assertEqual(self.mod._parse_tags("Character, Fantasy, character"),
+                         ["character", "fantasy"])
+
+    def test_parse_tags_list(self):
+        self.assertEqual(self.mod._parse_tags(["Sci-Fi", "Sci-Fi", "  noir "]),
+                         ["sci-fi", "noir"])
+
+    def test_parse_tags_none_or_empty(self):
+        self.assertEqual(self.mod._parse_tags(None), [])
+        self.assertEqual(self.mod._parse_tags(""), [])
+        self.assertEqual(self.mod._parse_tags(",,, ,"), [])
+
+    def test_upsert_persists_tags(self):
+        req = FakeRequest(post_data={"name": "Knight", "text": "armor", "tags": "character, fantasy"})
+        body = json.loads(asyncio.run(self.mod.upsert_prompt(req)).body)
+        self.assertEqual(body["tags"], ["character", "fantasy"])
+        items = self.mod._load()
+        self.assertEqual(items[0]["tags"], ["character", "fantasy"])
+
+    def test_list_route_returns_tags(self):
+        req1 = FakeRequest(post_data={"name": "Knight", "text": "x", "tags": "character"})
+        asyncio.run(self.mod.upsert_prompt(req1))
+        resp = asyncio.run(self.mod.list_prompts(FakeRequest()))
+        body = json.loads(resp.body)
+        self.assertEqual(body["prompts"][0]["tags"], ["character"])
+
+    def test_tags_route_returns_unique_sorted(self):
+        for tags in ["fantasy, character", "character, sci-fi", "noir"]:
+            req = FakeRequest(post_data={"name": f"P_{tags}", "text": "x", "tags": tags})
+            asyncio.run(self.mod.upsert_prompt(req))
+        resp = asyncio.run(self.mod.list_tags(FakeRequest()))
+        body = json.loads(resp.body)
+        self.assertEqual(body["tags"], ["character", "fantasy", "noir", "sci-fi"])
+
+    def test_save_node_persists_tags(self):
+        node = self.mod.PromptLibrarySave()
+        _, pid = node.save(name="Wizard", text="staff", tags="Character, Fantasy")
+        items = self.mod._load()
+        entry = next(i for i in items if i["id"] == pid)
+        self.assertEqual(entry["tags"], ["character", "fantasy"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

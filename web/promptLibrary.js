@@ -18,6 +18,12 @@ const CSS = `
 .pl-tile { position: relative; aspect-ratio: 1 / 1; background: #2a2a2a; border: 2px solid transparent;
   border-radius: 4px; cursor: pointer; overflow: hidden; }
 .pl-tile.selected { border-color: #6cf; }
+.pl-tags-row { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 2px 2px; }
+.pl-tag-chip { background: #2a2a2a; color: #ccc; border: 1px solid #444; padding: 2px 8px;
+  border-radius: 10px; font-size: 11px; cursor: pointer; user-select: none; }
+.pl-tag-chip:hover { background: #353535; }
+.pl-tag-chip.active { background: #2d5070; color: #fff; border-color: #6cf; }
+.pl-tag-chip.all { font-weight: bold; }
 .pl-tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .pl-tile .pl-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
   font-size: 22px; color: #666; }
@@ -70,11 +76,12 @@ function slugify(name) {
     .slice(0, 64);
 }
 
-async function upsert({ id, name, text, imageFile, clearImage }) {
+async function upsert({ id, name, text, tags, imageFile, clearImage }) {
   const body = new FormData();
   if (id) body.append("id", id);
   body.append("name", name);
   body.append("text", text);
+  if (tags !== undefined) body.append("tags", tags);
   if (clearImage) body.append("clear_image", "1");
   if (imageFile) body.append("image", imageFile, imageFile.name);
   const res = await api.fetchApi("/prompt_library/upsert", { method: "POST", body });
@@ -123,6 +130,14 @@ function openPromptModal({ existing, onSave, onDelete }) {
   nameInput.type = "text";
   nameInput.value = existing?.name || "";
   nameLabel.appendChild(nameInput);
+
+  const tagsLabel = document.createElement("label");
+  tagsLabel.textContent = "Tags (comma-separated)";
+  const tagsInput = document.createElement("input");
+  tagsInput.type = "text";
+  tagsInput.value = (existing?.tags || []).join(", ");
+  tagsInput.placeholder = "character, fantasy, sci-fi";
+  tagsLabel.appendChild(tagsInput);
 
   const idLabel = document.createElement("label");
   idLabel.textContent = existing ? "ID (read-only)" : "ID (optional — auto from name)";
@@ -235,6 +250,7 @@ function openPromptModal({ existing, onSave, onDelete }) {
         id: existing?.id || customId,
         name,
         text: textArea.value,
+        tags: tagsInput.value,
         imageFile: imgInput.files[0] || null,
         clearImage,
       });
@@ -264,7 +280,7 @@ function openPromptModal({ existing, onSave, onDelete }) {
   actions.appendChild(cancelBtn);
   actions.appendChild(saveBtn);
 
-  modal.append(header, nameLabel, idLabel, textLabel, imgLabel, status, actions);
+  modal.append(header, nameLabel, idLabel, tagsLabel, textLabel, imgLabel, status, actions);
 
   // Initial position: cascade modals so stacked windows don't overlap exactly.
   const offset = (_modalStack++ % 6) * 24;
@@ -332,17 +348,51 @@ function buildGallery(node, idWidget) {
   refreshBtn.textContent = "Refresh";
   toolbar.append(filter, refreshBtn);
 
+  const tagsRow = document.createElement("div");
+  tagsRow.className = "pl-tags-row";
+
   const grid = document.createElement("div");
   grid.className = "pl-grid";
 
-  container.append(toolbar, grid);
+  container.append(toolbar, tagsRow, grid);
 
   let prompts = [];
+  const activeTags = new Set();
+
+  const renderTags = () => {
+    const seen = new Set();
+    for (const p of prompts) for (const t of p.tags || []) seen.add(t);
+    const all = [...seen].sort();
+    tagsRow.replaceChildren();
+
+    const allChip = document.createElement("div");
+    allChip.className = "pl-tag-chip all" + (activeTags.size === 0 ? " active" : "");
+    allChip.textContent = "All";
+    allChip.onclick = () => { activeTags.clear(); render(); };
+    tagsRow.appendChild(allChip);
+
+    for (const tag of all) {
+      const chip = document.createElement("div");
+      chip.className = "pl-tag-chip" + (activeTags.has(tag) ? " active" : "");
+      chip.textContent = tag;
+      chip.onclick = () => {
+        if (activeTags.has(tag)) activeTags.delete(tag);
+        else activeTags.add(tag);
+        render();
+      };
+      tagsRow.appendChild(chip);
+    }
+  };
 
   const render = () => {
+    renderTags();
     grid.replaceChildren();
     const q = filter.value.trim().toLowerCase();
-    const visible = q ? prompts.filter(p => p.name.toLowerCase().includes(q)) : prompts;
+    let visible = prompts;
+    if (activeTags.size) {
+      visible = visible.filter(p => (p.tags || []).some(t => activeTags.has(t)));
+    }
+    if (q) visible = visible.filter(p => p.name.toLowerCase().includes(q));
     for (const p of visible) {
       const tile = document.createElement("div");
       tile.className = "pl-tile" + (p.id === idWidget.value ? " selected" : "");
