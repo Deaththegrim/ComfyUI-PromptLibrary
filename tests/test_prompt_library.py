@@ -542,6 +542,88 @@ class PromptLibraryTests(unittest.TestCase):
         self.assertEqual(body["added"], 1)
         self.assertEqual(self.mod._load()[0]["tags"], ["t1", "t2"])
 
+    # ---- versioning ----------------------------------------------------
+
+    def test_upsert_first_create_no_history(self):
+        req = FakeRequest(post_data={"name": "V", "text": "v1"})
+        body = json.loads(asyncio.run(self.mod.upsert_prompt(req)).body)
+        item = next(i for i in self.mod._load() if i["id"] == body["id"])
+        self.assertEqual(item.get("history", []), [])
+
+    def test_upsert_update_pushes_history(self):
+        req1 = FakeRequest(post_data={"name": "V", "text": "v1"})
+        body1 = json.loads(asyncio.run(self.mod.upsert_prompt(req1)).body)
+        pid = body1["id"]
+        req2 = FakeRequest(post_data={"id": pid, "name": "V", "text": "v2"})
+        asyncio.run(self.mod.upsert_prompt(req2))
+        item = next(i for i in self.mod._load() if i["id"] == pid)
+        self.assertEqual(len(item["history"]), 1)
+        self.assertEqual(item["history"][0]["text"], "v1")
+
+    def test_upsert_noop_doesnt_push_history(self):
+        req = FakeRequest(post_data={"name": "V", "text": "v1"})
+        body = json.loads(asyncio.run(self.mod.upsert_prompt(req)).body)
+        pid = body["id"]
+        # identical second call: no history bump
+        asyncio.run(self.mod.upsert_prompt(FakeRequest(post_data={"id": pid, "name": "V", "text": "v1"})))
+        item = next(i for i in self.mod._load() if i["id"] == pid)
+        self.assertEqual(len(item.get("history", [])), 0)
+
+    def test_history_caps_at_20(self):
+        item = {"id": "x", "name": "a", "text": "0", "tags": []}
+        for i in range(25):
+            item["text"] = str(i)
+            self.mod._push_history(item)
+        self.assertEqual(len(item["history"]), 20)
+        # Oldest 5 dropped: history should now start at "5"
+        self.assertEqual(item["history"][0]["text"], "5")
+        self.assertEqual(item["history"][-1]["text"], "24")
+
+    def test_history_route(self):
+        req1 = FakeRequest(post_data={"name": "V", "text": "v1"})
+        body = json.loads(asyncio.run(self.mod.upsert_prompt(req1)).body)
+        pid = body["id"]
+        asyncio.run(self.mod.upsert_prompt(FakeRequest(post_data={"id": pid, "name": "V", "text": "v2"})))
+        resp = asyncio.run(self.mod.get_history(FakeRequest(match_info={"prompt_id": pid})))
+        data = json.loads(resp.body)
+        self.assertEqual(len(data["history"]), 1)
+        self.assertEqual(data["history"][0]["text"], "v1")
+
+    def test_revert_applies_snapshot(self):
+        # Create v1, edit to v2, revert to v1.
+        req1 = FakeRequest(post_data={"name": "V", "text": "v1", "tags": "a"})
+        body = json.loads(asyncio.run(self.mod.upsert_prompt(req1)).body)
+        pid = body["id"]
+        asyncio.run(self.mod.upsert_prompt(FakeRequest(post_data={"id": pid, "name": "V2", "text": "v2", "tags": "b"})))
+        item_after_v2 = next(i for i in self.mod._load() if i["id"] == pid)
+        self.assertEqual(item_after_v2["text"], "v2")
+        snap_ts = item_after_v2["history"][0]["ts"]
+
+        resp = asyncio.run(self.mod.revert_prompt(FakeRequest(json_data={"id": pid, "ts": snap_ts})))
+        data = json.loads(resp.body)
+        self.assertEqual(data["text"], "v1")
+        self.assertEqual(data["name"], "V")
+        self.assertEqual(data["tags"], ["a"])
+
+        # Revert itself should be undoable: a new history entry should be there with v2.
+        item = next(i for i in self.mod._load() if i["id"] == pid)
+        self.assertGreaterEqual(len(item["history"]), 2)
+        self.assertEqual(item["history"][-1]["text"], "v2")
+
+    def test_revert_404_for_unknown_id(self):
+        resp = asyncio.run(self.mod.revert_prompt(FakeRequest(json_data={"id": "nope", "ts": 1.0})))
+        self.assertEqual(resp.status, 404)
+
+    def test_revert_404_for_unknown_ts(self):
+        req = FakeRequest(post_data={"name": "V", "text": "v1"})
+        body = json.loads(asyncio.run(self.mod.upsert_prompt(req)).body)
+        resp = asyncio.run(self.mod.revert_prompt(FakeRequest(json_data={"id": body["id"], "ts": 9999999})))
+        self.assertEqual(resp.status, 404)
+
+    def test_history_route_404_for_unknown_id(self):
+        resp = asyncio.run(self.mod.get_history(FakeRequest(match_info={"prompt_id": "nope"})))
+        self.assertEqual(resp.status, 404)
+
     # ---- watcher (smoke) -----------------------------------------------
 
     def test_watcher_thread_started(self):

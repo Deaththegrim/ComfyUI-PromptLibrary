@@ -57,6 +57,18 @@ const CSS = `
   background: #1c1c1c; border: 1px solid #444; border-radius: 3px; display: block; }
 .pl-status { font-size: 11px; color: #888; min-height: 14px; }
 .pl-status.error { color: #f88; }
+.pl-history { display: flex; flex-direction: column; gap: 6px; max-height: 240px;
+  overflow-y: auto; padding: 4px; background: #1c1c1c; border-radius: 4px;
+  margin-top: 4px; }
+.pl-history-empty { color: #666; font-size: 11px; padding: 6px; text-align: center; }
+.pl-history-row { display: grid; grid-template-columns: auto 1fr auto; gap: 6px;
+  align-items: start; padding: 6px; background: #2a2a2a; border-radius: 3px;
+  font-size: 11px; }
+.pl-history-ts { color: #888; white-space: nowrap; }
+.pl-history-body { color: #ccc; word-break: break-word; min-width: 0; }
+.pl-history-body strong { color: #fff; display: block; margin-bottom: 2px; }
+.pl-history-tags { color: #6cf; font-size: 10px; margin-top: 2px; }
+.pl-history-row button { font-size: 10px; padding: 2px 6px; }
 `;
 
 function injectStyle() {
@@ -115,6 +127,33 @@ async function importCsv(file) {
     throw new Error(err.error || `HTTP ${res.status}`);
   }
   return res.json();
+}
+
+async function fetchHistory(id) {
+  const res = await api.fetchApi(`/prompt_library/history/${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function revertPrompt(id, ts) {
+  const res = await api.fetchApi("/prompt_library/revert", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, ts }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+function relativeTime(ts) {
+  const sec = Math.max(0, Date.now() / 1000 - ts);
+  if (sec < 60) return `${Math.round(sec)}s ago`;
+  if (sec < 3600) return `${Math.round(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.round(sec / 3600)}h ago`;
+  return `${Math.round(sec / 86400)}d ago`;
 }
 
 const SORT_MODES = {
@@ -212,6 +251,87 @@ function openPromptModal({ existing, onSave, onDelete }) {
     imgLabel.appendChild(clearBtn);
   }
 
+  // History disclosure (only for existing entries).
+  let historyDetails = null;
+  if (existing) {
+    historyDetails = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "History";
+    summary.style.cursor = "pointer";
+    summary.style.fontSize = "12px";
+    historyDetails.appendChild(summary);
+
+    const list = document.createElement("div");
+    list.className = "pl-history";
+    list.replaceChildren(Object.assign(document.createElement("div"),
+      { className: "pl-history-empty", textContent: "loading..." }));
+    historyDetails.appendChild(list);
+
+    const renderHistory = (snapshots) => {
+      list.replaceChildren();
+      if (!snapshots.length) {
+        list.appendChild(Object.assign(document.createElement("div"),
+          { className: "pl-history-empty", textContent: "No prior versions yet." }));
+        return;
+      }
+      for (const snap of snapshots) {
+        const row = document.createElement("div");
+        row.className = "pl-history-row";
+
+        const ts = document.createElement("span");
+        ts.className = "pl-history-ts";
+        ts.textContent = relativeTime(snap.ts);
+        ts.title = new Date(snap.ts * 1000).toLocaleString();
+
+        const body = document.createElement("div");
+        body.className = "pl-history-body";
+        const nameEl = document.createElement("strong");
+        nameEl.textContent = snap.name || "(no name)";
+        body.appendChild(nameEl);
+        const textEl = document.createElement("div");
+        textEl.textContent = (snap.text || "").slice(0, 140) + ((snap.text || "").length > 140 ? "..." : "");
+        body.appendChild(textEl);
+        if (snap.tags?.length) {
+          const tagsEl = document.createElement("div");
+          tagsEl.className = "pl-history-tags";
+          tagsEl.textContent = snap.tags.join(", ");
+          body.appendChild(tagsEl);
+        }
+
+        const revertBtn = document.createElement("button");
+        revertBtn.type = "button";
+        revertBtn.className = "pl-btn";
+        revertBtn.textContent = "Revert";
+        revertBtn.onclick = async () => {
+          if (!confirm(`Revert "${existing.name}" to this version?\n(The current values will be saved to history first.)`)) return;
+          revertBtn.disabled = true;
+          try {
+            await revertPrompt(existing.id, snap.ts);
+            close();  // refresh-via-websocket will update the gallery
+          } catch (e) {
+            revertBtn.disabled = false;
+            status.classList.add("error");
+            status.textContent = e.message;
+          }
+        };
+
+        row.append(ts, body, revertBtn);
+        list.appendChild(row);
+      }
+    };
+
+    historyDetails.addEventListener("toggle", async () => {
+      if (!historyDetails.open) return;
+      try {
+        const data = await fetchHistory(existing.id);
+        renderHistory(data.history || []);
+      } catch (e) {
+        list.replaceChildren(Object.assign(document.createElement("div"),
+          { className: "pl-history-empty", textContent: `Failed: ${e.message}` }));
+      }
+    });
+  }
+
   imgInput.onchange = () => {
     const f = imgInput.files[0];
     if (f) {
@@ -304,7 +424,10 @@ function openPromptModal({ existing, onSave, onDelete }) {
   actions.appendChild(cancelBtn);
   actions.appendChild(saveBtn);
 
-  modal.append(header, nameLabel, idLabel, tagsLabel, textLabel, imgLabel, status, actions);
+  const children = [header, nameLabel, idLabel, tagsLabel, textLabel, imgLabel];
+  if (historyDetails) children.push(historyDetails);
+  children.push(status, actions);
+  modal.append(...children);
 
   // Initial position: cascade modals so stacked windows don't overlap exactly.
   const offset = (_modalStack++ % 6) * 24;

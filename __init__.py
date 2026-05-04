@@ -161,6 +161,30 @@ def _touch(item: dict, *, created: bool) -> None:
     item["updated_at"] = now
 
 
+_HISTORY_CAP = 20
+
+
+def _push_history(item: dict) -> None:
+    """Snapshot the current name/text/tags onto the entry's history list."""
+    history = list(item.get("history") or [])
+    history.append({
+        "ts": _now(),
+        "name": item.get("name", ""),
+        "text": item.get("text", ""),
+        "tags": list(item.get("tags") or []),
+    })
+    item["history"] = history[-_HISTORY_CAP:]
+
+
+def _maybe_push_history(item: dict, new_name: str, new_text: str, new_tags: list) -> None:
+    """Push history only if any user-visible field actually changes (image excluded)."""
+    if (item.get("name", "") == new_name
+        and item.get("text", "") == new_text
+        and list(item.get("tags") or []) == list(new_tags or [])):
+        return
+    _push_history(item)
+
+
 def _start_watcher() -> None:
     """Daemon thread polling prompts.json mtime; pushes refresh on external edit."""
     global _last_known_mtime
@@ -271,6 +295,8 @@ class PromptLibrarySave:
                 pid = prompt_id or _unique_id(_slugify(name), {i.get("id") for i in items})
                 existing = {"id": pid}
                 items.append(existing)
+            else:
+                _maybe_push_history(existing, name, text or "", parsed_tags)
 
             existing["name"] = name
             existing["text"] = text or ""
@@ -356,6 +382,8 @@ async def upsert_prompt(request):
         if created:
             existing = {"id": pid}
             items.append(existing)
+        else:
+            _maybe_push_history(existing, name, text, tags)
         existing["name"] = name
         existing["text"] = text
         existing["tags"] = tags
@@ -420,6 +448,7 @@ def _import_csv(text: str) -> tuple[int, int, list[str]]:
                 index[row_id] = existing
                 added += 1
             else:
+                _maybe_push_history(existing, name, text_val, tags)
                 updated += 1
             existing["name"] = name
             existing["text"] = text_val
@@ -446,6 +475,55 @@ async def import_csv_route(request):
     return web.json_response({"added": added, "updated": updated, "errors": errors})
 
 
+@routes.get("/prompt_library/history/{prompt_id}")
+async def get_history(request):
+    pid = _safe_id(request.match_info.get("prompt_id", ""))
+    if not pid:
+        return web.json_response({"error": "invalid id"}, status=400)
+    with _lock:
+        item = next((i for i in _load() if i.get("id") == pid), None)
+    if item is None:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response({
+        "id": pid,
+        "history": list(reversed(item.get("history") or [])),
+    })
+
+
+@routes.post("/prompt_library/revert")
+async def revert_prompt(request):
+    payload = await request.json()
+    pid = _safe_id((payload.get("id") or "").strip())
+    ts = payload.get("ts")
+    if not pid or ts is None:
+        return web.json_response({"error": "id and ts required"}, status=400)
+
+    with _lock:
+        items = _load()
+        item = next((i for i in items if i.get("id") == pid), None)
+        if item is None:
+            return web.json_response({"error": "not found"}, status=404)
+        snap = next((s for s in item.get("history") or [] if s.get("ts") == ts), None)
+        if snap is None:
+            return web.json_response({"error": "snapshot not found"}, status=404)
+
+        # Save the current state so the revert itself is undoable.
+        _maybe_push_history(item, snap.get("name", ""), snap.get("text", ""), snap.get("tags") or [])
+        item["name"] = snap.get("name", "")
+        item["text"] = snap.get("text", "")
+        item["tags"] = list(snap.get("tags") or [])
+        _touch(item, created=False)
+        _save(items)
+
+    _notify_change()
+    return web.json_response({
+        "id": pid,
+        "name": item["name"],
+        "text": item["text"],
+        "tags": item["tags"],
+    })
+
+
 @routes.post("/prompt_library/delete")
 async def delete_prompt(request):
     payload = await request.json()
@@ -460,7 +538,7 @@ async def delete_prompt(request):
     return web.json_response({"ok": True})
 
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 NODE_CLASS_MAPPINGS = {
     "PromptLibrary": PromptLibrary,
