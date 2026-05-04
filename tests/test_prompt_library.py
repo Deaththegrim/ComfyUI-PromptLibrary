@@ -461,6 +461,94 @@ class PromptLibraryTests(unittest.TestCase):
         entry = next(i for i in items if i["id"] == pid)
         self.assertEqual(entry["tags"], ["character", "fantasy"])
 
+    # ---- timestamps ----------------------------------------------------
+
+    def test_upsert_records_timestamps(self):
+        req = FakeRequest(post_data={"name": "TS", "text": "x"})
+        body = json.loads(asyncio.run(self.mod.upsert_prompt(req)).body)
+        items = self.mod._load()
+        entry = next(i for i in items if i["id"] == body["id"])
+        self.assertIn("created_at", entry)
+        self.assertIn("updated_at", entry)
+        self.assertEqual(entry["created_at"], entry["updated_at"])
+
+    def test_upsert_update_changes_only_updated_at(self):
+        req1 = FakeRequest(post_data={"name": "TS", "text": "v1"})
+        body1 = json.loads(asyncio.run(self.mod.upsert_prompt(req1)).body)
+        pid = body1["id"]
+        items = self.mod._load()
+        created_at = next(i for i in items if i["id"] == pid)["created_at"]
+        # Sleep to let the clock advance past the resolution.
+        import time as _t
+        _t.sleep(0.01)
+        req2 = FakeRequest(post_data={"id": pid, "name": "TS", "text": "v2"})
+        asyncio.run(self.mod.upsert_prompt(req2))
+        entry = next(i for i in self.mod._load() if i["id"] == pid)
+        self.assertEqual(entry["created_at"], created_at)
+        self.assertGreater(entry["updated_at"], created_at)
+
+    def test_list_returns_timestamps(self):
+        req = FakeRequest(post_data={"name": "TS", "text": "x"})
+        asyncio.run(self.mod.upsert_prompt(req))
+        body = json.loads(asyncio.run(self.mod.list_prompts(FakeRequest())).body)
+        self.assertGreater(body["prompts"][0]["created_at"], 0)
+        self.assertGreater(body["prompts"][0]["updated_at"], 0)
+
+    # ---- CSV import ----------------------------------------------------
+
+    def test_import_csv_basic(self):
+        text = "name,text,tags,id\nKnight,armor,character;fantasy,knight\nMage,staff,character;magic,\n"
+        added, updated, errors = self.mod._import_csv(text)
+        self.assertEqual(added, 2)
+        self.assertEqual(updated, 0)
+        self.assertEqual(errors, [])
+        items = self.mod._load()
+        self.assertEqual(len(items), 2)
+        knight = next(i for i in items if i["id"] == "knight")
+        self.assertEqual(knight["text"], "armor")
+        self.assertEqual(knight["tags"], ["character", "fantasy"])
+        mage = next(i for i in items if i["name"] == "Mage")
+        self.assertEqual(mage["id"], "mage")  # auto-slugified
+
+    def test_import_csv_updates_existing(self):
+        # First add via upsert
+        req = FakeRequest(post_data={"name": "Knight", "text": "v1"})
+        body = json.loads(asyncio.run(self.mod.upsert_prompt(req)).body)
+        pid = body["id"]
+        # Then import a CSV that updates the same id
+        text = f"name,text,tags,id\nKnight,v2,character,{pid}\n"
+        added, updated, errors = self.mod._import_csv(text)
+        self.assertEqual(added, 0)
+        self.assertEqual(updated, 1)
+        items = self.mod._load()
+        self.assertEqual(items[0]["text"], "v2")
+
+    def test_import_csv_skips_invalid_rows(self):
+        text = "name,text,tags,id\n,nothing,,\nGood,t,,\nBad,t,,../etc\n"
+        added, _, errors = self.mod._import_csv(text)
+        self.assertEqual(added, 1)
+        self.assertEqual(len(errors), 2)
+
+    def test_import_csv_rejects_missing_name_column(self):
+        text = "title,text\nfoo,bar\n"
+        _, _, errors = self.mod._import_csv(text)
+        self.assertTrue(any("name" in e for e in errors))
+
+    def test_import_csv_route(self):
+        text = "name,text,tags,id\nFoo,bar,t1;t2,foo\n"
+        req = FakeRequest(post_data={"csv": text})
+        resp = asyncio.run(self.mod.import_csv_route(req))
+        body = json.loads(resp.body)
+        self.assertEqual(body["added"], 1)
+        self.assertEqual(self.mod._load()[0]["tags"], ["t1", "t2"])
+
+    # ---- watcher (smoke) -----------------------------------------------
+
+    def test_watcher_thread_started(self):
+        # _start_watcher runs once at module import; check the thread exists.
+        names = [t.name for t in __import__("threading").enumerate()]
+        self.assertIn("prompt-library-watcher", names)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

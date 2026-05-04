@@ -8,8 +8,9 @@ const CSS = `
 .pl-gallery { display: flex; flex-direction: column; gap: 6px; padding: 4px; box-sizing: border-box;
   width: 100%; height: 100%; min-height: 0; color: #ddd; font-family: sans-serif; font-size: 12px; }
 .pl-toolbar { display: flex; gap: 6px; align-items: center; }
-.pl-toolbar input { flex: 1; min-width: 0; background: #1c1c1c; color: #ddd; border: 1px solid #444;
-  padding: 3px 6px; border-radius: 3px; font-size: 12px; }
+.pl-toolbar input, .pl-toolbar select { flex: 1; min-width: 0; background: #1c1c1c; color: #ddd;
+  border: 1px solid #444; padding: 3px 6px; border-radius: 3px; font-size: 12px; }
+.pl-toolbar select { flex: 0 0 auto; max-width: 130px; }
 .pl-btn { background: #2a2a2a; color: #ddd; border: 1px solid #444; padding: 3px 8px; cursor: pointer;
   border-radius: 3px; font-size: 12px; }
 .pl-btn:hover { background: #383838; }
@@ -18,7 +19,10 @@ const CSS = `
 .pl-tile { position: relative; aspect-ratio: 1 / 1; background: #2a2a2a; border: 2px solid transparent;
   border-radius: 4px; cursor: pointer; overflow: hidden; }
 .pl-tile.selected { border-color: #6cf; }
-.pl-tags-row { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 2px 2px; }
+.pl-tags-row { display: flex; flex-direction: column; gap: 3px; padding: 0 2px 2px; }
+.pl-tag-group { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.pl-tag-group-label { color: #888; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+  margin-right: 2px; min-width: 60px; }
 .pl-tag-chip { background: #2a2a2a; color: #ccc; border: 1px solid #444; padding: 2px 8px;
   border-radius: 10px; font-size: 11px; cursor: pointer; user-select: none; }
 .pl-tag-chip:hover { background: #353535; }
@@ -101,6 +105,26 @@ async function deletePrompt(id) {
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
+
+async function importCsv(file) {
+  const body = new FormData();
+  body.append("file", file, file.name);
+  const res = await api.fetchApi("/prompt_library/import_csv", { method: "POST", body });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+const SORT_MODES = {
+  name_asc:    { label: "Name A-Z",   cmp: (a, b) => a.name.localeCompare(b.name) },
+  name_desc:   { label: "Name Z-A",   cmp: (a, b) => b.name.localeCompare(a.name) },
+  newest:      { label: "Newest",     cmp: (a, b) => (b.created_at||0) - (a.created_at||0) },
+  oldest:      { label: "Oldest",     cmp: (a, b) => (a.created_at||0) - (b.created_at||0) },
+  recent_edit: { label: "Recent edit",cmp: (a, b) => (b.updated_at||0) - (a.updated_at||0) },
+};
+const SORT_KEY = "comfy.PromptLibrary.sort";
 
 function imageUrl(id) {
   return api.apiURL ? api.apiURL(`/prompt_library/image/${id}?t=${Date.now()}`)
@@ -338,15 +362,35 @@ function buildGallery(node, idWidget) {
   toolbar.className = "pl-toolbar";
   const filter = document.createElement("input");
   filter.type = "text";
-  filter.placeholder = "filter...";
+  filter.placeholder = "search name, text, tags...";
   // Stop key events bubbling to LiteGraph (otherwise typing triggers canvas shortcuts).
   for (const ev of ["keydown", "keyup", "keypress"]) {
     filter.addEventListener(ev, (e) => e.stopPropagation());
   }
+  const sortSelect = document.createElement("select");
+  for (const [key, mode] of Object.entries(SORT_MODES)) {
+    const opt = document.createElement("option");
+    opt.value = key;
+    opt.textContent = mode.label;
+    sortSelect.appendChild(opt);
+  }
+  sortSelect.value = localStorage.getItem(SORT_KEY) || "name_asc";
+  sortSelect.title = "Sort";
+
+  const importBtn = document.createElement("button");
+  importBtn.className = "pl-btn";
+  importBtn.textContent = "Import";
+  importBtn.title = "Bulk import from CSV (columns: name, text, tags, id)";
+  const csvInput = document.createElement("input");
+  csvInput.type = "file";
+  csvInput.accept = ".csv,text/csv";
+  csvInput.style.display = "none";
+  importBtn.onclick = () => csvInput.click();
+
   const refreshBtn = document.createElement("button");
   refreshBtn.className = "pl-btn";
   refreshBtn.textContent = "Refresh";
-  toolbar.append(filter, refreshBtn);
+  toolbar.append(filter, sortSelect, importBtn, refreshBtn, csvInput);
 
   const tagsRow = document.createElement("div");
   tagsRow.className = "pl-tags-row";
@@ -360,27 +404,59 @@ function buildGallery(node, idWidget) {
   const activeTags = new Set();
 
   const renderTags = () => {
-    const seen = new Set();
-    for (const p of prompts) for (const t of p.tags || []) seen.add(t);
-    const all = [...seen].sort();
+    // Group tags by the prefix before ':' (e.g. "style:cyberpunk" -> group "style").
+    // Tags without a colon land in the "general" group.
+    const groups = new Map();
+    for (const p of prompts) {
+      for (const t of p.tags || []) {
+        const idx = t.indexOf(":");
+        const [g, label] = idx > 0 ? [t.slice(0, idx), t.slice(idx + 1)] : ["general", t];
+        if (!groups.has(g)) groups.set(g, new Map());
+        groups.get(g).set(t, label);
+      }
+    }
+
     tagsRow.replaceChildren();
 
+    const topGroup = document.createElement("div");
+    topGroup.className = "pl-tag-group";
     const allChip = document.createElement("div");
     allChip.className = "pl-tag-chip all" + (activeTags.size === 0 ? " active" : "");
     allChip.textContent = "All";
     allChip.onclick = () => { activeTags.clear(); render(); };
-    tagsRow.appendChild(allChip);
+    topGroup.appendChild(allChip);
+    if (groups.size === 0) {
+      const hint = document.createElement("span");
+      hint.className = "pl-tag-group-label";
+      hint.textContent = "no tags yet";
+      topGroup.appendChild(hint);
+    }
+    tagsRow.appendChild(topGroup);
 
-    for (const tag of all) {
-      const chip = document.createElement("div");
-      chip.className = "pl-tag-chip" + (activeTags.has(tag) ? " active" : "");
-      chip.textContent = tag;
-      chip.onclick = () => {
-        if (activeTags.has(tag)) activeTags.delete(tag);
-        else activeTags.add(tag);
-        render();
-      };
-      tagsRow.appendChild(chip);
+    const sortedGroups = [...groups.keys()].sort((a, b) =>
+      a === "general" ? 1 : b === "general" ? -1 : a.localeCompare(b)
+    );
+    for (const g of sortedGroups) {
+      const row = document.createElement("div");
+      row.className = "pl-tag-group";
+      const lbl = document.createElement("span");
+      lbl.className = "pl-tag-group-label";
+      lbl.textContent = g === "general" ? "" : g;
+      row.appendChild(lbl);
+      const tagsInGroup = [...groups.get(g).entries()].sort((a, b) => a[1].localeCompare(b[1]));
+      for (const [fullTag, label] of tagsInGroup) {
+        const chip = document.createElement("div");
+        chip.className = "pl-tag-chip" + (activeTags.has(fullTag) ? " active" : "");
+        chip.textContent = label;
+        chip.title = fullTag;
+        chip.onclick = () => {
+          if (activeTags.has(fullTag)) activeTags.delete(fullTag);
+          else activeTags.add(fullTag);
+          render();
+        };
+        row.appendChild(chip);
+      }
+      tagsRow.appendChild(row);
     }
   };
 
@@ -392,7 +468,17 @@ function buildGallery(node, idWidget) {
     if (activeTags.size) {
       visible = visible.filter(p => (p.tags || []).some(t => activeTags.has(t)));
     }
-    if (q) visible = visible.filter(p => p.name.toLowerCase().includes(q));
+    if (q) {
+      visible = visible.filter(p => {
+        if (p.name.toLowerCase().includes(q)) return true;
+        if ((p.text || "").toLowerCase().includes(q)) return true;
+        if ((p.tags || []).some(t => t.toLowerCase().includes(q))) return true;
+        if ((p.id || "").toLowerCase().includes(q)) return true;
+        return false;
+      });
+    }
+    const mode = SORT_MODES[sortSelect.value] || SORT_MODES.name_asc;
+    visible = [...visible].sort(mode.cmp);
     for (const p of visible) {
       const tile = document.createElement("div");
       tile.className = "pl-tile" + (p.id === idWidget.value ? " selected" : "");
@@ -466,6 +552,28 @@ function buildGallery(node, idWidget) {
 
   filter.oninput = render;
   refreshBtn.onclick = refresh;
+  sortSelect.onchange = () => {
+    localStorage.setItem(SORT_KEY, sortSelect.value);
+    render();
+  };
+  csvInput.onchange = async () => {
+    const file = csvInput.files[0];
+    if (!file) return;
+    try {
+      const result = await importCsv(file);
+      const msg = `Imported: ${result.added} added, ${result.updated} updated`
+        + (result.errors?.length ? ` (${result.errors.length} errors — see console)` : "");
+      if (result.errors?.length) console.warn("[PromptLibrary] CSV import errors:", result.errors);
+      grid.replaceChildren(Object.assign(document.createElement("div"),
+        { className: "pl-status", textContent: msg }));
+      await refresh();
+    } catch (e) {
+      grid.replaceChildren(Object.assign(document.createElement("div"),
+        { className: "pl-status error", textContent: `Import failed: ${e.message}` }));
+    } finally {
+      csvInput.value = "";
+    }
+  };
 
   // Refresh whenever any save/delete fires server-side (incl. the Save node).
   const onExternal = () => refresh();

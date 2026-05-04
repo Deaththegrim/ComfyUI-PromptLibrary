@@ -1,7 +1,10 @@
+import csv
+import io
 import json
 import os
 import re
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -34,11 +37,19 @@ def _load() -> list[dict]:
     return data if isinstance(data, list) else []
 
 
+_last_known_mtime = 0.0
+
+
 def _save(items: list[dict]) -> None:
+    global _last_known_mtime
     tmp = STORE_PATH.with_suffix(".json.tmp")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(items, f, indent=2, ensure_ascii=False)
     tmp.replace(STORE_PATH)
+    try:
+        _last_known_mtime = STORE_PATH.stat().st_mtime
+    except OSError:
+        pass
 
 
 def _safe_id(value: str) -> str | None:
@@ -139,6 +150,44 @@ def _notify_change() -> None:
         pass
 
 
+def _now() -> float:
+    return time.time()
+
+
+def _touch(item: dict, *, created: bool) -> None:
+    now = _now()
+    if created or "created_at" not in item:
+        item.setdefault("created_at", now)
+    item["updated_at"] = now
+
+
+def _start_watcher() -> None:
+    """Daemon thread polling prompts.json mtime; pushes refresh on external edit."""
+    global _last_known_mtime
+    try:
+        _last_known_mtime = STORE_PATH.stat().st_mtime if STORE_PATH.exists() else 0.0
+    except OSError:
+        _last_known_mtime = 0.0
+
+    def loop():
+        global _last_known_mtime
+        while True:
+            time.sleep(2)
+            try:
+                mtime = STORE_PATH.stat().st_mtime if STORE_PATH.exists() else 0.0
+            except OSError:
+                continue
+            if mtime != _last_known_mtime:
+                _last_known_mtime = mtime
+                _notify_change()
+
+    t = threading.Thread(target=loop, daemon=True, name="prompt-library-watcher")
+    t.start()
+
+
+_start_watcher()
+
+
 class PromptLibrary:
     @classmethod
     def INPUT_TYPES(cls):
@@ -217,7 +266,8 @@ class PromptLibrarySave:
             elif overwrite_by_name:
                 existing = next((i for i in items if i.get("name") == name), None)
 
-            if existing is None:
+            created = existing is None
+            if created:
                 pid = prompt_id or _unique_id(_slugify(name), {i.get("id") for i in items})
                 existing = {"id": pid}
                 items.append(existing)
@@ -225,6 +275,7 @@ class PromptLibrarySave:
             existing["name"] = name
             existing["text"] = text or ""
             existing["tags"] = parsed_tags
+            _touch(existing, created=created)
 
             if thumbnail is not None:
                 _save_image_tensor(existing["id"], thumbnail)
@@ -252,6 +303,8 @@ async def list_prompts(_request):
             "name": item.get("name", ""),
             "text": item.get("text", ""),
             "tags": item.get("tags", []),
+            "created_at": item.get("created_at", 0),
+            "updated_at": item.get("updated_at", 0),
             "has_image": _image_path_for(pid) is not None,
         })
     return web.json_response({"prompts": out})
@@ -299,12 +352,14 @@ async def upsert_prompt(request):
         if not pid:
             pid = _unique_id(_slugify(name), {i.get("id") for i in items})
         existing = next((i for i in items if i.get("id") == pid), None)
-        if existing is None:
+        created = existing is None
+        if created:
             existing = {"id": pid}
             items.append(existing)
         existing["name"] = name
         existing["text"] = text
         existing["tags"] = tags
+        _touch(existing, created=created)
 
         if clear_image:
             _delete_image_files(pid)
@@ -331,6 +386,66 @@ async def upsert_prompt(request):
     })
 
 
+def _import_csv(text: str) -> tuple[int, int, list[str]]:
+    """Parse CSV body and upsert each row. Returns (added, updated, errors)."""
+    reader = csv.DictReader(io.StringIO(text))
+    added = updated = 0
+    errors: list[str] = []
+    if not reader.fieldnames or "name" not in reader.fieldnames:
+        return 0, 0, ["CSV missing required 'name' column"]
+
+    with _lock:
+        items = _load()
+        index = {i.get("id"): i for i in items}
+        for row_num, row in enumerate(reader, start=2):
+            name = (row.get("name") or "").strip()
+            if not name:
+                errors.append(f"row {row_num}: empty name")
+                continue
+            text_val = row.get("text", "") or ""
+            # Tags use ';' inside CSV cell since ',' is the field delimiter.
+            tags = _parse_tags((row.get("tags") or "").replace(";", ","))
+            row_id = (row.get("id") or "").strip()
+            if row_id and not _safe_id(row_id):
+                errors.append(f"row {row_num}: invalid id {row_id!r}")
+                continue
+            if not row_id:
+                row_id = _unique_id(_slugify(name), set(index.keys()))
+
+            existing = index.get(row_id)
+            created = existing is None
+            if created:
+                existing = {"id": row_id}
+                items.append(existing)
+                index[row_id] = existing
+                added += 1
+            else:
+                updated += 1
+            existing["name"] = name
+            existing["text"] = text_val
+            existing["tags"] = tags
+            _touch(existing, created=created)
+
+        _save(items)
+
+    return added, updated, errors
+
+
+@routes.post("/prompt_library/import_csv")
+async def import_csv_route(request):
+    reader = await request.post()
+    field = reader.get("file")
+    if field is not None and hasattr(field, "file"):
+        body = field.file.read().decode("utf-8", errors="replace")
+    else:
+        body = reader.get("csv") or ""
+    if not body.strip():
+        return web.json_response({"error": "no CSV body provided"}, status=400)
+    added, updated, errors = _import_csv(body)
+    _notify_change()
+    return web.json_response({"added": added, "updated": updated, "errors": errors})
+
+
 @routes.post("/prompt_library/delete")
 async def delete_prompt(request):
     payload = await request.json()
@@ -345,7 +460,7 @@ async def delete_prompt(request):
     return web.json_response({"ok": True})
 
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 NODE_CLASS_MAPPINGS = {
     "PromptLibrary": PromptLibrary,
