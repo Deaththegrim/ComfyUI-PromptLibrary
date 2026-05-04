@@ -1,5 +1,7 @@
 # GrimmRibbity — ComfyUI Custom Node Suite
 
+[![tests](https://github.com/Deaththegrim/ComfyUI-PromptLibrary/actions/workflows/tests.yml/badge.svg)](https://github.com/Deaththegrim/ComfyUI-PromptLibrary/actions/workflows/tests.yml)
+
 A visual prompt manager for ComfyUI (formerly *Ribbity — ComfyUI Prompt Library*). Browse a thumbnail grid of saved prompts, tag them, drop them into your workflow with one click. Filesystem-backed — your library survives browser clears and syncs cleanly across machines.
 
 Four nodes, one shared library, no third-party dependencies.
