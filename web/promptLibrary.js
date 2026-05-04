@@ -183,7 +183,7 @@ async function exportZip(ids) {
     body: JSON.stringify({ ids: ids || [] }),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const count = parseInt(res.headers.get("X-Ribbity-Count") || "0", 10);
+  const count = parseInt(res.headers.get("X-GrimmRibbity-Count") || res.headers.get("X-Ribbity-Count") || "0", 10);
   const blob = await res.blob();
   return { blob, count };
 }
@@ -679,7 +679,7 @@ function buildGallery(node, idWidget) {
   const importBtn = document.createElement("button");
   importBtn.className = "pl-btn";
   importBtn.textContent = "Import";
-  importBtn.title = "Import from a CSV (name,text,tags,id) or a Ribbity .zip";
+  importBtn.title = "Import from a CSV (name,text,tags,id) or a GrimmRibbity .zip";
   const fileInput = document.createElement("input");
   fileInput.type = "file";
   fileInput.accept = ".csv,text/csv,.zip,application/zip";
@@ -722,8 +722,6 @@ function buildGallery(node, idWidget) {
   const grid = document.createElement("div");
   grid.className = "pl-grid";
 
-  container.append(toolbar, tagsRow, bulkBar, grid);
-
   let prompts = [];
   let lastVisible = [];
   let focusedIndex = -1;        // for keyboard nav
@@ -750,6 +748,8 @@ function buildGallery(node, idWidget) {
   bulkDeleteBtn.style.color = "#f88";
   bulkDeleteBtn.textContent = "Delete";
   bulkBar.append(bulkCount, bulkClearBtn, bulkTagBtn, bulkExportBtn, bulkDeleteBtn);
+
+  container.append(toolbar, tagsRow, bulkBar, grid);
 
   const updateBulkBar = () => {
     if (checkedIds.size === 0) {
@@ -1276,21 +1276,42 @@ app.registerExtension({
       const idWidget = this.widgets.find(w => w.name === "prompt_id");
       if (idWidget) {
         // Hide the underlying string widget; gallery clicks write to its value,
-        // and ComfyUI auto-serializes it into the workflow JSON.
-        idWidget.type = "hidden_prompt_id";
+        // and ComfyUI auto-serializes it into the workflow JSON. We hide via
+        // three mechanisms to cover both the legacy LiteGraph renderer and
+        // the new Nodes 2.0 renderer:
+        //   - widget.hidden = true       → Nodes 2.0 (Vue-rendered) skips it
+        //   - computeSize → [0, -4]      → legacy renderer collapses the row
+        //   - draw = noop                → legacy renderer extra safety
+        // Do NOT mutate widget.type to a custom string — Nodes 2.0's typed
+        // renderer treats unknown types as broken and bails on the whole node.
+        idWidget.hidden = true;
         idWidget.computeSize = () => [0, -4];
         idWidget.draw = () => {};
       }
 
       const { container, render } = buildGallery(this, idWidget);
-      this.addDOMWidget("gallery", "PromptLibraryGallery", container, {
+      // Defensive: container needs explicit dimensions because Nodes 2.0
+      // doesn't always give DOM widgets a sized wrapper before first paint.
+      container.style.minHeight = "240px";
+      container.style.width = "100%";
+
+      const galleryWidget = this.addDOMWidget("gallery", "PromptLibraryGallery", container, {
         serialize: false,
         hideOnZoom: false,
         getMinHeight: () => 240,
+        // Nodes 2.0 may call getValue/setValue during reactivity sync; without
+        // these the widget can be treated as malformed and skipped.
+        getValue: () => idWidget?.value || "",
+        setValue: (v) => {
+          if (idWidget) idWidget.value = v;
+          render?.();
+        },
       });
       this._promptLibraryRender = render;
+      this._promptLibraryGalleryWidget = galleryWidget;
 
       this.size = [320, 320];
+      if (typeof this.setSize === "function") this.setSize([320, 320]);
       return r;
     };
 
