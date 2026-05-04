@@ -624,12 +624,166 @@ class PromptLibraryTests(unittest.TestCase):
         resp = asyncio.run(self.mod.get_history(FakeRequest(match_info={"prompt_id": "nope"})))
         self.assertEqual(resp.status, 404)
 
+    # ---- wildcards -----------------------------------------------------
+
+    def _seed_library(self, prompts):
+        """Helper: write prompts as the library."""
+        items = [{"id": p["id"], "name": p.get("name", p["id"]),
+                  "text": p.get("text", ""), "tags": p.get("tags", [])} for p in prompts]
+        self.mod._save(items)
+
+    def test_wildcard_choice_deterministic_with_seed(self):
+        import random
+        rng = random.Random(0)
+        result = self.mod._expand_wildcards("a {x|y|z} b", [], rng)
+        self.assertIn(result, {"a x b", "a y b", "a z b"})
+        # Same seed -> same result
+        rng = random.Random(0)
+        result2 = self.mod._expand_wildcards("a {x|y|z} b", [], rng)
+        self.assertEqual(result, result2)
+
+    def test_wildcard_choice_no_alternation_strips_braces(self):
+        import random
+        out = self.mod._expand_wildcards("hello {world}", [], random.Random(0))
+        self.assertEqual(out, "hello world")
+
+    def test_wildcard_named_ref_by_id(self):
+        import random
+        self._seed_library([{"id": "knight", "text": "armored knight"}])
+        out = self.mod._expand_wildcards("a __knight__ here", self.mod._load(), random.Random(0))
+        self.assertEqual(out, "a armored knight here")
+
+    def test_wildcard_named_ref_by_tag_random(self):
+        import random
+        self._seed_library([
+            {"id": "elf", "text": "elf", "tags": ["character"]},
+            {"id": "wizard", "text": "wizard", "tags": ["character"]},
+        ])
+        rng = random.Random(0)
+        out = self.mod._expand_wildcards("a __character__", self.mod._load(), rng)
+        self.assertIn(out, {"a elf", "a wizard"})
+
+    def test_wildcard_unknown_ref_left_literal(self):
+        import random
+        out = self.mod._expand_wildcards("a __missing__ b", [], random.Random(0))
+        self.assertEqual(out, "a __missing__ b")
+
+    def test_wildcard_recursion_expands_nested(self):
+        import random
+        self._seed_library([
+            {"id": "wizard", "text": "{old|young} wizard"},
+            {"id": "knight", "text": "knight"},
+        ])
+        rng = random.Random(0)
+        out = self.mod._expand_wildcards("__wizard__", self.mod._load(), rng)
+        self.assertIn(out, {"old wizard", "young wizard"})
+
+    def test_wildcard_cycle_protection(self):
+        # a -> b -> a -> b -> ... should bottom out at the depth cap.
+        import random
+        self._seed_library([
+            {"id": "a", "text": "__b__"},
+            {"id": "b", "text": "__a__"},
+        ])
+        out = self.mod._expand_wildcards("__a__", self.mod._load(), random.Random(0))
+        # Should terminate without infinite loop; final state likely contains __a__ or __b__.
+        self.assertIn(out, {"__a__", "__b__"})
+
+    def test_wildcard_choice_with_named_ref_inside(self):
+        import random
+        self._seed_library([{"id": "wizard", "text": "wizard"}])
+        rng = random.Random(0)
+        out = self.mod._expand_wildcards("{__wizard__|knight}", self.mod._load(), rng)
+        self.assertIn(out, {"wizard", "knight"})
+
+    # ---- PromptLibraryRandom node --------------------------------------
+
+    def test_random_picks_by_tag(self):
+        self._seed_library([
+            {"id": "elf", "text": "elf", "tags": ["character", "fantasy"]},
+            {"id": "wizard", "text": "wizard", "tags": ["character", "fantasy"]},
+            {"id": "noir", "text": "noir city", "tags": ["style"]},
+        ])
+        node = self.mod.PromptLibraryRandom()
+        text, pid = node.pick(tag_filter="character", seed=0)
+        self.assertIn(pid, {"elf", "wizard"})
+        self.assertEqual(text, pid)
+
+    def test_random_and_filter_multi_tag(self):
+        self._seed_library([
+            {"id": "elf", "text": "elf", "tags": ["character", "fantasy"]},
+            {"id": "wizard", "text": "wizard", "tags": ["character", "fantasy"]},
+            {"id": "robot", "text": "robot", "tags": ["character", "scifi"]},
+        ])
+        node = self.mod.PromptLibraryRandom()
+        text, pid = node.pick(tag_filter="character, fantasy", seed=0)
+        self.assertIn(pid, {"elf", "wizard"})
+
+    def test_random_no_match_returns_empty(self):
+        self._seed_library([{"id": "x", "text": "x", "tags": ["a"]}])
+        node = self.mod.PromptLibraryRandom()
+        out = node.pick(tag_filter="missing", seed=0)
+        self.assertEqual(out, ("", ""))
+
+    def test_random_empty_filter_picks_anything(self):
+        self._seed_library([
+            {"id": "a", "text": "a"},
+            {"id": "b", "text": "b"},
+        ])
+        node = self.mod.PromptLibraryRandom()
+        _, pid = node.pick(tag_filter="", seed=0)
+        self.assertIn(pid, {"a", "b"})
+
+    def test_random_seed_determinism(self):
+        self._seed_library([{"id": f"p{i}", "text": f"t{i}", "tags": ["x"]} for i in range(10)])
+        node = self.mod.PromptLibraryRandom()
+        a = node.pick(tag_filter="x", seed=42)
+        b = node.pick(tag_filter="x", seed=42)
+        self.assertEqual(a, b)
+
+    def test_random_expands_wildcards_in_picked(self):
+        self._seed_library([
+            {"id": "knight", "text": "{red|blue} knight", "tags": ["character"]},
+        ])
+        node = self.mod.PromptLibraryRandom()
+        text, pid = node.pick(tag_filter="character", seed=0, expand_wildcards=True)
+        self.assertIn(text, {"red knight", "blue knight"})
+        self.assertEqual(pid, "knight")
+
+    # ---- PromptLibraryWildcard node ------------------------------------
+
+    def test_wildcard_node_expands(self):
+        self._seed_library([{"id": "elf", "text": "tall elf"}])
+        node = self.mod.PromptLibraryWildcard()
+        out = node.expand(text="hi __elf__ {a|b}", seed=0)
+        self.assertTrue(out[0].startswith("hi tall elf "))
+        self.assertIn(out[0][-1], {"a", "b"})
+
+    def test_wildcard_node_toggle_choices_off(self):
+        node = self.mod.PromptLibraryWildcard()
+        out = node.expand(text="{a|b}", seed=0, expand_choices=False, expand_named_refs=True)
+        self.assertEqual(out[0], "{a|b}")
+
+    def test_wildcard_node_toggle_named_off(self):
+        self._seed_library([{"id": "elf", "text": "tall elf"}])
+        node = self.mod.PromptLibraryWildcard()
+        out = node.expand(text="__elf__ {x|y}", seed=0, expand_choices=True, expand_named_refs=False)
+        self.assertIn(out[0], {"__elf__ x", "__elf__ y"})
+
+    def test_wildcard_node_both_off_passthrough(self):
+        node = self.mod.PromptLibraryWildcard()
+        out = node.expand(text="__a__ {x|y}", seed=0, expand_choices=False, expand_named_refs=False)
+        self.assertEqual(out[0], "__a__ {x|y}")
+
     # ---- watcher (smoke) -----------------------------------------------
 
-    def test_watcher_thread_started(self):
-        # _start_watcher runs once at module import; check the thread exists.
-        names = [t.name for t in __import__("threading").enumerate()]
-        self.assertIn("prompt-library-watcher", names)
+    def test_watcher_starts_when_invoked(self):
+        # Auto-start is skipped under unittest; verify _start_watcher runs cleanly.
+        import threading
+        before = sum(1 for t in threading.enumerate() if t.name == "prompt-library-watcher")
+        self.mod._start_watcher()
+        after = sum(1 for t in threading.enumerate() if t.name == "prompt-library-watcher")
+        self.assertEqual(after, before + 1)
 
 
 if __name__ == "__main__":

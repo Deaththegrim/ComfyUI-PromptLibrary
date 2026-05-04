@@ -12,3 +12,4 @@ data/images/*
 .vscode/
 .idea/
 .DS_Store
+.testenv/

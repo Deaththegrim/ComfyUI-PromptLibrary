@@ -2,7 +2,9 @@ import csv
 import io
 import json
 import os
+import random
 import re
+import sys
 import threading
 import time
 import uuid
@@ -209,7 +211,10 @@ def _start_watcher() -> None:
     t.start()
 
 
-_start_watcher()
+# Skip the watcher when imported by tests — each test re-imports the module and
+# we'd accumulate dozens of daemon threads, slowing interpreter exit.
+if "unittest" not in sys.modules and not os.environ.get("PROMPT_LIBRARY_NO_WATCHER"):
+    _start_watcher()
 
 
 class PromptLibrary:
@@ -242,6 +247,76 @@ class PromptLibrary:
         if prompt_id:
             print(f"[PromptLibrary] no prompt with id={prompt_id!r}; returning empty string")
         return ("",)
+
+
+_NAMED_REF_RE = re.compile(r"__([A-Za-z0-9_:.\-]+)__")
+_CHOICE_RE = re.compile(r"\{([^{}]+)\}")
+_WILDCARD_MAX_DEPTH = 8
+
+
+def _resolve_named_ref(ref: str, items: list[dict], rng: random.Random) -> str | None:
+    """Match a __name__ to an entry. Order: exact id, then exact tag (random pick)."""
+    by_id = next((i for i in items if i.get("id") == ref), None)
+    if by_id is not None:
+        return by_id.get("text", "")
+    matching = [i for i in items if ref in (i.get("tags") or [])]
+    if matching:
+        return rng.choice(matching).get("text", "")
+    return None
+
+
+def _expand_wildcards(text: str, items: list[dict], rng: random.Random,
+                      *, expand_choices: bool = True, expand_named: bool = True) -> str:
+    """Expand {a|b|c} alternatives and __id_or_tag__ refs against the library.
+
+    Toggles let callers disable each mechanism independently. Cycle-safe: a shared
+    placeholder dict across recursion levels; on hitting _WILDCARD_MAX_DEPTH all
+    remaining refs are stashed as literals to bottom out. Unknown refs (no matching
+    id/tag) are also left as literals.
+    """
+    state = {"placeholders": {}, "counter": [0]}
+
+    def stash(m: re.Match) -> str:
+        idx = state["counter"][0]
+        state["counter"][0] += 1
+        key = f"\x00U{idx}\x00"
+        state["placeholders"][key] = m.group(0)
+        return key
+
+    def stash_unknowns(s: str) -> str:
+        if not expand_named:
+            return _NAMED_REF_RE.sub(stash, s)
+        return _NAMED_REF_RE.sub(
+            lambda m: stash(m) if _resolve_named_ref(m.group(1), items, rng) is None else m.group(0),
+            s,
+        )
+
+    def expand(s: str, depth: int) -> str:
+        if depth >= _WILDCARD_MAX_DEPTH:
+            return _NAMED_REF_RE.sub(stash, s) if expand_named else s
+        s = stash_unknowns(s)
+        while True:
+            if expand_named:
+                named = _NAMED_REF_RE.search(s)
+                if named:
+                    resolved = _resolve_named_ref(named.group(1), items, rng) or ""
+                    expanded = expand(resolved, depth + 1)
+                    s = s[:named.start()] + stash_unknowns(expanded) + s[named.end():]
+                    continue
+            if expand_choices:
+                choice = _CHOICE_RE.search(s)
+                if choice:
+                    content = choice.group(1)
+                    picked = rng.choice([c.strip() for c in content.split("|")]) if "|" in content else content
+                    s = s[:choice.start()] + picked + s[choice.end():]
+                    continue
+            break
+        return s
+
+    out = expand(text, 0)
+    for key, original in state["placeholders"].items():
+        out = out.replace(key, original)
+    return out
 
 
 class PromptLibrarySave:
@@ -312,6 +387,97 @@ class PromptLibrarySave:
         _notify_change()
         print(f"[PromptLibrary] saved id={saved_id!r} name={name!r} tags={parsed_tags}")
         return (text or "", saved_id)
+
+
+_INT_MAX = 0xffffffffffffffff
+
+
+class PromptLibraryRandom:
+    """Pick a random library entry whose tags match a filter (AND across listed tags).
+
+    Built for overnight loops: chain RandomByTag(character) + RandomByTag(background)
+    + RandomByTag(action) into your sampler with control_after_generate=randomize so
+    every queue draws a fresh combination from the library.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "tag_filter": ("STRING", {"default": "", "multiline": False}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": _INT_MAX}),
+            },
+            "optional": {
+                "expand_wildcards": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("text", "id")
+    FUNCTION = "pick"
+    CATEGORY = "utils"
+
+    @classmethod
+    def IS_CHANGED(cls, tag_filter, seed, expand_wildcards=True):
+        return f"{seed}|{tag_filter}|{expand_wildcards}"
+
+    def pick(self, tag_filter, seed, expand_wildcards=True):
+        wanted = _parse_tags(tag_filter)
+        with _lock:
+            items = _load()
+        if wanted:
+            matches = [i for i in items if all(t in (i.get("tags") or []) for t in wanted)]
+        else:
+            matches = list(items)
+        if not matches:
+            print(f"[PromptLibrary] no entries match tag_filter={tag_filter!r}")
+            return ("", "")
+        rng = random.Random(seed)
+        chosen = rng.choice(matches)
+        text = chosen.get("text", "")
+        if expand_wildcards:
+            text = _expand_wildcards(text, items, rng)
+        return (text, chosen.get("id", ""))
+
+
+class PromptLibraryWildcard:
+    """Expand {a|b|c} alternatives and __name__ library refs in a string.
+
+    Useful when you want to author a template directly in the workflow rather
+    than store it as a library entry. The two expansion mechanisms can be
+    toggled independently.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"default": "", "multiline": True}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": _INT_MAX}),
+            },
+            "optional": {
+                "expand_choices": ("BOOLEAN", {"default": True}),
+                "expand_named_refs": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "expand"
+    CATEGORY = "utils"
+
+    @classmethod
+    def IS_CHANGED(cls, text, seed, expand_choices=True, expand_named_refs=True):
+        return f"{seed}|{expand_choices}|{expand_named_refs}|{text}"
+
+    def expand(self, text, seed, expand_choices=True, expand_named_refs=True):
+        with _lock:
+            items = _load() if expand_named_refs else []
+        rng = random.Random(seed)
+        out = _expand_wildcards(text, items, rng,
+                                expand_choices=expand_choices,
+                                expand_named=expand_named_refs)
+        return (out,)
 
 
 routes = PromptServer.instance.routes
@@ -538,15 +704,19 @@ async def delete_prompt(request):
     return web.json_response({"ok": True})
 
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 NODE_CLASS_MAPPINGS = {
     "PromptLibrary": PromptLibrary,
     "PromptLibrarySave": PromptLibrarySave,
+    "PromptLibraryRandom": PromptLibraryRandom,
+    "PromptLibraryWildcard": PromptLibraryWildcard,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "PromptLibrary": "Prompt Library",
-    "PromptLibrarySave": "Prompt Library — Save",
+    "PromptLibrary": "Ribbity — Library",
+    "PromptLibrarySave": "Ribbity — Save",
+    "PromptLibraryRandom": "Ribbity — Random by Tag",
+    "PromptLibraryWildcard": "Ribbity — Wildcard Expand",
 }
 WEB_DIRECTORY = "./web"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
