@@ -880,6 +880,105 @@ class PromptLibraryTests(unittest.TestCase):
         backups = [p for p in self.mod.ROOT.iterdir() if p.is_dir() and p.name.startswith("data-backup-")]
         self.assertEqual(backups, [])
 
+    # ---- bulk delete / duplicate / reorder -----------------------------
+
+    def test_bulk_delete_removes_listed_entries(self):
+        self.mod._save([
+            {"id": "a", "name": "A", "text": "1"},
+            {"id": "b", "name": "B", "text": "2"},
+            {"id": "c", "name": "C", "text": "3"},
+        ])
+        req = FakeRequest(json_data={"ids": ["a", "c"]})
+        resp = asyncio.run(self.mod.bulk_delete(req))
+        body = json.loads(resp.body)
+        self.assertEqual(body["deleted"], 2)
+        remaining = [i["id"] for i in self.mod._load()]
+        self.assertEqual(remaining, ["b"])
+
+    def test_bulk_delete_skips_invalid_ids(self):
+        self.mod._save([{"id": "a", "name": "A", "text": "1"}])
+        req = FakeRequest(json_data={"ids": ["a", "../bad", ""]})
+        resp = asyncio.run(self.mod.bulk_delete(req))
+        body = json.loads(resp.body)
+        self.assertEqual(body["deleted"], 1)
+
+    def test_bulk_delete_rejects_no_valid_ids(self):
+        req = FakeRequest(json_data={"ids": ["../bad", ""]})
+        resp = asyncio.run(self.mod.bulk_delete(req))
+        self.assertEqual(resp.status, 400)
+
+    def test_duplicate_creates_copy_with_new_id(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50
+        req1 = FakeRequest(post_data={
+            "name": "Original", "text": "body", "tags": "tag1",
+            "image": FakeFileField("o.png", png),
+        })
+        body = json.loads(asyncio.run(self.mod.upsert_prompt(req1)).body)
+        original_id = body["id"]
+
+        dup_req = FakeRequest(json_data={"id": original_id})
+        resp = asyncio.run(self.mod.duplicate_prompt(dup_req))
+        dup = json.loads(resp.body)
+        self.assertNotEqual(dup["id"], original_id)
+        self.assertEqual(dup["name"], "Original (copy)")
+
+        items = self.mod._load()
+        self.assertEqual(len(items), 2)
+        new_entry = next(i for i in items if i["id"] == dup["id"])
+        self.assertEqual(new_entry["text"], "body")
+        self.assertEqual(new_entry["tags"], ["tag1"])
+        # Image was copied
+        self.assertIsNotNone(self.mod._image_path_for(dup["id"]))
+
+    def test_duplicate_with_custom_name(self):
+        self.mod._save([{"id": "src", "name": "Src", "text": "t"}])
+        req = FakeRequest(json_data={"id": "src", "name": "Custom Copy"})
+        resp = asyncio.run(self.mod.duplicate_prompt(req))
+        dup = json.loads(resp.body)
+        self.assertEqual(dup["name"], "Custom Copy")
+        self.assertEqual(dup["id"], "custom_copy")
+
+    def test_duplicate_404_for_unknown(self):
+        req = FakeRequest(json_data={"id": "nope"})
+        resp = asyncio.run(self.mod.duplicate_prompt(req))
+        self.assertEqual(resp.status, 404)
+
+    def test_reorder_applies_order_field(self):
+        self.mod._save([
+            {"id": "a", "name": "A", "text": "1"},
+            {"id": "b", "name": "B", "text": "2"},
+            {"id": "c", "name": "C", "text": "3"},
+        ])
+        req = FakeRequest(json_data={"ids": ["c", "a", "b"]})
+        resp = asyncio.run(self.mod.reorder_prompts(req))
+        body = json.loads(resp.body)
+        self.assertEqual(body["count"], 3)
+        items = self.mod._load()
+        self.assertEqual([i["id"] for i in items], ["c", "a", "b"])
+        self.assertEqual(items[0]["order"], 0)
+        self.assertEqual(items[2]["order"], 2)
+
+    def test_reorder_handles_partial_list(self):
+        self.mod._save([
+            {"id": "a", "name": "A", "text": "1"},
+            {"id": "b", "name": "B", "text": "2"},
+            {"id": "c", "name": "C", "text": "3"},
+        ])
+        # Only specify b first; a and c keep their relative position after.
+        req = FakeRequest(json_data={"ids": ["b"]})
+        asyncio.run(self.mod.reorder_prompts(req))
+        items = self.mod._load()
+        self.assertEqual(items[0]["id"], "b")
+        # a and c still in order, after b
+        rest = [i["id"] for i in items[1:]]
+        self.assertEqual(rest, ["a", "c"])
+
+    def test_reorder_rejects_invalid_id(self):
+        self.mod._save([{"id": "a", "name": "A", "text": "1"}])
+        req = FakeRequest(json_data={"ids": ["a", "../bad"]})
+        resp = asyncio.run(self.mod.reorder_prompts(req))
+        self.assertEqual(resp.status, 400)
+
     # ---- watcher (smoke) -----------------------------------------------
 
     def test_watcher_starts_when_invoked(self):

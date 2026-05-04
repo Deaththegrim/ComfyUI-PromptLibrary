@@ -490,7 +490,7 @@ async def list_prompts(_request):
     with _lock:
         items = _load()
     out = []
-    for item in items:
+    for idx, item in enumerate(items):
         pid = item.get("id", "")
         out.append({
             "id": pid,
@@ -499,6 +499,7 @@ async def list_prompts(_request):
             "tags": item.get("tags", []),
             "created_at": item.get("created_at", 0),
             "updated_at": item.get("updated_at", 0),
+            "order": item.get("order", idx),
             "has_image": _image_path_for(pid) is not None,
         })
     return web.json_response({"prompts": out})
@@ -848,7 +849,81 @@ async def delete_prompt(request):
     return web.json_response({"ok": True})
 
 
-__version__ = "0.8.1"
+@routes.post("/prompt_library/bulk_delete")
+async def bulk_delete(request):
+    payload = await request.json()
+    ids_raw = payload.get("ids") or []
+    valid = {i for i in (_safe_id(str(x).strip()) for x in ids_raw) if i}
+    if not valid:
+        return web.json_response({"error": "no valid ids"}, status=400)
+    with _lock:
+        items = [i for i in _load() if i.get("id") not in valid]
+        _save(items)
+        for pid in valid:
+            _delete_image_files(pid)
+    _notify_change()
+    return web.json_response({"deleted": len(valid)})
+
+
+@routes.post("/prompt_library/duplicate")
+async def duplicate_prompt(request):
+    payload = await request.json()
+    pid = _safe_id((payload.get("id") or "").strip())
+    if not pid:
+        return web.json_response({"error": "invalid id"}, status=400)
+    with _lock:
+        items = _load()
+        src = next((i for i in items if i.get("id") == pid), None)
+        if src is None:
+            return web.json_response({"error": "not found"}, status=404)
+        new_name = (payload.get("name") or f"{src.get('name', '')} (copy)").strip() or "(copy)"
+        new_id = _unique_id(_slugify(new_name), {i.get("id") for i in items})
+        clone = {
+            "id": new_id,
+            "name": new_name,
+            "text": src.get("text", ""),
+            "tags": list(src.get("tags") or []),
+        }
+        _touch(clone, created=True)
+        items.append(clone)
+        # Copy thumbnail if present.
+        src_img = _image_path_for(pid)
+        if src_img is not None:
+            (IMAGES_DIR / f"{new_id}{src_img.suffix}").write_bytes(src_img.read_bytes())
+        _save(items)
+    _notify_change()
+    return web.json_response({"id": new_id, "name": new_name})
+
+
+@routes.post("/prompt_library/reorder")
+async def reorder_prompts(request):
+    payload = await request.json()
+    order_ids = payload.get("ids") or []
+    if not isinstance(order_ids, list):
+        return web.json_response({"error": "ids must be a list"}, status=400)
+    valid = [_safe_id(str(i).strip()) for i in order_ids]
+    if any(v is None for v in valid):
+        return web.json_response({"error": "invalid id in list"}, status=400)
+    with _lock:
+        items = _load()
+        rank = {pid: idx for idx, pid in enumerate(valid)}
+        # Tag every item with its order; unranked items keep going at the end
+        # in their existing relative order.
+        max_seen = len(valid)
+        for item in items:
+            pid = item.get("id")
+            if pid in rank:
+                item["order"] = rank[pid]
+            else:
+                item["order"] = max_seen
+                max_seen += 1
+        items.sort(key=lambda i: i.get("order", 0))
+        _save(items)
+    _notify_change()
+    return web.json_response({"ok": True, "count": len(valid)})
+
+
+__version__ = "0.9.0"
 
 
 def _autobackup_on_version_change() -> None:

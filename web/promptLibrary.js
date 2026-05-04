@@ -22,6 +22,25 @@ const CSS = `
   transition: border-color 80ms ease, transform 80ms ease; }
 .pl-tile:hover { border-color: #555; transform: scale(1.02); }
 .pl-tile.selected, .pl-tile.selected:hover { border-color: #6cf; }
+.pl-tile.checked { box-shadow: 0 0 0 2px #f9a inset; }
+.pl-tile.dragging { opacity: 0.4; }
+.pl-tile.drag-over { outline: 2px dashed #6cf; outline-offset: -4px; }
+.pl-tile-check { position: absolute; top: 4px; left: 4px; width: 16px; height: 16px;
+  background: rgba(0,0,0,0.7); color: #fff; border: 1px solid #888; border-radius: 3px;
+  display: none; align-items: center; justify-content: center; font-size: 11px;
+  z-index: 1; cursor: pointer; user-select: none; }
+.pl-tile:hover .pl-tile-check, .pl-tile.checked .pl-tile-check { display: flex; }
+.pl-tile.checked .pl-tile-check { background: #6cf; color: #111; border-color: #6cf; }
+.pl-context-menu { position: fixed; z-index: 10001; background: #2a2a2a; color: #ddd;
+  border: 1px solid #444; border-radius: 4px; box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+  padding: 4px 0; min-width: 140px; font-size: 12px; user-select: none; }
+.pl-context-menu .item { padding: 6px 12px; cursor: pointer; }
+.pl-context-menu .item:hover { background: #3a3a3a; }
+.pl-context-menu .item.danger { color: #f88; }
+.pl-context-menu .sep { height: 1px; background: #444; margin: 4px 0; }
+.pl-bulk-bar { display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+  background: #1f3550; color: #ddd; border-radius: 4px; font-size: 12px; }
+.pl-bulk-bar .count { font-weight: bold; flex: 1; }
 .pl-empty-state { grid-column: 1 / -1; padding: 24px 12px; text-align: center;
   color: #888; font-size: 12px; line-height: 1.5; background: #232323;
   border: 1px dashed #444; border-radius: 4px; }
@@ -169,6 +188,79 @@ async function exportZip(ids) {
   return { blob, count };
 }
 
+async function bulkDelete(ids) {
+  const res = await api.fetchApi("/prompt_library/bulk_delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function duplicatePrompt(id, name) {
+  const res = await api.fetchApi("/prompt_library/duplicate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, name }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+async function reorderPrompts(ids) {
+  const res = await api.fetchApi("/prompt_library/reorder", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+let _activeContextMenu = null;
+function openContextMenu(x, y, items) {
+  if (_activeContextMenu) _activeContextMenu.remove();
+  const menu = document.createElement("div");
+  menu.className = "pl-context-menu";
+  for (const entry of items) {
+    if (entry === "sep") {
+      const sep = document.createElement("div");
+      sep.className = "sep";
+      menu.appendChild(sep);
+      continue;
+    }
+    const el = document.createElement("div");
+    el.className = "item" + (entry.danger ? " danger" : "");
+    el.textContent = entry.label;
+    el.onclick = () => {
+      menu.remove();
+      _activeContextMenu = null;
+      entry.action();
+    };
+    menu.appendChild(el);
+  }
+  // Position; clamp to viewport.
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  const left = Math.min(x, window.innerWidth - rect.width - 4);
+  const top = Math.min(y, window.innerHeight - rect.height - 4);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  _activeContextMenu = menu;
+  const dismiss = (e) => {
+    if (!menu.contains(e.target)) {
+      menu.remove();
+      _activeContextMenu = null;
+      document.removeEventListener("mousedown", dismiss, true);
+    }
+  };
+  setTimeout(() => document.addEventListener("mousedown", dismiss, true), 0);
+}
+
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -208,6 +300,7 @@ function relativeTime(ts) {
 }
 
 const SORT_MODES = {
+  manual:      { label: "Manual",     cmp: (a, b) => (a.order||0) - (b.order||0) },
   name_asc:    { label: "Name A-Z",   cmp: (a, b) => a.name.localeCompare(b.name) },
   name_desc:   { label: "Name Z-A",   cmp: (a, b) => b.name.localeCompare(a.name) },
   newest:      { label: "Newest",     cmp: (a, b) => (b.created_at||0) - (a.created_at||0) },
@@ -629,11 +722,98 @@ function buildGallery(node, idWidget) {
   const grid = document.createElement("div");
   grid.className = "pl-grid";
 
-  container.append(toolbar, tagsRow, grid);
+  container.append(toolbar, tagsRow, bulkBar, grid);
 
   let prompts = [];
   let lastVisible = [];
+  let focusedIndex = -1;        // for keyboard nav
   const activeTags = new Set();
+  const checkedIds = new Set(); // for bulk operations
+
+  const bulkBar = document.createElement("div");
+  bulkBar.className = "pl-bulk-bar";
+  bulkBar.style.display = "none";
+  const bulkCount = document.createElement("span");
+  bulkCount.className = "count";
+  const bulkClearBtn = document.createElement("button");
+  bulkClearBtn.className = "pl-btn";
+  bulkClearBtn.textContent = "Clear";
+  bulkClearBtn.onclick = () => { checkedIds.clear(); render(); };
+  const bulkExportBtn = document.createElement("button");
+  bulkExportBtn.className = "pl-btn";
+  bulkExportBtn.textContent = "Export";
+  const bulkTagBtn = document.createElement("button");
+  bulkTagBtn.className = "pl-btn";
+  bulkTagBtn.textContent = "Tag";
+  const bulkDeleteBtn = document.createElement("button");
+  bulkDeleteBtn.className = "pl-btn";
+  bulkDeleteBtn.style.color = "#f88";
+  bulkDeleteBtn.textContent = "Delete";
+  bulkBar.append(bulkCount, bulkClearBtn, bulkTagBtn, bulkExportBtn, bulkDeleteBtn);
+
+  const updateBulkBar = () => {
+    if (checkedIds.size === 0) {
+      bulkBar.style.display = "none";
+    } else {
+      bulkBar.style.display = "flex";
+      bulkCount.textContent = `${checkedIds.size} selected`;
+    }
+  };
+  bulkExportBtn.onclick = async () => {
+    const ids = [...checkedIds];
+    if (!ids.length) return;
+    bulkExportBtn.disabled = true;
+    try {
+      const { blob, count } = await exportZip(ids);
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      downloadBlob(blob, `ribbity-export-${stamp}-${count}prompts.zip`);
+    } catch (e) { alert(`Export failed: ${e.message}`); }
+    finally { bulkExportBtn.disabled = false; }
+  };
+  bulkDeleteBtn.onclick = async () => {
+    const ids = [...checkedIds];
+    if (!ids.length) return;
+    if (!confirm(`Delete ${ids.length} prompts?`)) return;
+    bulkDeleteBtn.disabled = true;
+    try {
+      await bulkDelete(ids);
+      if (ids.includes(idWidget.value)) idWidget.value = "";
+      checkedIds.clear();
+      await refresh();
+    } catch (e) { alert(`Delete failed: ${e.message}`); }
+    finally { bulkDeleteBtn.disabled = false; }
+  };
+  bulkTagBtn.onclick = async () => {
+    const ids = [...checkedIds];
+    if (!ids.length) return;
+    const input = prompt(`Add tags to ${ids.length} prompts (comma-separated). Prefix - to remove (e.g. "-old, new"):`, "");
+    if (input === null) return;
+    const adds = [], removes = [];
+    for (const raw of input.split(",")) {
+      const t = raw.trim().toLowerCase();
+      if (!t) continue;
+      if (t.startsWith("-")) removes.push(t.slice(1).trim());
+      else adds.push(t);
+    }
+    if (!adds.length && !removes.length) return;
+    bulkTagBtn.disabled = true;
+    try {
+      for (const id of ids) {
+        const p = prompts.find(x => x.id === id);
+        if (!p) continue;
+        const newTags = new Set([...(p.tags || []), ...adds]);
+        for (const r of removes) newTags.delete(r);
+        const fd = new FormData();
+        fd.append("id", id);
+        fd.append("name", p.name);
+        fd.append("text", p.text || "");
+        fd.append("tags", [...newTags].join(", "));
+        await api.fetchApi("/prompt_library/upsert", { method: "POST", body: fd });
+      }
+      await refresh();
+    } catch (e) { alert(`Tag update failed: ${e.message}`); }
+    finally { bulkTagBtn.disabled = false; }
+  };
 
   const updateModelSelect = () => {
     const models = new Set();
@@ -743,6 +923,12 @@ function buildGallery(node, idWidget) {
     const mode = SORT_MODES[sortSelect.value] || SORT_MODES.name_asc;
     visible = [...visible].sort(mode.cmp);
     lastVisible = visible;
+    // Drop checked ids that are no longer visible to avoid acting on hidden entries.
+    for (const id of [...checkedIds]) {
+      if (!visible.some(p => p.id === id)) checkedIds.delete(id);
+    }
+    updateBulkBar();
+    if (focusedIndex >= visible.length) focusedIndex = visible.length - 1;
 
     if (prompts.length === 0) {
       const empty = document.createElement("div");
@@ -765,17 +951,25 @@ function buildGallery(node, idWidget) {
       ));
       grid.appendChild(empty);
     }
-    for (const p of visible) {
+    const isManual = sortSelect.value === "manual";
+
+    visible.forEach((p, idx) => {
       const tile = document.createElement("div");
-      tile.className = "pl-tile" + (p.id === idWidget.value ? " selected" : "");
+      tile.className = "pl-tile"
+        + (p.id === idWidget.value ? " selected" : "")
+        + (checkedIds.has(p.id) ? " checked" : "")
+        + (idx === focusedIndex ? " selected" : "");
       tile.title = p.name;
+      tile.dataset.promptId = p.id;
+      tile.tabIndex = -1;
+      tile.draggable = isManual;
+
       if (p.has_image) {
         const img = document.createElement("img");
         img.src = imageUrl(p.id);
         img.loading = "lazy";
         img.alt = p.name;
         img.onerror = () => {
-          // Replace broken image with a placeholder on load failure.
           img.replaceWith(Object.assign(document.createElement("div"),
             { className: "pl-placeholder", textContent: "?" }));
         };
@@ -786,32 +980,114 @@ function buildGallery(node, idWidget) {
         ph.textContent = "T";
         tile.appendChild(ph);
       }
+
+      const checkbox = document.createElement("div");
+      checkbox.className = "pl-tile-check";
+      checkbox.textContent = checkedIds.has(p.id) ? "✓" : "";
+      checkbox.title = "Select for bulk action";
+      checkbox.onclick = (e) => {
+        e.stopPropagation();
+        if (checkedIds.has(p.id)) checkedIds.delete(p.id);
+        else checkedIds.add(p.id);
+        render();
+      };
+      tile.appendChild(checkbox);
+
       const nm = document.createElement("div");
       nm.className = "pl-name";
       nm.textContent = p.name;
       tile.appendChild(nm);
 
-      tile.onclick = () => {
+      tile.onclick = (e) => {
+        // Shift-click: range select for bulk actions, no output change.
+        if (e.shiftKey && lastVisible.length) {
+          const anchor = lastVisible.findIndex(x => checkedIds.has(x.id));
+          const i0 = anchor < 0 ? idx : Math.min(anchor, idx);
+          const i1 = anchor < 0 ? idx : Math.max(anchor, idx);
+          for (let i = i0; i <= i1; i++) checkedIds.add(lastVisible[i].id);
+          render();
+          return;
+        }
+        // Ctrl/Cmd-click: toggle in bulk set, no output change.
+        if (e.ctrlKey || e.metaKey) {
+          if (checkedIds.has(p.id)) checkedIds.delete(p.id);
+          else checkedIds.add(p.id);
+          render();
+          return;
+        }
+        // Plain click: set output (current behaviour).
         const wasSelected = idWidget.value === p.id;
         idWidget.value = wasSelected ? "" : p.id;
         node.setDirtyCanvas(true, true);
-        for (const t of grid.querySelectorAll(".pl-tile")) t.classList.remove("selected");
-        if (!wasSelected) tile.classList.add("selected");
+        focusedIndex = idx;
+        render();
       };
+
       tile.oncontextmenu = (e) => {
         e.preventDefault();
-        openPromptModal({
-          existing: p,
-          onSave: async (payload) => { await upsert(payload); await refresh(); },
-          onDelete: async (id) => {
-            await deletePrompt(id);
-            if (idWidget.value === id) idWidget.value = "";
-            await refresh();
-          },
-        });
+        openContextMenu(e.clientX, e.clientY, [
+          { label: "Edit...", action: () => openPromptModal({
+              existing: p,
+              onSave: async (payload) => { await upsert(payload); await refresh(); },
+              onDelete: async (id) => {
+                await deletePrompt(id);
+                if (idWidget.value === id) idWidget.value = "";
+                await refresh();
+              },
+            }) },
+          { label: "Duplicate", action: async () => {
+              try { await duplicatePrompt(p.id); await refresh(); }
+              catch (err) { alert(`Duplicate failed: ${err.message}`); }
+            } },
+          { label: "Export this", action: async () => {
+              try {
+                const { blob } = await exportZip([p.id]);
+                const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+                downloadBlob(blob, `ribbity-${p.id}-${stamp}.zip`);
+              } catch (err) { alert(`Export failed: ${err.message}`); }
+            } },
+          "sep",
+          { label: "Delete", danger: true, action: async () => {
+              if (!confirm(`Delete "${p.name}"?`)) return;
+              try {
+                await deletePrompt(p.id);
+                if (idWidget.value === p.id) idWidget.value = "";
+                checkedIds.delete(p.id);
+                await refresh();
+              } catch (err) { alert(`Delete failed: ${err.message}`); }
+            } },
+        ]);
       };
+
+      // Drag-and-drop reorder (Manual sort mode only).
+      if (isManual) {
+        tile.ondragstart = (e) => {
+          tile.classList.add("dragging");
+          e.dataTransfer.effectAllowed = "move";
+          e.dataTransfer.setData("text/plain", p.id);
+        };
+        tile.ondragend = () => tile.classList.remove("dragging");
+        tile.ondragover = (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; tile.classList.add("drag-over"); };
+        tile.ondragleave = () => tile.classList.remove("drag-over");
+        tile.ondrop = async (e) => {
+          e.preventDefault();
+          tile.classList.remove("drag-over");
+          const draggedId = e.dataTransfer.getData("text/plain");
+          if (!draggedId || draggedId === p.id) return;
+          const ids = visible.map(v => v.id);
+          const from = ids.indexOf(draggedId);
+          const to = ids.indexOf(p.id);
+          if (from < 0 || to < 0) return;
+          ids.splice(to, 0, ids.splice(from, 1)[0]);
+          try {
+            await reorderPrompts(ids);
+            await refresh();
+          } catch (err) { alert(`Reorder failed: ${err.message}`); }
+        };
+      }
+
       grid.appendChild(tile);
-    }
+    });
 
     const addTile = document.createElement("div");
     addTile.className = "pl-tile pl-add";
@@ -897,6 +1173,71 @@ function buildGallery(node, idWidget) {
   // Refresh whenever any save/delete fires server-side (incl. the Save node).
   const onExternal = () => refresh();
   window.addEventListener("prompt-library-updated", onExternal);
+
+  // Make the grid focusable so keyboard nav has somewhere to land.
+  grid.tabIndex = 0;
+  grid.style.outline = "none";
+
+  const tilesPerRow = () => {
+    const tile = grid.querySelector(".pl-tile:not(.pl-add)");
+    if (!tile) return 1;
+    return Math.max(1, Math.floor(grid.clientWidth / tile.offsetWidth));
+  };
+
+  const moveFocus = (delta) => {
+    if (!lastVisible.length) return;
+    if (focusedIndex < 0) focusedIndex = 0;
+    else focusedIndex = Math.max(0, Math.min(lastVisible.length - 1, focusedIndex + delta));
+    render();
+    const target = grid.querySelectorAll(".pl-tile")[focusedIndex];
+    target?.scrollIntoView({ block: "nearest" });
+  };
+
+  const onGridKey = (e) => {
+    // Slash focuses search from anywhere within the gallery.
+    if (e.key === "/" && document.activeElement !== filter) {
+      e.preventDefault();
+      filter.focus();
+      filter.select();
+      return;
+    }
+    // Other keys only fire when grid is focused (not search/etc).
+    if (document.activeElement !== grid) return;
+    if (e.key === "ArrowRight") { e.preventDefault(); moveFocus(1); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); moveFocus(-1); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); moveFocus(tilesPerRow()); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); moveFocus(-tilesPerRow()); }
+    else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      const p = lastVisible[focusedIndex];
+      if (!p) return;
+      const wasSelected = idWidget.value === p.id;
+      idWidget.value = wasSelected ? "" : p.id;
+      node.setDirtyCanvas(true, true);
+      render();
+    }
+    else if (e.key === "Delete" || e.key === "Backspace") {
+      e.preventDefault();
+      const p = lastVisible[focusedIndex];
+      if (!p) return;
+      if (!confirm(`Delete "${p.name}"?`)) return;
+      deletePrompt(p.id).then(() => {
+        if (idWidget.value === p.id) idWidget.value = "";
+        checkedIds.delete(p.id);
+        refresh();
+      }).catch(err => alert(`Delete failed: ${err.message}`));
+    }
+    else if (e.key === "Escape") {
+      e.preventDefault();
+      checkedIds.clear();
+      focusedIndex = -1;
+      render();
+    }
+  };
+  container.addEventListener("keydown", onGridKey);
+  // Stop key events from propagating to LiteGraph when interacting with the gallery.
+  container.addEventListener("keydown", (e) => e.stopPropagation());
+
   container._promptLibraryCleanup = () => {
     window.removeEventListener("prompt-library-updated", onExternal);
   };
