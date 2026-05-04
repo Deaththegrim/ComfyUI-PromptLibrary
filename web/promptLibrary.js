@@ -367,6 +367,10 @@ function buildGallery(node, idWidget) {
   for (const ev of ["keydown", "keyup", "keypress"]) {
     filter.addEventListener(ev, (e) => e.stopPropagation());
   }
+  const modelSelect = document.createElement("select");
+  modelSelect.title = "Filter by model (model:* tags)";
+  // populated in render() once we know the data
+
   const sortSelect = document.createElement("select");
   for (const [key, mode] of Object.entries(SORT_MODES)) {
     const opt = document.createElement("option");
@@ -390,7 +394,7 @@ function buildGallery(node, idWidget) {
   const refreshBtn = document.createElement("button");
   refreshBtn.className = "pl-btn";
   refreshBtn.textContent = "Refresh";
-  toolbar.append(filter, sortSelect, importBtn, refreshBtn, csvInput);
+  toolbar.append(filter, modelSelect, sortSelect, importBtn, refreshBtn, csvInput);
 
   const tagsRow = document.createElement("div");
   tagsRow.className = "pl-tags-row";
@@ -403,12 +407,37 @@ function buildGallery(node, idWidget) {
   let prompts = [];
   const activeTags = new Set();
 
+  const updateModelSelect = () => {
+    const models = new Set();
+    for (const p of prompts) {
+      for (const t of p.tags || []) {
+        if (t.startsWith("model:")) models.add(t.slice(6));
+      }
+    }
+    const sorted = [...models].sort();
+    const previous = modelSelect.value || "";
+    modelSelect.replaceChildren();
+    const allOpt = document.createElement("option");
+    allOpt.value = "";
+    allOpt.textContent = sorted.length ? "All models" : "(no model tags)";
+    modelSelect.appendChild(allOpt);
+    for (const m of sorted) {
+      const opt = document.createElement("option");
+      opt.value = m;
+      opt.textContent = m;
+      modelSelect.appendChild(opt);
+    }
+    modelSelect.value = sorted.includes(previous) ? previous : "";
+    modelSelect.disabled = sorted.length === 0;
+  };
+
   const renderTags = () => {
-    // Group tags by the prefix before ':' (e.g. "style:cyberpunk" -> group "style").
-    // Tags without a colon land in the "general" group.
+    // model:* tags are lifted into the modelSelect dropdown — exclude them here.
+    // Other tags group by the prefix before ':' (e.g. "style:cyberpunk" -> group "style").
     const groups = new Map();
     for (const p of prompts) {
       for (const t of p.tags || []) {
+        if (t.startsWith("model:")) continue;
         const idx = t.indexOf(":");
         const [g, label] = idx > 0 ? [t.slice(0, idx), t.slice(idx + 1)] : ["general", t];
         if (!groups.has(g)) groups.set(g, new Map());
@@ -461,10 +490,16 @@ function buildGallery(node, idWidget) {
   };
 
   const render = () => {
+    updateModelSelect();
     renderTags();
     grid.replaceChildren();
     const q = filter.value.trim().toLowerCase();
     let visible = prompts;
+    const model = modelSelect.value;
+    if (model) {
+      const want = `model:${model}`;
+      visible = visible.filter(p => (p.tags || []).includes(want));
+    }
     if (activeTags.size) {
       visible = visible.filter(p => (p.tags || []).some(t => activeTags.has(t)));
     }
@@ -556,6 +591,7 @@ function buildGallery(node, idWidget) {
     localStorage.setItem(SORT_KEY, sortSelect.value);
     render();
   };
+  modelSelect.onchange = render;
   csvInput.onchange = async () => {
     const file = csvInput.files[0];
     if (!file) return;

@@ -460,7 +460,7 @@ async def delete_prompt(request):
     return web.json_response({"ok": True})
 
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 NODE_CLASS_MAPPINGS = {
     "PromptLibrary": PromptLibrary,
