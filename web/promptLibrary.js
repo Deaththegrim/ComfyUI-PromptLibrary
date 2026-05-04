@@ -14,10 +14,11 @@ const CSS = `
 .pl-btn { background: #2a2a2a; color: #ddd; border: 1px solid #444; padding: 3px 8px; cursor: pointer;
   border-radius: 3px; font-size: 12px; }
 .pl-btn:hover { background: #383838; }
-.pl-grid { flex: 1; overflow-y: auto; display: grid; gap: 6px; align-content: start;
-  grid-template-columns: repeat(auto-fill, minmax(var(--pl-tile-size, 96px), 1fr));
+.pl-grid { flex: 1 1 0; min-height: 0; overflow-y: auto; display: grid; gap: 6px; align-content: start;
+  grid-template-columns: repeat(auto-fill, minmax(var(--pl-tile-size, 110px), 1fr));
   padding-right: 2px; }
-.pl-tile { position: relative; aspect-ratio: 1 / 1; background: #2a2a2a; border: 2px solid transparent;
+.pl-tile { position: relative; display: flex; flex-direction: column;
+  background: #2a2a2a; border: 2px solid transparent;
   border-radius: 4px; cursor: pointer; overflow: hidden;
   transition: border-color 80ms ease, transform 80ms ease; }
 .pl-tile:hover { border-color: #555; transform: scale(1.02); }
@@ -25,6 +26,8 @@ const CSS = `
 .pl-tile.checked { box-shadow: 0 0 0 2px #f9a inset; }
 .pl-tile.dragging { opacity: 0.4; }
 .pl-tile.drag-over { outline: 2px dashed #6cf; outline-offset: -4px; }
+.pl-tile-img { position: relative; width: 100%; aspect-ratio: 1 / 1; overflow: hidden;
+  background: #1a1a1a; flex: 0 0 auto; }
 .pl-tile-check { position: absolute; top: 4px; left: 4px; width: 16px; height: 16px;
   background: rgba(0,0,0,0.7); color: #fff; border: 1px solid #888; border-radius: 3px;
   display: none; align-items: center; justify-content: center; font-size: 11px;
@@ -65,12 +68,21 @@ const CSS = `
 .pl-tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .pl-tile .pl-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
   font-size: 22px; color: #666; }
-.pl-tile .pl-name { position: absolute; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.65);
-  color: #fff; padding: 2px 4px; font-size: 10px; text-align: center;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pl-add { display: flex; align-items: center; justify-content: center; font-size: 28px; color: #888;
+.pl-tile .pl-name { background: #1c1c1c; color: #ddd; padding: 5px 6px; font-size: 11px;
+  line-height: 1.3; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  border-top: 1px solid #111; }
+.pl-tile.selected .pl-name { background: #1f3550; color: #fff; }
+.pl-add { aspect-ratio: 1 / 1; align-items: center; justify-content: center; font-size: 28px; color: #888;
   background: #232323; border: 2px dashed #555; }
 .pl-add:hover { color: #ddd; border-color: #888; }
+.pl-grid.list-view { grid-template-columns: 1fr; gap: 4px; }
+.pl-grid.list-view .pl-tile { flex-direction: row; align-items: stretch; }
+.pl-grid.list-view .pl-tile-img { width: 56px; flex: 0 0 56px; }
+.pl-grid.list-view .pl-tile .pl-name { flex: 1; display: flex; align-items: center;
+  padding: 6px 10px; font-size: 13px; border-top: none; border-left: 1px solid #111; }
+.pl-view-toggle { display: flex; gap: 2px; }
+.pl-view-toggle .pl-btn { padding: 3px 7px; font-size: 13px; line-height: 1; }
+.pl-view-toggle .pl-btn.active { background: #2d5070; border-color: #6cf; color: #fff; }
 .pl-modal { position: fixed; z-index: 10000; background: #2a2a2a; color: #ddd; padding: 0 14px 14px;
   border-radius: 6px; width: 460px; max-height: 80vh; overflow-y: auto;
   box-shadow: 0 8px 32px rgba(0,0,0,0.6); border: 1px solid #444;
@@ -703,7 +715,7 @@ function buildGallery(node, idWidget) {
   sizeInput.min = "60";
   sizeInput.max = "200";
   sizeInput.step = "8";
-  sizeInput.value = localStorage.getItem(SIZE_KEY) || "96";
+  sizeInput.value = localStorage.getItem(SIZE_KEY) || "110";
   sizeInput.title = "Tile size";
   const applySize = () => {
     container.style.setProperty("--pl-tile-size", `${sizeInput.value}px`);
@@ -714,7 +726,29 @@ function buildGallery(node, idWidget) {
   };
   sizeWrap.appendChild(sizeInput);
 
-  toolbar.append(searchWrap, modelSelect, sortSelect, sizeWrap, importBtn, exportBtn, refreshBtn, fileInput);
+  const VIEW_KEY = "comfy.PromptLibrary.view";
+  const viewWrap = document.createElement("div");
+  viewWrap.className = "pl-view-toggle";
+  const gridViewBtn = document.createElement("button");
+  gridViewBtn.className = "pl-btn";
+  gridViewBtn.textContent = "▦";
+  gridViewBtn.title = "Grid view";
+  const listViewBtn = document.createElement("button");
+  listViewBtn.className = "pl-btn";
+  listViewBtn.textContent = "≡";
+  listViewBtn.title = "List view";
+  viewWrap.append(gridViewBtn, listViewBtn);
+  let viewMode = localStorage.getItem(VIEW_KEY) === "list" ? "list" : "grid";
+  const applyView = () => {
+    grid.classList.toggle("list-view", viewMode === "list");
+    gridViewBtn.classList.toggle("active", viewMode === "grid");
+    listViewBtn.classList.toggle("active", viewMode === "list");
+    sizeWrap.style.display = viewMode === "list" ? "none" : "";
+  };
+  gridViewBtn.onclick = () => { viewMode = "grid"; localStorage.setItem(VIEW_KEY, viewMode); applyView(); };
+  listViewBtn.onclick = () => { viewMode = "list"; localStorage.setItem(VIEW_KEY, viewMode); applyView(); };
+
+  toolbar.append(searchWrap, modelSelect, sortSelect, sizeWrap, viewWrap, importBtn, exportBtn, refreshBtn, fileInput);
 
   const tagsRow = document.createElement("div");
   tagsRow.className = "pl-tags-row";
@@ -964,6 +998,8 @@ function buildGallery(node, idWidget) {
       tile.tabIndex = -1;
       tile.draggable = isManual;
 
+      const tileImg = document.createElement("div");
+      tileImg.className = "pl-tile-img";
       if (p.has_image) {
         const img = document.createElement("img");
         img.src = imageUrl(p.id);
@@ -973,12 +1009,12 @@ function buildGallery(node, idWidget) {
           img.replaceWith(Object.assign(document.createElement("div"),
             { className: "pl-placeholder", textContent: "?" }));
         };
-        tile.appendChild(img);
+        tileImg.appendChild(img);
       } else {
         const ph = document.createElement("div");
         ph.className = "pl-placeholder";
         ph.textContent = "T";
-        tile.appendChild(ph);
+        tileImg.appendChild(ph);
       }
 
       const checkbox = document.createElement("div");
@@ -991,7 +1027,8 @@ function buildGallery(node, idWidget) {
         else checkedIds.add(p.id);
         render();
       };
-      tile.appendChild(checkbox);
+      tileImg.appendChild(checkbox);
+      tile.appendChild(tileImg);
 
       const nm = document.createElement("div");
       nm.className = "pl-name";
@@ -1121,6 +1158,7 @@ function buildGallery(node, idWidget) {
   filter.addEventListener("input", render);
   refreshBtn.onclick = refresh;
   applySize();
+  applyView();
   sortSelect.onchange = () => {
     localStorage.setItem(SORT_KEY, sortSelect.value);
     render();
