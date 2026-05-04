@@ -119,10 +119,8 @@ class TagPackImportTests(unittest.TestCase):
         self.assertTrue(errors)
 
     def test_non_list_json_records_error(self):
-        zip_bytes = _build_pb_zip({
-            "Tags-Style.json": [{"name": "ok", "category": "Style", "prompt": "x"}],
-        })
-        # Re-pack with one file replaced by a non-list value.
+        # One Tags-*.json holds a non-list value; the importer should record
+        # the error but still ingest the valid sibling file.
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
             zf.writestr("Tags-Body.json", json.dumps({"oops": True}))
