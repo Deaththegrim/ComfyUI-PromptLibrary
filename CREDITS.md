@@ -15,20 +15,17 @@ Pair-programmed with:
 - **[Claude Code](https://claude.com/claude-code)** (Anthropic's CLI for
   Claude) — wrote most of the code under direction from the maintainers.
 
-## Bundled Tag Library — *Prompt Builder*
+## Bundled Tag Library — Community Contributions
 
-The default tag dictionaries shipped with this suite originate in the
-**Prompt Builder** project. Credit to:
+The default tag dictionaries shipped with this suite are a community
+contribution to the project. Curated and contributed by:
 
 - **AceVanquish**
 - **Drow**
-- *and the rest of the Prompt Builder team* — names to be filled in by the
-  team. Open a PR or issue at
-  [Deaththegrim/ComfyUI-PromptLibrary](https://github.com/Deaththegrim/ComfyUI-PromptLibrary)
-  to add yourself.
-
-If you contributed to Prompt Builder and want your name (or a different
-handle) here, edit this file and open a PR.
+- *and the rest of the contributors* — names to be filled in. If you
+  contributed tags, edit this file and open a PR at
+  [Deaththegrim/ComfyUI-PromptLibrary](https://github.com/Deaththegrim/ComfyUI-PromptLibrary),
+  or open an issue and Deaththegrim will add you.
 
 ## License
 

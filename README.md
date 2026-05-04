@@ -156,8 +156,12 @@ python3 -m venv .testenv
 See [CREDITS.md](CREDITS.md) for the full list. Short version: the suite is
 co-created by **[Deaththegrim](https://github.com/Deaththegrim)** and
 **RibbityRabbit**, pair-programmed with **[Claude Code](https://claude.com/claude-code)**.
-The bundled tag library originated in the **Prompt Builder** project by
-**AceVanquish**, **Drow**, and the rest of the Prompt Builder team.
+The bundled tag library is a community contribution — curated by
+**AceVanquish**, **Drow**, and the rest of the contributors.
+
+If you contributed tags or want to, head to the
+[GitHub repo](https://github.com/Deaththegrim/ComfyUI-PromptLibrary) and
+open a PR or issue.
 
 If you fork, remix, or publish a derivative, a credit line back to
 [Deaththegrim/ComfyUI-PromptLibrary](https://github.com/Deaththegrim/ComfyUI-PromptLibrary)
