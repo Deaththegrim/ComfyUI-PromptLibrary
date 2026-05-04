@@ -1126,7 +1126,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.10.3"
+__version__ = "0.11.0"
 
 
 def _autobackup_on_version_change() -> None:
@@ -1161,17 +1161,27 @@ def _autobackup_on_version_change() -> None:
 if "unittest" not in sys.modules and not os.environ.get("PROMPT_LIBRARY_NO_WATCHER"):
     _autobackup_on_version_change()
 
+try:
+    from .civitai_save import CivitaiSaveImage
+    _civitai_node = {"GrimmRibbityCivitaiSave": CivitaiSaveImage}
+    _civitai_label = {"GrimmRibbityCivitaiSave": "GrimmRibbity — Save Image (Civitai)"}
+except Exception as _e:
+    print(f"[PromptLibrary] Civitai save node unavailable: {_e}")
+    _civitai_node, _civitai_label = {}, {}
+
 NODE_CLASS_MAPPINGS = {
     "PromptLibrary": PromptLibrary,
     "PromptLibrarySave": PromptLibrarySave,
     "PromptLibraryRandom": PromptLibraryRandom,
     "PromptLibraryWildcard": PromptLibraryWildcard,
+    **_civitai_node,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptLibrary": "GrimmRibbity — Library",
     "PromptLibrarySave": "GrimmRibbity — Save",
     "PromptLibraryRandom": "GrimmRibbity — Random by Tag",
     "PromptLibraryWildcard": "GrimmRibbity — Wildcard Expand",
+    **_civitai_label,
 }
 WEB_DIRECTORY = "./web"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
