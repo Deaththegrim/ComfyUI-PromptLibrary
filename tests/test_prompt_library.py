@@ -55,6 +55,15 @@ def _load_module(tmp_root: Path):
     return mod
 
 
+def _real_png(size=(8, 8), color=(200, 100, 50)) -> bytes:
+    """Build an actually-decodable PNG so the upsert route's thumbnail step
+    (which now PIL-decodes and downscales) doesn't reject the test payload."""
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
 class FakeFileField:
     """Mimics aiohttp's FileField (the .file attribute and .filename)."""
     def __init__(self, filename: str, data: bytes):
@@ -178,8 +187,25 @@ class PromptLibraryTests(unittest.TestCase):
         self.assertEqual(resp.status, 400)
         self.assertIn(b"name required", resp.body)
 
+    def test_upsert_downscales_oversized_image(self):
+        # 4k input -> output max edge should match _THUMBNAIL_MAX_EDGE (512).
+        from PIL import Image
+        big = io.BytesIO()
+        Image.new("RGB", (4096, 4096), (50, 60, 70)).save(big, format="PNG")
+        big_bytes = big.getvalue()
+        req = FakeRequest(post_data={
+            "name": "Big", "text": "",
+            "image": FakeFileField("big.png", big_bytes),
+        })
+        body = json.loads(asyncio.run(self.mod.upsert_prompt(req)).body)
+        path = self.mod._image_path_for(body["id"])
+        self.assertIsNotNone(path)
+        with Image.open(path) as out:
+            self.assertLessEqual(max(out.size), self.mod._THUMBNAIL_MAX_EDGE)
+        self.assertLess(path.stat().st_size, len(big_bytes))
+
     def test_upsert_with_image_writes_file(self):
-        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64  # not a valid PNG, just a payload
+        png_bytes = _real_png()
         req = FakeRequest(post_data={
             "name": "Tiger",
             "text": "stripey",
@@ -190,8 +216,10 @@ class PromptLibraryTests(unittest.TestCase):
         self.assertTrue(body["has_image"])
         path = self.mod._image_path_for(body["id"])
         self.assertIsNotNone(path)
-        self.assertEqual(path.suffix, ".png")
-        self.assertEqual(path.read_bytes(), png_bytes)
+        # Opaque RGB images are saved as JPEG (smaller than PNG); we don't keep
+        # the source bytes — the file is downscaled and re-encoded.
+        self.assertEqual(path.suffix, ".jpg")
+        self.assertGreater(path.stat().st_size, 0)
 
     def test_upsert_rejects_bad_extension(self):
         req = FakeRequest(post_data={
@@ -228,7 +256,7 @@ class PromptLibraryTests(unittest.TestCase):
     def test_upsert_clear_image_removes_file(self):
         req1 = FakeRequest(post_data={
             "name": "X", "text": "",
-            "image": FakeFileField("a.png", b"data"),
+            "image": FakeFileField("a.png", _real_png()),
         })
         body1 = json.loads(asyncio.run(self.mod.upsert_prompt(req1)).body)
         pid = body1["id"]
@@ -239,23 +267,28 @@ class PromptLibraryTests(unittest.TestCase):
         self.assertIsNone(self.mod._image_path_for(pid))
 
     def test_upsert_with_image_replaces_existing(self):
-        # First upload .png, then upload .jpg — old png file should be removed.
+        # Upload an opaque image (saved as .jpg by the resizer) then an image
+        # with alpha (saved as .png) — the old .jpg should be removed when the
+        # extension flips.
+        from PIL import Image
+        rgba_buf = io.BytesIO()
+        Image.new("RGBA", (8, 8), (10, 20, 30, 128)).save(rgba_buf, format="PNG")
+        rgba_png = rgba_buf.getvalue()
         req1 = FakeRequest(post_data={
             "name": "Y", "text": "",
-            "image": FakeFileField("a.png", b"png-data"),
+            "image": FakeFileField("a.png", _real_png()),  # opaque -> jpg out
         })
         pid = json.loads(asyncio.run(self.mod.upsert_prompt(req1)).body)["id"]
-        png_path = self.mod._image_path_for(pid)
-        self.assertEqual(png_path.suffix, ".png")
+        first_path = self.mod._image_path_for(pid)
+        self.assertEqual(first_path.suffix, ".jpg")
         req2 = FakeRequest(post_data={
             "id": pid, "name": "Y", "text": "",
-            "image": FakeFileField("a.JPG", b"jpg-data"),
+            "image": FakeFileField("a.png", rgba_png),  # alpha -> png out
         })
         asyncio.run(self.mod.upsert_prompt(req2))
-        self.assertFalse(png_path.exists())
+        self.assertFalse(first_path.exists())
         new_path = self.mod._image_path_for(pid)
-        self.assertEqual(new_path.suffix, ".jpg")
-        self.assertEqual(new_path.read_bytes(), b"jpg-data")
+        self.assertEqual(new_path.suffix, ".png")
 
     def test_upsert_rejects_invalid_id(self):
         req = FakeRequest(post_data={"id": "../etc", "name": "x", "text": ""})
@@ -266,7 +299,7 @@ class PromptLibraryTests(unittest.TestCase):
     def test_delete_route_removes_entry_and_image(self):
         req1 = FakeRequest(post_data={
             "name": "Z", "text": "",
-            "image": FakeFileField("a.png", b"data"),
+            "image": FakeFileField("a.png", _real_png()),
         })
         pid = json.loads(asyncio.run(self.mod.upsert_prompt(req1)).body)["id"]
         self.assertTrue(self.mod._image_path_for(pid))
@@ -796,7 +829,7 @@ class PromptLibraryTests(unittest.TestCase):
 
     def test_export_zip_roundtrip(self):
         # Create entries (one with image), export, wipe, re-import.
-        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+        png_bytes = _real_png()
         req = FakeRequest(post_data={
             "name": "Knight", "text": "armored knight", "tags": "character, fantasy",
             "image": FakeFileField("knight.png", png_bytes),
@@ -943,7 +976,7 @@ class PromptLibraryTests(unittest.TestCase):
         self.assertEqual(resp.status, 400)
 
     def test_duplicate_creates_copy_with_new_id(self):
-        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50
+        png = _real_png()
         req1 = FakeRequest(post_data={
             "name": "Original", "text": "body", "tags": "tag1",
             "image": FakeFileField("o.png", png),

@@ -13,7 +13,13 @@ import zipfile
 from pathlib import Path
 
 from aiohttp import web
-from server import PromptServer
+
+try:
+    from server import PromptServer
+except ImportError:
+    # Allow standalone import for offline tools (the shrink_thumbnails
+    # maintenance script doesn't need ComfyUI's server module).
+    PromptServer = None
 
 ROOT = Path(__file__).parent
 DATA_DIR = ROOT / "data"
@@ -26,6 +32,10 @@ IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 _lock = threading.Lock()
 _ALLOWED_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 _MAX_IMAGE_BYTES = 16 * 1024 * 1024
+# Thumbnails are gallery icons, not source art — cap the longest edge so the
+# library + zip exports stay small. Full-res images blow up to >1 MB each.
+_THUMBNAIL_MAX_EDGE = 512
+_THUMBNAIL_JPEG_QUALITY = 85
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
@@ -117,8 +127,55 @@ def _delete_image_files(prompt_id: str) -> None:
                 pass
 
 
+def _save_thumbnail_pil(prompt_id: str, pil) -> str | None:
+    """Downscale a PIL image and write it as a thumbnail. Returns the saved
+    extension ('.png' or '.jpg') on success, None on failure.
+
+    PNG when the image has alpha (transparency would be lost in JPEG), else
+    JPEG at q=85 — gives a ~5-15× smaller file than the original PNG.
+    """
+    try:
+        from PIL import Image  # noqa: F401
+    except ImportError as e:
+        print(f"[PromptLibrary] PIL unavailable, can't save thumbnail: {e}")
+        return None
+    try:
+        pil.thumbnail((_THUMBNAIL_MAX_EDGE, _THUMBNAIL_MAX_EDGE))
+        has_alpha = pil.mode in ("RGBA", "LA") or (pil.mode == "P" and "transparency" in pil.info)
+        _delete_image_files(prompt_id)
+        if has_alpha:
+            if pil.mode != "RGBA":
+                pil = pil.convert("RGBA")
+            pil.save(IMAGES_DIR / f"{prompt_id}.png", format="PNG", optimize=True)
+            return ".png"
+        if pil.mode != "RGB":
+            pil = pil.convert("RGB")
+        pil.save(IMAGES_DIR / f"{prompt_id}.jpg", format="JPEG",
+                 quality=_THUMBNAIL_JPEG_QUALITY, optimize=True, progressive=True)
+        return ".jpg"
+    except Exception as e:
+        print(f"[PromptLibrary] failed to save thumbnail for {prompt_id!r}: {e}")
+        return None
+
+
+def _save_thumbnail_bytes(prompt_id: str, data: bytes) -> str | None:
+    """Open arbitrary image bytes and save as a downscaled thumbnail."""
+    try:
+        from PIL import Image
+    except ImportError as e:
+        print(f"[PromptLibrary] PIL unavailable, can't save thumbnail: {e}")
+        return None
+    try:
+        pil = Image.open(io.BytesIO(data))
+        pil.load()
+    except Exception as e:
+        print(f"[PromptLibrary] failed to decode image for {prompt_id!r}: {e}")
+        return None
+    return _save_thumbnail_pil(prompt_id, pil)
+
+
 def _save_image_tensor(prompt_id: str, image) -> bool:
-    """Save the first frame of a ComfyUI IMAGE batch as PNG. Returns True on success."""
+    """Save the first frame of a ComfyUI IMAGE batch as a downscaled thumbnail."""
     if image is None:
         return False
     try:
@@ -138,9 +195,7 @@ def _save_image_tensor(prompt_id: str, image) -> bool:
             pil = Image.fromarray(arr, mode="RGBA")
         else:
             pil = Image.fromarray(arr[..., :3], mode="RGB")
-        _delete_image_files(prompt_id)
-        pil.save(IMAGES_DIR / f"{prompt_id}.png", format="PNG")
-        return True
+        return _save_thumbnail_pil(prompt_id, pil) is not None
     except Exception as e:
         print(f"[PromptLibrary] failed to save thumbnail for {prompt_id!r}: {e}")
         return False
@@ -492,7 +547,12 @@ class PromptLibraryWildcard:
         return (out,)
 
 
-routes = PromptServer.instance.routes
+if PromptServer is not None:
+    routes = PromptServer.instance.routes
+else:
+    # Standalone import (maintenance tools): a detached RouteTableDef silently
+    # collects the @routes decorators without ever being attached to an app.
+    routes = web.RouteTableDef()
 
 
 @routes.get("/prompt_library/list")
@@ -578,8 +638,8 @@ async def upsert_prompt(request):
             data = image_field.file.read()
             if len(data) > _MAX_IMAGE_BYTES:
                 return web.json_response({"error": "image too large"}, status=400)
-            _delete_image_files(pid)
-            (IMAGES_DIR / f"{pid}{ext}").write_bytes(data)
+            if _save_thumbnail_bytes(pid, data) is None:
+                return web.json_response({"error": "failed to process image"}, status=400)
 
         _save(items)
 
@@ -703,7 +763,33 @@ async def revert_prompt(request):
     })
 
 
-_MAX_IMPORT_ZIP_BYTES = 100 * 1024 * 1024
+_MAX_IMPORT_ZIP_BYTES = 500 * 1024 * 1024
+
+
+def _raise_aiohttp_client_max_size():
+    """Bump ComfyUI's aiohttp Application body cap so our import endpoints can
+    accept libraries bigger than ComfyUI's --max-upload-size default (100 MB).
+
+    Without this the framework returns 413 before our per-route cap can run,
+    even on a 90 MB zip — multipart overhead and Content-Length rounding push
+    it over the edge.
+    """
+    try:
+        from server import PromptServer
+    except Exception:
+        return
+    inst = getattr(PromptServer, "instance", None)
+    app = getattr(inst, "app", None)
+    if app is None:
+        return
+    cur = getattr(app, "_client_max_size", 0) or 0
+    wanted = max(_MAX_IMPORT_ZIP_BYTES, 500 * 1024 * 1024)
+    if cur < wanted:
+        app._client_max_size = wanted
+        print(f"[PromptLibrary] raised aiohttp client_max_size: {cur} -> {wanted}")
+
+
+_raise_aiohttp_client_max_size()
 
 
 def _build_export_zip(items: list[dict], version: str) -> bytes:
@@ -811,7 +897,8 @@ def _import_zip(zip_bytes: bytes) -> tuple[int, int, list[str]]:
                     existing["history"] = list(history)[-_HISTORY_CAP:]
                 _touch(existing, created=created)
 
-                # Restore thumbnail if present in zip.
+                # Restore thumbnail if present in zip — downscale on the way in
+                # so re-imports of older full-res libraries shrink.
                 for ext in _ALLOWED_IMAGE_EXT:
                     arc = f"images/{pid}{ext}"
                     if arc in names_in_zip:
@@ -822,8 +909,8 @@ def _import_zip(zip_bytes: bytes) -> tuple[int, int, list[str]]:
                         if len(img_data) > _MAX_IMAGE_BYTES:
                             errors.append(f"image for {pid!r} too large, skipped")
                             break
-                        _delete_image_files(pid)
-                        (IMAGES_DIR / f"{pid}{ext}").write_bytes(img_data)
+                        if _save_thumbnail_bytes(pid, img_data) is None:
+                            errors.append(f"image for {pid!r} could not be processed")
                         break
 
             _save(items)
@@ -1039,7 +1126,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.10.2"
+__version__ = "0.10.3"
 
 
 def _autobackup_on_version_change() -> None:

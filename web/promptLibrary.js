@@ -16,6 +16,7 @@ const CSS = `
 .pl-btn:hover { background: #383838; }
 .pl-grid { flex: 1 1 0; min-height: 0; overflow-y: auto; display: grid; gap: 6px; align-content: start;
   grid-template-columns: repeat(auto-fill, minmax(var(--pl-tile-size, 110px), 1fr));
+  grid-auto-rows: max-content;
   padding-right: 2px; }
 .pl-tile { position: relative; display: flex; flex-direction: column;
   background: #2a2a2a; border: 2px solid transparent;
@@ -26,8 +27,10 @@ const CSS = `
 .pl-tile.focused { box-shadow: 0 0 0 2px #f9a inset; }
 .pl-tile.dragging { opacity: 0.4; }
 .pl-tile.drag-over { outline: 2px dashed #6cf; outline-offset: -4px; }
-.pl-tile-img { position: relative; width: 100%; aspect-ratio: 1 / 1; overflow: hidden;
-  background: #1a1a1a; flex: 0 0 auto; }
+.pl-tile-img { position: relative; width: 100%; height: 0; padding-bottom: 100%;
+  overflow: hidden; background: #1a1a1a; flex: 0 0 auto; }
+.pl-tile-img > img, .pl-tile-img > .pl-placeholder {
+  position: absolute; inset: 0; }
 .pl-tile-check { position: absolute; top: 4px; left: 4px; width: 16px; height: 16px;
   background: rgba(0,0,0,0.7); color: #fff; border: 1px solid #888; border-radius: 3px;
   display: none; align-items: center; justify-content: center; font-size: 11px;
@@ -75,9 +78,10 @@ const CSS = `
 .pl-add { aspect-ratio: 1 / 1; align-items: center; justify-content: center; font-size: 28px; color: #888;
   background: #232323; border: 2px dashed #555; }
 .pl-add:hover { color: #ddd; border-color: #888; }
-.pl-grid.list-view { grid-template-columns: 1fr; gap: 4px; }
-.pl-grid.list-view .pl-tile { flex-direction: row; align-items: stretch; }
-.pl-grid.list-view .pl-tile-img { width: 56px; flex: 0 0 56px; }
+.pl-grid.list-view { grid-template-columns: 1fr; gap: 4px; grid-auto-rows: max-content; }
+.pl-grid.list-view .pl-tile { flex-direction: row; align-items: stretch; min-height: 56px; }
+.pl-grid.list-view .pl-tile-img { width: 56px !important; min-width: 56px; height: 56px !important;
+  padding-bottom: 0 !important; flex: 0 0 56px !important; }
 .pl-grid.list-view .pl-tile .pl-name { flex: 1; display: flex; align-items: center;
   padding: 6px 10px; font-size: 13px; border-top: none; border-left: 1px solid #111; }
 .pl-view-toggle { display: flex; gap: 2px; }
