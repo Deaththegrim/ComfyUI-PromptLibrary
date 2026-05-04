@@ -701,7 +701,7 @@ def _build_export_zip(items: list[dict], version: str) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         manifest = {
-            "format": "ribbity-prompt-library",
+            "format": "grimm-ribbity-prompt-library",
             "format_version": 1,
             "exported_with": version,
             "exported_at": _now(),
@@ -728,16 +728,16 @@ async def export_zip(request):
         wanted = set(requested)
         items = [i for i in items if i.get("id") in wanted]
     data = _build_export_zip(items, __version__)
-    fname = f"ribbity-export-{int(_now())}.zip"
+    fname = f"grimmribbity-export-{int(_now())}.zip"
     return web.Response(body=data, headers={
         "Content-Type": "application/zip",
         "Content-Disposition": f'attachment; filename="{fname}"',
-        "X-Ribbity-Count": str(len(items)),
+        "X-GrimmRibbity-Count": str(len(items)),
     })
 
 
 def _import_zip(zip_bytes: bytes) -> tuple[int, int, list[str]]:
-    """Import a Ribbity export zip. Returns (added, updated, errors)."""
+    """Import a GrimmRibbity export zip. Returns (added, updated, errors)."""
     errors: list[str] = []
     try:
         zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
@@ -835,6 +835,112 @@ async def import_zip_route(request):
     return web.json_response({"added": added, "updated": updated, "errors": errors})
 
 
+# Files we never want to ingest from a Prompt Builder zip:
+#   - the "_Master_Filtered*" union files (they duplicate the per-category files)
+#   - the user-managed Custom / Deleted lists (empty by design)
+#   - anything under "_Original Files (Backup)/" (exact dupes)
+_TAG_PACK_SKIP_NAMES = {"Tags-Custom.json", "Tags-Deleted.json"}
+_TAG_PACK_SKIP_PREFIXES = ("Tags-_Master",)
+_TAG_PACK_SKIP_PATH_PARTS = {"_Original Files (Backup)"}
+
+
+def _tag_pack_extra_tags(filename: str) -> list[str]:
+    """Filename-driven hints: anime files get 'anime', men files 'men', neg 'negative'."""
+    extras: list[str] = []
+    lower = filename.lower()
+    if "anime" in lower:
+        extras.append("anime")
+    if lower.startswith("tags-men"):
+        extras.append("men")
+    if "negadvancedstyle" in lower:
+        extras.append("negative")
+    return extras
+
+
+def _import_tag_pack_zip(zip_bytes: bytes) -> tuple[int, int, list[str]]:
+    """Import a Prompt Builder zip (Tags-*.json files). Returns (added, updated, errors)."""
+    errors: list[str] = []
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except zipfile.BadZipFile:
+        return 0, 0, ["not a valid zip file"]
+
+    added = updated = 0
+    with zf:
+        members = [n for n in zf.namelist() if n.endswith(".json")]
+        with _lock:
+            items = _load()
+            index = {i.get("id"): i for i in items}
+
+            for member in members:
+                parts = member.split("/")
+                base = parts[-1]
+                if not base.startswith("Tags-"):
+                    continue
+                if base in _TAG_PACK_SKIP_NAMES:
+                    continue
+                if any(base.startswith(p) for p in _TAG_PACK_SKIP_PREFIXES):
+                    continue
+                if any(part in _TAG_PACK_SKIP_PATH_PARTS for part in parts[:-1]):
+                    continue
+
+                try:
+                    raw = zf.read(member).decode("utf-8")
+                    entries = json.loads(raw)
+                except (KeyError, json.JSONDecodeError, UnicodeDecodeError) as e:
+                    errors.append(f"{member}: parse failed ({e})")
+                    continue
+                if not isinstance(entries, list):
+                    errors.append(f"{member}: not a list")
+                    continue
+
+                file_stem = base[len("Tags-"):-len(".json")]
+                file_tag = _slugify(file_stem) or "prompt-builder"
+                extras = _tag_pack_extra_tags(base)
+
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    name = (entry.get("name") or "").strip()
+                    text_val = (entry.get("prompt") or "").strip()
+                    if not name or not text_val:
+                        continue
+                    category = (entry.get("category") or "").strip()
+                    cat_tag = _slugify(category) if category else ""
+                    tags = ["prompt-builder", file_tag]
+                    if cat_tag and cat_tag not in tags:
+                        tags.append(cat_tag)
+                    for ex in extras:
+                        if ex not in tags:
+                            tags.append(ex)
+                    tags = _parse_tags(tags)
+
+                    pid = _unique_id(_slugify(name) or "tag", set(index.keys()))
+                    item = {"id": pid, "name": name, "text": text_val, "tags": tags}
+                    _touch(item, created=True)
+                    items.append(item)
+                    index[pid] = item
+                    added += 1
+
+            _save(items)
+
+    return added, updated, errors
+
+
+@routes.post("/prompt_library/import_tag_packs")
+async def import_tag_packs_route(request):
+    reader = await request.post()
+    field = reader.get("file")
+    if field is None or not hasattr(field, "file"):
+        return web.json_response({"error": "no zip file provided"}, status=400)
+    body = field.file.read()
+    if len(body) > _MAX_IMPORT_ZIP_BYTES:
+        return web.json_response({"error": "zip too large"}, status=400)
+    added, updated, errors = _import_tag_pack_zip(body)
+    _notify_change()
+    return web.json_response({"added": added, "updated": updated, "errors": errors})
+
+
 @routes.post("/prompt_library/delete")
 async def delete_prompt(request):
     payload = await request.json()
@@ -923,7 +1029,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 
 def _autobackup_on_version_change() -> None:
@@ -965,10 +1071,10 @@ NODE_CLASS_MAPPINGS = {
     "PromptLibraryWildcard": PromptLibraryWildcard,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "PromptLibrary": "Ribbity — Library",
-    "PromptLibrarySave": "Ribbity — Save",
-    "PromptLibraryRandom": "Ribbity — Random by Tag",
-    "PromptLibraryWildcard": "Ribbity — Wildcard Expand",
+    "PromptLibrary": "GrimmRibbity — Library",
+    "PromptLibrarySave": "GrimmRibbity — Save",
+    "PromptLibraryRandom": "GrimmRibbity — Random by Tag",
+    "PromptLibraryWildcard": "GrimmRibbity — Wildcard Expand",
 }
 WEB_DIRECTORY = "./web"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]

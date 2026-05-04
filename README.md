@@ -1,6 +1,6 @@
-# Ribbity — ComfyUI Prompt Library
+# GrimmRibbity — ComfyUI Custom Node Suite
 
-A visual prompt manager for ComfyUI. Browse a thumbnail grid of saved prompts, tag them, drop them into your workflow with one click. Filesystem-backed — your library survives browser clears and syncs cleanly across machines.
+A visual prompt manager for ComfyUI (formerly *Ribbity — ComfyUI Prompt Library*). Browse a thumbnail grid of saved prompts, tag them, drop them into your workflow with one click. Filesystem-backed — your library survives browser clears and syncs cleanly across machines.
 
 Four nodes, one shared library, no third-party dependencies.
 
@@ -9,20 +9,20 @@ Four nodes, one shared library, no third-party dependencies.
 ### Comfy Portable (Windows)
 
 1. Download the latest [release zip](https://github.com/Deaththegrim/ComfyUI-PromptLibrary/releases/latest).
-2. Extract into `ComfyUI_windows_portable\ComfyUI\custom_nodes\` so the path becomes `…\custom_nodes\ComfyUI-PromptLibrary\__init__.py`.
+2. Extract into `ComfyUI_windows_portable\ComfyUI\custom_nodes\` so the path becomes `…\custom_nodes\ComfyUI-GrimmRibbity\__init__.py`.
 3. Restart ComfyUI.
 
 ### Linux / Mac (git clone)
 
 ```sh
 cd ComfyUI/custom_nodes
-git clone https://github.com/Deaththegrim/ComfyUI-PromptLibrary
+git clone https://github.com/Deaththegrim/ComfyUI-PromptLibrary ComfyUI-GrimmRibbity
 # restart ComfyUI
 ```
 
 To update later:
 ```sh
-cd ComfyUI/custom_nodes/ComfyUI-PromptLibrary
+cd ComfyUI/custom_nodes/ComfyUI-GrimmRibbity
 git pull
 # restart ComfyUI
 ```
@@ -33,10 +33,10 @@ Your `data/` folder is gitignored, so `git pull` won't touch your library. On fi
 
 After install, find them in the node menu under **utils/**:
 
-- **Ribbity — Library** — visual gallery picker, outputs `STRING` (the selected prompt's text)
-- **Ribbity — Save** — write prompts to the library during workflow runs (inputs: name, text, optional `IMAGE` thumbnail, optional tags)
-- **Ribbity — Random by Tag** — pick a random library entry by tag filter, for overnight gen loops
-- **Ribbity — Wildcard Expand** — expand `{a|b|c}` alternatives and `__name__` library refs in any string
+- **GrimmRibbity — Library** — visual gallery picker, outputs `STRING` (the selected prompt's text)
+- **GrimmRibbity — Save** — write prompts to the library during workflow runs (inputs: name, text, optional `IMAGE` thumbnail, optional tags)
+- **GrimmRibbity — Random by Tag** — pick a random library entry by tag filter, for overnight gen loops
+- **GrimmRibbity — Wildcard Expand** — expand `{a|b|c}` alternatives and `__name__` library refs in any string
 
 ## Gallery
 
@@ -56,7 +56,7 @@ The Library node embeds a full gallery in the node body:
 | Model dropdown | Lifts `model:*` tags into a top-level filter (Anima, SDXL, Pony, …) |
 | Sort | Manual (drag-reorder) / Name A-Z / Z-A / Newest / Oldest / Recent edit |
 | Tile size slider | 60–200 px, persisted per browser |
-| Import | Auto-detects `.csv` (columns: `name, text, tags, id` — tags use `;` inside cell) or Ribbity `.zip` |
+| Import | Auto-detects `.csv` (columns: `name, text, tags, id` — tags use `;` inside cell) or GrimmRibbity `.zip` |
 | Export | Packs currently visible prompts + thumbnails into a zip download |
 | Refresh | Reload from disk |
 
@@ -98,7 +98,7 @@ The Wildcard Expand node has independent toggles for `expand_choices` and `expan
 
 ## Storage
 
-Everything lives in `ComfyUI-PromptLibrary/data/`:
+Everything lives in `ComfyUI-GrimmRibbity/data/`:
 
 ```
 data/
@@ -142,8 +142,8 @@ For seeding from a spreadsheet, save as CSV with these columns (header row requi
 ## Development
 
 ```sh
-git clone https://github.com/Deaththegrim/ComfyUI-PromptLibrary
-cd ComfyUI-PromptLibrary
+git clone https://github.com/Deaththegrim/ComfyUI-PromptLibrary ComfyUI-GrimmRibbity
+cd ComfyUI-GrimmRibbity
 python3 -m venv .testenv
 .testenv/bin/pip install aiohttp pillow
 .testenv/bin/python -m unittest discover tests
@@ -153,12 +153,11 @@ python3 -m venv .testenv
 
 ## Credits
 
-Co-created by **[Deaththegrim](https://github.com/Deaththegrim)** and
-**RibbityRabbit** (whose feedback shaped most of the feature set — the
-branding is theirs too). Pair-programmed with **[Claude Code](https://claude.com/claude-code)**
-(Anthropic's CLI for Claude). Design decisions, scope calls, UX direction,
-and final review are the maintainers'; Claude wrote most of the code under
-that direction.
+See [CREDITS.md](CREDITS.md) for the full list. Short version: the suite is
+co-created by **[Deaththegrim](https://github.com/Deaththegrim)** and
+**RibbityRabbit**, pair-programmed with **[Claude Code](https://claude.com/claude-code)**.
+The bundled tag library originated in the **Prompt Builder** project by
+**AceVanquish**, **Drow**, and the rest of the Prompt Builder team.
 
 If you fork, remix, or publish a derivative, a credit line back to
 [Deaththegrim/ComfyUI-PromptLibrary](https://github.com/Deaththegrim/ComfyUI-PromptLibrary)
