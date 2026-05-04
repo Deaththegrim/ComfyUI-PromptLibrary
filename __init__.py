@@ -4,10 +4,12 @@ import json
 import os
 import random
 import re
+import shutil
 import sys
 import threading
 import time
 import uuid
+import zipfile
 from pathlib import Path
 
 from aiohttp import web
@@ -690,6 +692,148 @@ async def revert_prompt(request):
     })
 
 
+_MAX_IMPORT_ZIP_BYTES = 100 * 1024 * 1024
+
+
+def _build_export_zip(items: list[dict], version: str) -> bytes:
+    """Bundle prompts + thumbnail images into a zip. Returns the bytes."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        manifest = {
+            "format": "ribbity-prompt-library",
+            "format_version": 1,
+            "exported_with": version,
+            "exported_at": _now(),
+            "prompts": items,
+        }
+        zf.writestr("prompts.json", json.dumps(manifest, indent=2, ensure_ascii=False))
+        for item in items:
+            pid = item.get("id")
+            if not pid:
+                continue
+            img_path = _image_path_for(pid)
+            if img_path:
+                zf.write(img_path, arcname=f"images/{img_path.name}")
+    return buf.getvalue()
+
+
+@routes.post("/prompt_library/export")
+async def export_zip(request):
+    payload = await request.json() if request.body_exists else {}
+    requested = payload.get("ids") or []
+    with _lock:
+        items = _load()
+    if requested:
+        wanted = set(requested)
+        items = [i for i in items if i.get("id") in wanted]
+    data = _build_export_zip(items, __version__)
+    fname = f"ribbity-export-{int(_now())}.zip"
+    return web.Response(body=data, headers={
+        "Content-Type": "application/zip",
+        "Content-Disposition": f'attachment; filename="{fname}"',
+        "X-Ribbity-Count": str(len(items)),
+    })
+
+
+def _import_zip(zip_bytes: bytes) -> tuple[int, int, list[str]]:
+    """Import a Ribbity export zip. Returns (added, updated, errors)."""
+    errors: list[str] = []
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except zipfile.BadZipFile:
+        return 0, 0, ["not a valid zip file"]
+
+    with zf:
+        try:
+            manifest_raw = zf.read("prompts.json").decode("utf-8")
+            manifest = json.loads(manifest_raw)
+        except (KeyError, json.JSONDecodeError, UnicodeDecodeError) as e:
+            return 0, 0, [f"missing or invalid prompts.json in zip: {e}"]
+
+        new_prompts = manifest.get("prompts") if isinstance(manifest, dict) else None
+        if not isinstance(new_prompts, list):
+            return 0, 0, ["prompts.json has no 'prompts' list"]
+
+        added = updated = 0
+        names_in_zip = set(zf.namelist())
+
+        with _lock:
+            items = _load()
+            index = {i.get("id"): i for i in items}
+
+            for raw in new_prompts:
+                if not isinstance(raw, dict):
+                    errors.append("skipping non-dict entry")
+                    continue
+                pid = (raw.get("id") or "").strip()
+                name = (raw.get("name") or "").strip()
+                if not _safe_id(pid):
+                    errors.append(f"skipping entry with invalid id {pid!r}")
+                    continue
+                if not name:
+                    errors.append(f"skipping entry id={pid!r} with empty name")
+                    continue
+
+                text_val = raw.get("text", "") or ""
+                tags = _parse_tags(raw.get("tags") or [])
+                history = raw.get("history") if isinstance(raw.get("history"), list) else None
+
+                existing = index.get(pid)
+                created = existing is None
+                if created:
+                    existing = {"id": pid}
+                    items.append(existing)
+                    index[pid] = existing
+                    added += 1
+                else:
+                    _maybe_push_history(existing, name, text_val, tags)
+                    updated += 1
+
+                existing["name"] = name
+                existing["text"] = text_val
+                existing["tags"] = tags
+                if history is not None and not created:
+                    # Merge histories (incoming first, then existing); cap.
+                    merged = list(history) + list(existing.get("history") or [])
+                    existing["history"] = merged[-_HISTORY_CAP:]
+                elif history is not None:
+                    existing["history"] = list(history)[-_HISTORY_CAP:]
+                _touch(existing, created=created)
+
+                # Restore thumbnail if present in zip.
+                for ext in _ALLOWED_IMAGE_EXT:
+                    arc = f"images/{pid}{ext}"
+                    if arc in names_in_zip:
+                        try:
+                            img_data = zf.read(arc)
+                        except KeyError:
+                            break
+                        if len(img_data) > _MAX_IMAGE_BYTES:
+                            errors.append(f"image for {pid!r} too large, skipped")
+                            break
+                        _delete_image_files(pid)
+                        (IMAGES_DIR / f"{pid}{ext}").write_bytes(img_data)
+                        break
+
+            _save(items)
+
+    return added, updated, errors
+
+
+@routes.post("/prompt_library/import_zip")
+async def import_zip_route(request):
+    reader = await request.post()
+    field = reader.get("file")
+    if field is None or not hasattr(field, "file"):
+        return web.json_response({"error": "no zip file provided"}, status=400)
+    body = field.file.read()
+    if len(body) > _MAX_IMPORT_ZIP_BYTES:
+        return web.json_response({"error": "zip too large"}, status=400)
+    added, updated, errors = _import_zip(body)
+    _notify_change()
+    return web.json_response({"added": added, "updated": updated, "errors": errors})
+
+
 @routes.post("/prompt_library/delete")
 async def delete_prompt(request):
     payload = await request.json()
@@ -704,7 +848,40 @@ async def delete_prompt(request):
     return web.json_response({"ok": True})
 
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
+
+
+def _autobackup_on_version_change() -> None:
+    """Snapshot data/ to a sibling backup folder whenever __version__ changes.
+
+    Cheap insurance against a botched upgrade. First run (no recorded version)
+    skips the backup. Tests skip via the unittest gate.
+    """
+    marker = DATA_DIR / ".last_version"
+    try:
+        last = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
+    except OSError:
+        last = ""
+    if last == __version__:
+        return
+    has_data = STORE_PATH.exists() or any(p for p in IMAGES_DIR.iterdir() if p.name != ".gitkeep")
+    if last and has_data:
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        backup_dir = ROOT / f"data-backup-{last}-{ts}"
+        try:
+            shutil.copytree(DATA_DIR, backup_dir,
+                            ignore=shutil.ignore_patterns("*.tmp", ".gitkeep", ".last_version"))
+            print(f"[PromptLibrary] backed up data/ to {backup_dir.name} (version {last} -> {__version__})")
+        except OSError as e:
+            print(f"[PromptLibrary] auto-backup failed: {e}")
+    try:
+        marker.write_text(__version__, encoding="utf-8")
+    except OSError as e:
+        print(f"[PromptLibrary] could not write version marker: {e}")
+
+
+if "unittest" not in sys.modules and not os.environ.get("PROMPT_LIBRARY_NO_WATCHER"):
+    _autobackup_on_version_change()
 
 NODE_CLASS_MAPPINGS = {
     "PromptLibrary": PromptLibrary,

@@ -129,6 +129,40 @@ async function importCsv(file) {
   return res.json();
 }
 
+async function importZip(file) {
+  const body = new FormData();
+  body.append("file", file, file.name);
+  const res = await api.fetchApi("/prompt_library/import_zip", { method: "POST", body });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+async function exportZip(ids) {
+  const res = await api.fetchApi("/prompt_library/export", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids: ids || [] }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const count = parseInt(res.headers.get("X-Ribbity-Count") || "0", 10);
+  const blob = await res.blob();
+  return { blob, count };
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
 async function fetchHistory(id) {
   const res = await api.fetchApi(`/prompt_library/history/${encodeURIComponent(id)}`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -507,17 +541,22 @@ function buildGallery(node, idWidget) {
   const importBtn = document.createElement("button");
   importBtn.className = "pl-btn";
   importBtn.textContent = "Import";
-  importBtn.title = "Bulk import from CSV (columns: name, text, tags, id)";
-  const csvInput = document.createElement("input");
-  csvInput.type = "file";
-  csvInput.accept = ".csv,text/csv";
-  csvInput.style.display = "none";
-  importBtn.onclick = () => csvInput.click();
+  importBtn.title = "Import from a CSV (name,text,tags,id) or a Ribbity .zip";
+  const fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.accept = ".csv,text/csv,.zip,application/zip";
+  fileInput.style.display = "none";
+  importBtn.onclick = () => fileInput.click();
+
+  const exportBtn = document.createElement("button");
+  exportBtn.className = "pl-btn";
+  exportBtn.textContent = "Export";
+  exportBtn.title = "Export the currently visible prompts (with thumbnails) as a .zip";
 
   const refreshBtn = document.createElement("button");
   refreshBtn.className = "pl-btn";
   refreshBtn.textContent = "Refresh";
-  toolbar.append(filter, modelSelect, sortSelect, importBtn, refreshBtn, csvInput);
+  toolbar.append(filter, modelSelect, sortSelect, importBtn, exportBtn, refreshBtn, fileInput);
 
   const tagsRow = document.createElement("div");
   tagsRow.className = "pl-tags-row";
@@ -528,6 +567,7 @@ function buildGallery(node, idWidget) {
   container.append(toolbar, tagsRow, grid);
 
   let prompts = [];
+  let lastVisible = [];
   const activeTags = new Set();
 
   const updateModelSelect = () => {
@@ -637,6 +677,7 @@ function buildGallery(node, idWidget) {
     }
     const mode = SORT_MODES[sortSelect.value] || SORT_MODES.name_asc;
     visible = [...visible].sort(mode.cmp);
+    lastVisible = visible;
     for (const p of visible) {
       const tile = document.createElement("div");
       tile.className = "pl-tile" + (p.id === idWidget.value ? " selected" : "");
@@ -715,14 +756,16 @@ function buildGallery(node, idWidget) {
     render();
   };
   modelSelect.onchange = render;
-  csvInput.onchange = async () => {
-    const file = csvInput.files[0];
+  fileInput.onchange = async () => {
+    const file = fileInput.files[0];
     if (!file) return;
+    const isZip = file.name.toLowerCase().endsWith(".zip") || file.type === "application/zip";
     try {
-      const result = await importCsv(file);
-      const msg = `Imported: ${result.added} added, ${result.updated} updated`
+      const result = isZip ? await importZip(file) : await importCsv(file);
+      const kind = isZip ? "ZIP" : "CSV";
+      const msg = `${kind} import: ${result.added} added, ${result.updated} updated`
         + (result.errors?.length ? ` (${result.errors.length} errors — see console)` : "");
-      if (result.errors?.length) console.warn("[PromptLibrary] CSV import errors:", result.errors);
+      if (result.errors?.length) console.warn(`[PromptLibrary] ${kind} import errors:`, result.errors);
       grid.replaceChildren(Object.assign(document.createElement("div"),
         { className: "pl-status", textContent: msg }));
       await refresh();
@@ -730,7 +773,30 @@ function buildGallery(node, idWidget) {
       grid.replaceChildren(Object.assign(document.createElement("div"),
         { className: "pl-status error", textContent: `Import failed: ${e.message}` }));
     } finally {
-      csvInput.value = "";
+      fileInput.value = "";
+    }
+  };
+
+  exportBtn.onclick = async () => {
+    if (!lastVisible.length) {
+      alert("Nothing to export (the current filter shows no prompts).");
+      return;
+    }
+    const exportingAll = lastVisible.length === prompts.length;
+    const summary = exportingAll
+      ? `Export all ${prompts.length} prompts (with thumbnails)?`
+      : `Export ${lastVisible.length} of ${prompts.length} visible prompts (with thumbnails)?`;
+    if (!confirm(summary)) return;
+    exportBtn.disabled = true;
+    try {
+      const ids = exportingAll ? [] : lastVisible.map(p => p.id);
+      const { blob, count } = await exportZip(ids);
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      downloadBlob(blob, `ribbity-export-${stamp}-${count}prompts.zip`);
+    } catch (e) {
+      alert(`Export failed: ${e.message}`);
+    } finally {
+      exportBtn.disabled = false;
     }
   };
 

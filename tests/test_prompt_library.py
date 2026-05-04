@@ -46,7 +46,8 @@ def _load_module(tmp_root: Path):
     spec = importlib.util.spec_from_file_location(f"plib_{tmp_root.name}", INIT_PY)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    # Redirect storage paths to the temp dir.
+    # Redirect storage paths to the temp dir so tests don't pollute the real repo.
+    mod.ROOT = tmp_root
     mod.DATA_DIR = tmp_root / "data"
     mod.IMAGES_DIR = mod.DATA_DIR / "images"
     mod.STORE_PATH = mod.DATA_DIR / "prompts.json"
@@ -774,6 +775,110 @@ class PromptLibraryTests(unittest.TestCase):
         node = self.mod.PromptLibraryWildcard()
         out = node.expand(text="__a__ {x|y}", seed=0, expand_choices=False, expand_named_refs=False)
         self.assertEqual(out[0], "__a__ {x|y}")
+
+    # ---- ZIP export / import -------------------------------------------
+
+    def test_export_zip_roundtrip(self):
+        # Create entries (one with image), export, wipe, re-import.
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+        req = FakeRequest(post_data={
+            "name": "Knight", "text": "armored knight", "tags": "character, fantasy",
+            "image": FakeFileField("knight.png", png_bytes),
+        })
+        body = json.loads(asyncio.run(self.mod.upsert_prompt(req)).body)
+        knight_id = body["id"]
+        asyncio.run(self.mod.upsert_prompt(FakeRequest(post_data={
+            "name": "Wizard", "text": "old wizard", "tags": "character",
+        })))
+
+        # Export both
+        with self.mod._lock:
+            items = self.mod._load()
+        zip_bytes = self.mod._build_export_zip(items, "test-1.0")
+        self.assertGreater(len(zip_bytes), 100)
+
+        # Wipe and re-import
+        self.mod._save([])
+        self.mod._delete_image_files(knight_id)
+        added, updated, errors = self.mod._import_zip(zip_bytes)
+        self.assertEqual(added, 2)
+        self.assertEqual(updated, 0)
+        self.assertEqual(errors, [])
+        items = self.mod._load()
+        self.assertEqual(len(items), 2)
+        # Knight image preserved
+        self.assertIsNotNone(self.mod._image_path_for(knight_id))
+
+    def test_import_zip_updates_existing(self):
+        # First entry
+        req1 = FakeRequest(post_data={"name": "X", "text": "v1"})
+        pid = json.loads(asyncio.run(self.mod.upsert_prompt(req1)).body)["id"]
+        # Build a zip describing the same id but different text
+        items = [{"id": pid, "name": "X", "text": "v2 from zip", "tags": []}]
+        zip_bytes = self.mod._build_export_zip(items, "test")
+        added, updated, errors = self.mod._import_zip(zip_bytes)
+        self.assertEqual(added, 0)
+        self.assertEqual(updated, 1)
+        entry = next(i for i in self.mod._load() if i["id"] == pid)
+        self.assertEqual(entry["text"], "v2 from zip")
+        self.assertEqual(len(entry["history"]), 1)
+        self.assertEqual(entry["history"][0]["text"], "v1")
+
+    def test_import_zip_rejects_bad_zip(self):
+        added, updated, errors = self.mod._import_zip(b"not a zip")
+        self.assertEqual((added, updated), (0, 0))
+        self.assertTrue(errors)
+
+    def test_import_zip_rejects_missing_manifest(self):
+        buf = io.BytesIO()
+        with __import__("zipfile").ZipFile(buf, "w") as zf:
+            zf.writestr("readme.txt", "hello")
+        added, updated, errors = self.mod._import_zip(buf.getvalue())
+        self.assertEqual((added, updated), (0, 0))
+        self.assertTrue(any("prompts.json" in e for e in errors))
+
+    def test_import_zip_skips_invalid_id(self):
+        items = [{"id": "../bad", "name": "X", "text": "t"}]
+        zip_bytes = self.mod._build_export_zip(items, "test")
+        added, updated, errors = self.mod._import_zip(zip_bytes)
+        self.assertEqual(added, 0)
+        self.assertTrue(any("invalid id" in e for e in errors))
+
+    def test_import_zip_skips_empty_name(self):
+        items = [{"id": "abc", "name": "", "text": "t"}]
+        zip_bytes = self.mod._build_export_zip(items, "test")
+        added, updated, errors = self.mod._import_zip(zip_bytes)
+        self.assertEqual(added, 0)
+        self.assertTrue(any("empty name" in e for e in errors))
+
+    # ---- auto-backup --------------------------------------------------
+
+    def test_autobackup_skips_first_run(self):
+        # First run: no marker, no backup created.
+        self.mod._save([{"id": "x", "name": "X", "text": "t"}])
+        self.mod._autobackup_on_version_change()
+        backups = [p for p in self.mod.ROOT.iterdir() if p.is_dir() and p.name.startswith("data-backup-")]
+        self.assertEqual(backups, [])
+
+    def test_autobackup_on_version_change(self):
+        # Seed a marker with an older version.
+        (self.mod.DATA_DIR / ".last_version").write_text("0.0.1")
+        self.mod._save([{"id": "x", "name": "X", "text": "t"}])
+        self.mod._autobackup_on_version_change()
+        backups = sorted(p.name for p in self.mod.ROOT.iterdir()
+                         if p.is_dir() and p.name.startswith("data-backup-0.0.1-"))
+        self.assertEqual(len(backups), 1)
+        # Backup contains the prompts.json from before the upgrade
+        backed_up = self.mod.ROOT / backups[0] / "prompts.json"
+        self.assertTrue(backed_up.exists())
+        self.assertIn('"id": "x"', backed_up.read_text())
+
+    def test_autobackup_no_backup_when_version_unchanged(self):
+        (self.mod.DATA_DIR / ".last_version").write_text(self.mod.__version__)
+        self.mod._save([{"id": "x", "name": "X", "text": "t"}])
+        self.mod._autobackup_on_version_change()
+        backups = [p for p in self.mod.ROOT.iterdir() if p.is_dir() and p.name.startswith("data-backup-")]
+        self.assertEqual(backups, [])
 
     # ---- watcher (smoke) -----------------------------------------------
 
