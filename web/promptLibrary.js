@@ -27,11 +27,16 @@ const CSS = `
 .pl-add { display: flex; align-items: center; justify-content: center; font-size: 28px; color: #888;
   background: #232323; border: 2px dashed #555; }
 .pl-add:hover { color: #ddd; border-color: #888; }
-.pl-modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 10000;
-  display: flex; align-items: center; justify-content: center; }
-.pl-modal { background: #2a2a2a; color: #ddd; padding: 16px; border-radius: 6px; min-width: 380px;
-  max-width: 520px; display: flex; flex-direction: column; gap: 10px; font-family: sans-serif; font-size: 13px; }
-.pl-modal h3 { margin: 0; font-size: 14px; }
+.pl-modal { position: fixed; z-index: 10000; background: #2a2a2a; color: #ddd; padding: 0 14px 14px;
+  border-radius: 6px; width: 460px; box-shadow: 0 8px 32px rgba(0,0,0,0.6); border: 1px solid #444;
+  display: flex; flex-direction: column; gap: 10px; font-family: sans-serif; font-size: 13px; }
+.pl-modal-header { display: flex; align-items: center; gap: 8px; cursor: move;
+  user-select: none; padding: 6px 10px; margin: 0 -14px 4px; background: #1f1f1f;
+  border-radius: 6px 6px 0 0; border-bottom: 1px solid #444; }
+.pl-modal-header h3 { flex: 1; margin: 0; font-size: 13px; }
+.pl-modal-close { background: transparent; border: none; color: #aaa; font-size: 18px;
+  line-height: 1; cursor: pointer; padding: 0 4px; }
+.pl-modal-close:hover { color: #fff; }
 .pl-modal label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: #aaa; }
 .pl-modal input[type=text], .pl-modal textarea { background: #1c1c1c; color: #ddd; border: 1px solid #444;
   padding: 6px; border-radius: 3px; font-size: 12px; font-family: inherit; }
@@ -88,14 +93,22 @@ function imageUrl(id) {
                     : `/prompt_library/image/${id}?t=${Date.now()}`;
 }
 
+let _modalStack = 0;
+
 function openPromptModal({ existing, onSave, onDelete }) {
-  const bg = document.createElement("div");
-  bg.className = "pl-modal-bg";
   const modal = document.createElement("div");
   modal.className = "pl-modal";
 
+  const header = document.createElement("div");
+  header.className = "pl-modal-header";
   const title = document.createElement("h3");
   title.textContent = existing ? "Edit prompt" : "Add prompt";
+  const closeX = document.createElement("button");
+  closeX.className = "pl-modal-close";
+  closeX.type = "button";
+  closeX.textContent = "✕";
+  closeX.title = "Close";
+  header.append(title, closeX);
 
   const nameLabel = document.createElement("label");
   nameLabel.textContent = "Name";
@@ -163,13 +176,28 @@ function openPromptModal({ existing, onSave, onDelete }) {
   cancelBtn.className = "pl-btn";
   cancelBtn.textContent = "Cancel";
 
+  // Stop key events from bubbling to LiteGraph (typing in inputs would otherwise
+  // trigger canvas shortcuts like delete-node).
+  for (const ev of ["keydown", "keyup", "keypress"]) {
+    modal.addEventListener(ev, (e) => e.stopPropagation());
+  }
+
+  let dragCleanup = null;
   const onKey = (e) => {
-    if (e.key === "Escape") { e.stopPropagation(); close(); }
+    if (e.key === "Escape" && modal.contains(document.activeElement)) {
+      e.stopPropagation();
+      close();
+    }
   };
-  const close = () => { document.removeEventListener("keydown", onKey, true); bg.remove(); };
+  const close = () => {
+    document.removeEventListener("keydown", onKey, true);
+    dragCleanup?.();
+    modal.remove();
+    _modalStack = Math.max(0, _modalStack - 1);
+  };
   document.addEventListener("keydown", onKey, true);
+  closeX.onclick = close;
   cancelBtn.onclick = close;
-  bg.onclick = (e) => { if (e.target === bg) close(); };
 
   saveBtn.onclick = async () => {
     const name = nameInput.value.trim();
@@ -211,10 +239,54 @@ function openPromptModal({ existing, onSave, onDelete }) {
   actions.appendChild(cancelBtn);
   actions.appendChild(saveBtn);
 
-  modal.append(title, nameLabel, textLabel, imgLabel, status, actions);
-  bg.appendChild(modal);
-  document.body.appendChild(bg);
+  modal.append(header, nameLabel, textLabel, imgLabel, status, actions);
+
+  // Initial position: cascade modals so stacked windows don't overlap exactly.
+  const offset = (_modalStack++ % 6) * 24;
+  modal.style.left = `calc(50% - 230px + ${offset}px)`;
+  modal.style.top = `calc(15% + ${offset}px)`;
+  document.body.appendChild(modal);
+
+  dragCleanup = makeDraggable(modal, header);
   nameInput.focus();
+}
+
+function makeDraggable(panel, handle) {
+  let dragging = false;
+  let startX = 0, startY = 0, panelX = 0, panelY = 0;
+
+  const onDown = (e) => {
+    if (e.button !== 0 || e.target.closest("button, input, textarea, select")) return;
+    const rect = panel.getBoundingClientRect();
+    panel.style.left = rect.left + "px";
+    panel.style.top = rect.top + "px";
+    panelX = rect.left;
+    panelY = rect.top;
+    startX = e.clientX;
+    startY = e.clientY;
+    dragging = true;
+    e.preventDefault();
+  };
+  const onMove = (e) => {
+    if (!dragging) return;
+    const x = panelX + (e.clientX - startX);
+    const y = panelY + (e.clientY - startY);
+    const maxX = window.innerWidth - panel.offsetWidth;
+    const maxY = window.innerHeight - 40;
+    panel.style.left = Math.max(0, Math.min(maxX, x)) + "px";
+    panel.style.top = Math.max(0, Math.min(maxY, y)) + "px";
+  };
+  const onUp = () => { dragging = false; };
+
+  handle.addEventListener("mousedown", onDown);
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+
+  return () => {
+    handle.removeEventListener("mousedown", onDown);
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+  };
 }
 
 function buildGallery(node, idWidget) {
