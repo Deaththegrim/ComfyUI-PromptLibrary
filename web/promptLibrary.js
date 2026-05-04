@@ -23,7 +23,7 @@ const CSS = `
   transition: border-color 80ms ease, transform 80ms ease; }
 .pl-tile:hover { border-color: #555; transform: scale(1.02); }
 .pl-tile.selected, .pl-tile.selected:hover { border-color: #6cf; }
-.pl-tile.checked { box-shadow: 0 0 0 2px #f9a inset; }
+.pl-tile.focused { box-shadow: 0 0 0 2px #f9a inset; }
 .pl-tile.dragging { opacity: 0.4; }
 .pl-tile.drag-over { outline: 2px dashed #6cf; outline-offset: -4px; }
 .pl-tile-img { position: relative; width: 100%; aspect-ratio: 1 / 1; overflow: hidden;
@@ -32,8 +32,8 @@ const CSS = `
   background: rgba(0,0,0,0.7); color: #fff; border: 1px solid #888; border-radius: 3px;
   display: none; align-items: center; justify-content: center; font-size: 11px;
   z-index: 1; cursor: pointer; user-select: none; }
-.pl-tile:hover .pl-tile-check, .pl-tile.checked .pl-tile-check { display: flex; }
-.pl-tile.checked .pl-tile-check { background: #6cf; color: #111; border-color: #6cf; }
+.pl-tile:hover .pl-tile-check, .pl-tile.selected .pl-tile-check { display: flex; }
+.pl-tile.selected .pl-tile-check { background: #6cf; color: #111; border-color: #6cf; }
 .pl-context-menu { position: fixed; z-index: 10001; background: #2a2a2a; color: #ddd;
   border: 1px solid #444; border-radius: 4px; box-shadow: 0 4px 16px rgba(0,0,0,0.6);
   padding: 4px 0; min-width: 140px; font-size: 12px; user-select: none; }
@@ -760,7 +760,23 @@ function buildGallery(node, idWidget) {
   let lastVisible = [];
   let focusedIndex = -1;        // for keyboard nav
   const activeTags = new Set();
-  const checkedIds = new Set(); // for bulk operations
+  // Unified selection: drives both the prompt output (joined into idWidget.value)
+  // and bulk actions (Tag/Export/Delete bar).
+  const checkedIds = new Set();
+  const syncWidget = () => {
+    idWidget.value = [...checkedIds].join(",");
+    node.setDirtyCanvas(true, true);
+  };
+  // Repopulate checkedIds from the (comma-separated) widget value. Used on
+  // workflow load and on Nodes 2.0 setValue, so the gallery highlights match
+  // whatever was saved. Tolerates legacy single-id values.
+  const syncFromWidget = () => {
+    checkedIds.clear();
+    for (const raw of (idWidget.value || "").split(",")) {
+      const id = raw.trim();
+      if (id) checkedIds.add(id);
+    }
+  };
 
   const bulkBar = document.createElement("div");
   bulkBar.className = "pl-bulk-bar";
@@ -770,7 +786,7 @@ function buildGallery(node, idWidget) {
   const bulkClearBtn = document.createElement("button");
   bulkClearBtn.className = "pl-btn";
   bulkClearBtn.textContent = "Clear";
-  bulkClearBtn.onclick = () => { checkedIds.clear(); render(); };
+  bulkClearBtn.onclick = () => { checkedIds.clear(); syncWidget(); render(); };
   const bulkExportBtn = document.createElement("button");
   bulkExportBtn.className = "pl-btn";
   bulkExportBtn.textContent = "Export";
@@ -811,8 +827,8 @@ function buildGallery(node, idWidget) {
     bulkDeleteBtn.disabled = true;
     try {
       await bulkDelete(ids);
-      if (ids.includes(idWidget.value)) idWidget.value = "";
       checkedIds.clear();
+      syncWidget();
       await refresh();
     } catch (e) { alert(`Delete failed: ${e.message}`); }
     finally { bulkDeleteBtn.disabled = false; }
@@ -990,9 +1006,8 @@ function buildGallery(node, idWidget) {
     visible.forEach((p, idx) => {
       const tile = document.createElement("div");
       tile.className = "pl-tile"
-        + (p.id === idWidget.value ? " selected" : "")
-        + (checkedIds.has(p.id) ? " checked" : "")
-        + (idx === focusedIndex ? " selected" : "");
+        + (checkedIds.has(p.id) ? " selected" : "")
+        + (idx === focusedIndex ? " focused" : "");
       tile.title = p.name;
       tile.dataset.promptId = p.id;
       tile.tabIndex = -1;
@@ -1020,11 +1035,13 @@ function buildGallery(node, idWidget) {
       const checkbox = document.createElement("div");
       checkbox.className = "pl-tile-check";
       checkbox.textContent = checkedIds.has(p.id) ? "✓" : "";
-      checkbox.title = "Select for bulk action";
+      checkbox.title = "Toggle selection";
       checkbox.onclick = (e) => {
         e.stopPropagation();
         if (checkedIds.has(p.id)) checkedIds.delete(p.id);
         else checkedIds.add(p.id);
+        focusedIndex = idx;
+        syncWidget();
         render();
       };
       tileImg.appendChild(checkbox);
@@ -1036,27 +1053,22 @@ function buildGallery(node, idWidget) {
       tile.appendChild(nm);
 
       tile.onclick = (e) => {
-        // Shift-click: range select for bulk actions, no output change.
+        // Shift-click: range-extend the selection from the focused anchor to here.
         if (e.shiftKey && lastVisible.length) {
-          const anchor = lastVisible.findIndex(x => checkedIds.has(x.id));
-          const i0 = anchor < 0 ? idx : Math.min(anchor, idx);
-          const i1 = anchor < 0 ? idx : Math.max(anchor, idx);
+          const anchor = focusedIndex >= 0 ? focusedIndex : idx;
+          const i0 = Math.min(anchor, idx);
+          const i1 = Math.max(anchor, idx);
           for (let i = i0; i <= i1; i++) checkedIds.add(lastVisible[i].id);
+          focusedIndex = idx;
+          syncWidget();
           render();
           return;
         }
-        // Ctrl/Cmd-click: toggle in bulk set, no output change.
-        if (e.ctrlKey || e.metaKey) {
-          if (checkedIds.has(p.id)) checkedIds.delete(p.id);
-          else checkedIds.add(p.id);
-          render();
-          return;
-        }
-        // Plain click: set output (current behaviour).
-        const wasSelected = idWidget.value === p.id;
-        idWidget.value = wasSelected ? "" : p.id;
-        node.setDirtyCanvas(true, true);
+        // Plain or Ctrl/Cmd click: toggle this tile's selection.
+        if (checkedIds.has(p.id)) checkedIds.delete(p.id);
+        else checkedIds.add(p.id);
         focusedIndex = idx;
+        syncWidget();
         render();
       };
 
@@ -1068,7 +1080,7 @@ function buildGallery(node, idWidget) {
               onSave: async (payload) => { await upsert(payload); await refresh(); },
               onDelete: async (id) => {
                 await deletePrompt(id);
-                if (idWidget.value === id) idWidget.value = "";
+                if (checkedIds.delete(id)) syncWidget();
                 await refresh();
               },
             }) },
@@ -1088,8 +1100,7 @@ function buildGallery(node, idWidget) {
               if (!confirm(`Delete "${p.name}"?`)) return;
               try {
                 await deletePrompt(p.id);
-                if (idWidget.value === p.id) idWidget.value = "";
-                checkedIds.delete(p.id);
+                if (checkedIds.delete(p.id)) syncWidget();
                 await refresh();
               } catch (err) { alert(`Delete failed: ${err.message}`); }
             } },
@@ -1134,7 +1145,8 @@ function buildGallery(node, idWidget) {
       openPromptModal({
         onSave: async (payload) => {
           const created = await upsert(payload);
-          idWidget.value = created.id;
+          checkedIds.add(created.id);
+          syncWidget();
           await refresh();
         },
       });
@@ -1249,9 +1261,9 @@ function buildGallery(node, idWidget) {
       e.preventDefault();
       const p = lastVisible[focusedIndex];
       if (!p) return;
-      const wasSelected = idWidget.value === p.id;
-      idWidget.value = wasSelected ? "" : p.id;
-      node.setDirtyCanvas(true, true);
+      if (checkedIds.has(p.id)) checkedIds.delete(p.id);
+      else checkedIds.add(p.id);
+      syncWidget();
       render();
     }
     else if (e.key === "Delete" || e.key === "Backspace") {
@@ -1260,14 +1272,14 @@ function buildGallery(node, idWidget) {
       if (!p) return;
       if (!confirm(`Delete "${p.name}"?`)) return;
       deletePrompt(p.id).then(() => {
-        if (idWidget.value === p.id) idWidget.value = "";
-        checkedIds.delete(p.id);
+        if (checkedIds.delete(p.id)) syncWidget();
         refresh();
       }).catch(err => alert(`Delete failed: ${err.message}`));
     }
     else if (e.key === "Escape") {
       e.preventDefault();
       checkedIds.clear();
+      syncWidget();
       focusedIndex = -1;
       render();
     }
@@ -1283,9 +1295,10 @@ function buildGallery(node, idWidget) {
   grid.replaceChildren(Object.assign(document.createElement("div"), {
     className: "pl-status", textContent: "loading...",
   }));
+  syncFromWidget();
   refresh();
 
-  return { container, refresh, render };
+  return { container, refresh, render, syncFromWidget };
 }
 
 let _wsListenerInstalled = false;
@@ -1327,7 +1340,7 @@ app.registerExtension({
         idWidget.draw = () => {};
       }
 
-      const { container, render } = buildGallery(this, idWidget);
+      const { container, render, syncFromWidget } = buildGallery(this, idWidget);
       // Defensive: container needs explicit dimensions because Nodes 2.0
       // doesn't always give DOM widgets a sized wrapper before first paint.
       container.style.minHeight = "240px";
@@ -1342,10 +1355,12 @@ app.registerExtension({
         getValue: () => idWidget?.value || "",
         setValue: (v) => {
           if (idWidget) idWidget.value = v;
+          syncFromWidget?.();
           render?.();
         },
       });
       this._promptLibraryRender = render;
+      this._promptLibrarySyncFromWidget = syncFromWidget;
       this._promptLibraryGalleryWidget = galleryWidget;
 
       this.size = [320, 320];
@@ -1357,6 +1372,7 @@ app.registerExtension({
     nodeType.prototype.onConfigure = function () {
       const r = onConfigure?.apply(this, arguments);
       // Re-render so the tile matching the workflow's saved prompt_id gets highlighted.
+      this._promptLibrarySyncFromWidget?.();
       this._promptLibraryRender?.();
       return r;
     };

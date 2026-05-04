@@ -225,6 +225,7 @@ class PromptLibrary:
         return {
             "required": {
                 "prompt_id": ("STRING", {"default": "", "multiline": False}),
+                "separator": ("STRING", {"default": ", ", "multiline": False}),
             }
         }
 
@@ -233,22 +234,31 @@ class PromptLibrary:
     FUNCTION = "load_prompt"
     CATEGORY = "utils"
 
-    @classmethod
-    def IS_CHANGED(cls, prompt_id):
-        with _lock:
-            for item in _load():
-                if item.get("id") == prompt_id:
-                    return item.get("text", "")
-        return ""
+    @staticmethod
+    def _split_ids(prompt_id: str) -> list[str]:
+        return [p.strip() for p in (prompt_id or "").split(",") if p.strip()]
 
-    def load_prompt(self, prompt_id: str):
+    @classmethod
+    def IS_CHANGED(cls, prompt_id, separator=", "):
+        ids = cls._split_ids(prompt_id)
         with _lock:
-            for item in _load():
-                if item.get("id") == prompt_id:
-                    return (item.get("text", ""),)
-        if prompt_id:
-            print(f"[PromptLibrary] no prompt with id={prompt_id!r}; returning empty string")
-        return ("",)
+            items = {i.get("id"): i.get("text", "") for i in _load()}
+        return separator.join(items.get(pid, "") for pid in ids)
+
+    def load_prompt(self, prompt_id: str, separator: str = ", "):
+        ids = self._split_ids(prompt_id)
+        with _lock:
+            items = {i.get("id"): i.get("text", "") for i in _load()}
+        parts = []
+        missing = []
+        for pid in ids:
+            if pid in items:
+                parts.append(items[pid])
+            else:
+                missing.append(pid)
+        if missing:
+            print(f"[PromptLibrary] no prompt with id(s)={missing!r}; skipped")
+        return (separator.join(parts),)
 
 
 _NAMED_REF_RE = re.compile(r"__([A-Za-z0-9_:.\-]+)__")
@@ -1029,7 +1039,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.10.1"
+__version__ = "0.10.2"
 
 
 def _autobackup_on_version_change() -> None:

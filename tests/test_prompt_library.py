@@ -125,6 +125,22 @@ class PromptLibraryTests(unittest.TestCase):
         node = self.mod.PromptLibrary()
         self.assertEqual(node.load_prompt(""), ("",))
 
+    def test_load_prompt_joins_multiple_ids_with_separator(self):
+        self.mod._save([
+            {"id": "a", "name": "A", "text": "alpha"},
+            {"id": "b", "name": "B", "text": "beta"},
+            {"id": "c", "name": "C", "text": "gamma"},
+        ])
+        node = self.mod.PromptLibrary()
+        self.assertEqual(node.load_prompt("a,b,c"), ("alpha, beta, gamma",))
+        self.assertEqual(node.load_prompt("a, b , c"), ("alpha, beta, gamma",))
+        self.assertEqual(node.load_prompt("a,c", separator=" | "), ("alpha | gamma",))
+
+    def test_load_prompt_skips_missing_in_multi_id(self):
+        self.mod._save([{"id": "a", "name": "A", "text": "alpha"}])
+        node = self.mod.PromptLibrary()
+        self.assertEqual(node.load_prompt("a,missing,a"), ("alpha, alpha",))
+
     def test_is_changed_reflects_text(self):
         self.mod._save([{"id": "k", "name": "n", "text": "v1"}])
         self.assertEqual(self.mod.PromptLibrary.IS_CHANGED("k"), "v1")
