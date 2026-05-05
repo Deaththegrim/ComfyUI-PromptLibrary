@@ -322,7 +322,7 @@ class GrimmRibbityPackSDXLTuple:
     RETURN_NAMES = ("sdxl_tuple",)
     OUTPUT_TOOLTIPS = ("8-element tuple wire-compatible with efficiency-nodes' SDXL_TUPLE.",)
     FUNCTION = "pack"
-    CATEGORY = "utils"
+    CATEGORY = "GrimmRibbity/SDXL"
 
     def pack(self, base_model, base_clip, base_positive, base_negative,
              refiner_model=None, refiner_clip=None, refiner_positive=None,
@@ -417,7 +417,7 @@ class GrimmRibbityHiResFixScript:
     RETURN_NAMES = ("script",)
     OUTPUT_TOOLTIPS = ("Pipe to wire into the GrimmRibbity SDXL Sampler's `script` input.",)
     FUNCTION = "build"
-    CATEGORY = "utils"
+    CATEGORY = "GrimmRibbity/SDXL"
 
     def build(self, upscale_type, hires_ckpt_name, latent_upscaler, pixel_upscaler,
               upscale_by, use_same_seed, seed, hires_steps, hires_denoise, hires_cfg,
@@ -651,7 +651,7 @@ class GrimmRibbitySamplerSDXL:
         "SDXL_TUPLE re-emitting the inputs for chaining into another sampler.",
     )
     FUNCTION = "sample"
-    CATEGORY = "sampling"
+    CATEGORY = "GrimmRibbity/SDXL"
     OUTPUT_NODE = True
 
     def sample(self, sdxl_tuple, noise_seed, steps, cfg, sampler_name, scheduler,

@@ -833,7 +833,7 @@ class CivitaiSaveImage:
     )
     FUNCTION = "save"
     OUTPUT_NODE = True
-    CATEGORY = "image"
+    CATEGORY = "GrimmRibbity/Output"
 
     def save(self, images, filename_prefix,
              output_path="",

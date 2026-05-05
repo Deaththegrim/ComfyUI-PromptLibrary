@@ -313,7 +313,7 @@ class PromptLibrary:
     RETURN_NAMES = ("prompt",)
     OUTPUT_TOOLTIPS = ("The selected prompt(s) joined by the separator.",)
     FUNCTION = "load_prompt"
-    CATEGORY = "utils"
+    CATEGORY = "GrimmRibbity/Library"
 
     @staticmethod
     def _split_ids(prompt_id: str) -> list[str]:
@@ -377,7 +377,7 @@ class PromptLibraryMulti:
     OUTPUT_TOOLTIPS = tuple(f"Panel {i} selection joined by separator_{i}."
                              for i in range(1, PANELS + 1))
     FUNCTION = "load_prompts"
-    CATEGORY = "utils"
+    CATEGORY = "GrimmRibbity/Library"
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
@@ -557,7 +557,7 @@ class PromptLibrarySave:
         "The entry's ID — wire into the loader's prompt_id or use for re-runs.",
     )
     FUNCTION = "save"
-    CATEGORY = "utils"
+    CATEGORY = "GrimmRibbity/Library"
     OUTPUT_NODE = True
 
     def save(self, name, text, thumbnail=None, tags="", prompt_id="", overwrite_by_name=False):
@@ -645,7 +645,7 @@ class PromptLibraryRandom:
         "The picked entry's ID — useful for logging or re-running.",
     )
     FUNCTION = "pick"
-    CATEGORY = "utils"
+    CATEGORY = "GrimmRibbity/Library"
 
     @classmethod
     def IS_CHANGED(cls, tag_filter, seed, expand_wildcards=True):
@@ -708,7 +708,7 @@ class PromptLibraryWildcard:
     RETURN_NAMES = ("text",)
     OUTPUT_TOOLTIPS = ("Expanded text. Unknown refs and unmatched braces are left as-is.",)
     FUNCTION = "expand"
-    CATEGORY = "utils"
+    CATEGORY = "GrimmRibbity/Library"
 
     @classmethod
     def IS_CHANGED(cls, text, seed, expand_choices=True, expand_named_refs=True):
@@ -864,7 +864,7 @@ class PromptLibraryScene:
     RETURN_NAMES = ("scene",)
     OUTPUT_TOOLTIPS = ("All non-skip fields joined by separator. Wire into Comic Frame.scene.",)
     FUNCTION = "build"
-    CATEGORY = "utils"
+    CATEGORY = "GrimmRibbity/Comic"
 
     def build(self, time_of_day, weather, lighting, camera_angle, mood, framing,
               extra, separator=", "):
@@ -1085,7 +1085,7 @@ class PromptLibraryBackground:
     RETURN_NAMES = ("background",)
     OUTPUT_TOOLTIPS = ("Final background description. Wire into Comic Frame.background.",)
     FUNCTION = "build"
-    CATEGORY = "utils"
+    CATEGORY = "GrimmRibbity/Comic"
 
     def build(self, preset, custom, separator=", "):
         parts: list[str] = []
@@ -1160,7 +1160,7 @@ class PromptLibraryComicFrame:
         "Total number of authored frames. Useful for downstream branching/looping.",
     )
     FUNCTION = "assemble"
-    CATEGORY = "utils"
+    CATEGORY = "GrimmRibbity/Comic"
 
     @staticmethod
     def _parse_frames(frames_json: str) -> list[str]:
@@ -2033,7 +2033,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.26.0"
+__version__ = "0.26.1"
 
 
 def _autobackup_on_version_change() -> None:

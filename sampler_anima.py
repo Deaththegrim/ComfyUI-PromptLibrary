@@ -114,7 +114,7 @@ class GrimmRibbityAnimaHiResFixScript:
     RETURN_NAMES = ("script",)
     OUTPUT_TOOLTIPS = ("Pipe to wire into the GrimmRibbity Anima Sampler's `script` input.",)
     FUNCTION = "build"
-    CATEGORY = "utils"
+    CATEGORY = "GrimmRibbity/Anima"
 
     def build(self, upscale_method, upscale_by, use_same_seed, seed, hires_steps,
               hires_denoise, hires_cfg, iterations):
@@ -239,7 +239,7 @@ class GrimmRibbityAnimaSampler:
         "The seed actually used (always non-negative).",
     )
     FUNCTION = "sample"
-    CATEGORY = "sampling"
+    CATEGORY = "GrimmRibbity/Anima"
     OUTPUT_NODE = True
 
     def sample(self, model, positive, negative, latent_image, noise_seed, steps,

@@ -153,7 +153,7 @@ class GrimmRibbityLoraPicker:
         "lora wiring and you only want the keywords here.",
     )
     FUNCTION = "pick"
-    CATEGORY = "utils"
+    CATEGORY = "GrimmRibbity/Library"
 
     def pick(self, lora_name, weight, trigger_words, use_windows_separators,
               save_to_library, library_name, library_tags):
