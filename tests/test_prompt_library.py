@@ -699,6 +699,50 @@ class PromptLibraryTests(unittest.TestCase):
         result2 = self.mod._expand_wildcards("a {x|y|z} b", [], rng)
         self.assertEqual(result, result2)
 
+    def test_wildcard_weighted_choice_one_zero_picks_other(self):
+        import random
+        for seed in range(5):
+            out = self.mod._expand_wildcards("{1::A|0::B}", [], random.Random(seed))
+            self.assertEqual(out, "A")
+            out = self.mod._expand_wildcards("{0::A|1::B}", [], random.Random(seed))
+            self.assertEqual(out, "B")
+
+    def test_wildcard_weighted_choice_distribution(self):
+        import random
+        rng = random.Random(42)
+        counts = {"A": 0, "B": 0}
+        for _ in range(2000):
+            out = self.mod._expand_wildcards("{0.1::A|0.9::B}", [], rng)
+            counts[out] += 1
+        # 10/90 split: A should be roughly 200 / B roughly 1800. Wide tolerance
+        # because RNG is real, not mocked.
+        self.assertGreater(counts["B"], counts["A"] * 4)
+
+    def test_wildcard_weighted_mixed_with_unweighted(self):
+        # An unweighted alt defaults to weight 1.0; mix with explicit weights.
+        import random
+        rng = random.Random(0)
+        out = self.mod._expand_wildcards("{a|0::b|0::c}", [], rng)
+        self.assertEqual(out, "a")
+
+    def test_wildcard_weighted_all_zero_falls_back_to_uniform(self):
+        import random
+        rng = random.Random(0)
+        # All zero weights would be a div-by-zero; we fall back to uniform pick.
+        out = self.mod._expand_wildcards("{0::a|0::b|0::c}", [], rng)
+        self.assertIn(out, {"a", "b", "c"})
+
+    def test_wildcard_weighted_malformed_prefix_treated_as_literal(self):
+        # "abc::x" is not a numeric weight — keep the whole thing as a literal.
+        import random
+        out = self.mod._expand_wildcards("{abc::x|1::y}", [], random.Random(0))
+        # Either alt may win on different seeds, but both are kept; verify the
+        # malformed one is preserved verbatim when it does win.
+        results = set()
+        for seed in range(20):
+            results.add(self.mod._expand_wildcards("{abc::x|abc::y}", [], random.Random(seed)))
+        self.assertTrue(results.issubset({"abc::x", "abc::y"}))
+
     def test_wildcard_choice_no_alternation_strips_braces(self):
         import random
         out = self.mod._expand_wildcards("hello {world}", [], random.Random(0))

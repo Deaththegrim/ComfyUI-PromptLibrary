@@ -7,123 +7,162 @@ const MULTI_PANELS = 3;
 const STYLE_ID = "prompt-library-style";
 
 const CSS = `
+.pl-gallery, .pl-modal, .pl-context-menu {
+  --pl-fg: var(--fg-color, #ddd);
+  --pl-fg-muted: var(--descrip-text, #888);
+  --pl-fg-placeholder: #666;
+  --pl-fg-strong: #fff;
+  --pl-bg-input: var(--input-bg, var(--comfy-input-bg, #1c1c1c));
+  --pl-bg-elevated: var(--button-surface, var(--comfy-menu-bg, #2a2a2a));
+  --pl-bg-deep: var(--bg-color, #1a1a1a);
+  --pl-bg-hover: var(--button-hover-surface, #383838);
+  --pl-bg-selected: #1f3550;
+  --pl-bg-selected-strong: #2d5070;
+  --pl-bg-empty: var(--tr-even-bg-color, #232323);
+  --pl-bg-modal-header: #1f1f1f;
+  --pl-border: var(--border-color, var(--border-default, #444));
+  --pl-border-strong: #555;
+  --pl-border-soft: #111;
+  --pl-accent: var(--accent-primary, #6cf);
+  --pl-accent-fg: #111;
+  --pl-danger: var(--error-text, #f88);
+  --pl-focus-outline: #f9a;
+}
 .pl-gallery { display: flex; flex-direction: column; gap: 6px; padding: 4px; box-sizing: border-box;
-  width: 100%; height: 100%; min-height: 0; color: #ddd; font-family: sans-serif; font-size: 12px; }
+  width: 100%; height: 100%; min-height: 0; color: var(--pl-fg); font-family: sans-serif; font-size: 12px;
+  position: relative; }
+.pl-gallery.pl-drop-target { outline: 2px dashed var(--pl-accent); outline-offset: -4px; background: var(--pl-bg-selected); }
+.pl-gallery.pl-drop-target::before { content: "Drop CSV or ZIP to import";
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: rgba(28, 36, 48, 0.85); color: var(--pl-accent); font-size: 14px; font-weight: 600;
+  pointer-events: none; z-index: 10; border-radius: 4px; }
 .pl-panel { display: flex; flex-direction: column; gap: 4px; box-sizing: border-box;
   width: 100%; height: 100%; min-height: 0; }
-.pl-panel-header { background: #2a2a2a; color: #ddd; padding: 4px 8px; border-radius: 3px;
+.pl-panel-header { background: var(--pl-bg-elevated); color: var(--pl-fg); padding: 4px 8px; border-radius: 3px;
   font-weight: 600; font-size: 12px; outline: none; cursor: text;
   border: 1px solid transparent; flex: 0 0 auto; }
-.pl-panel-header:hover { border-color: #444; }
-.pl-panel-header:focus { background: #1c1c1c; border-color: #6cf; }
+.pl-panel-header:hover { border-color: var(--pl-border); }
+.pl-panel-header:focus { background: var(--pl-bg-input); border-color: var(--pl-accent); }
 .pl-panel-body { flex: 1 1 0; min-height: 0; display: flex; }
 .pl-panel-body .pl-gallery { padding: 0; }
 .pl-toolbar { display: flex; gap: 6px; align-items: center; }
-.pl-toolbar input, .pl-toolbar select { flex: 1; min-width: 0; background: #1c1c1c; color: #ddd;
-  border: 1px solid #444; padding: 3px 6px; border-radius: 3px; font-size: 12px; }
+.pl-toolbar input, .pl-toolbar select { flex: 1; min-width: 0; background: var(--pl-bg-input); color: var(--pl-fg);
+  border: 1px solid var(--pl-border); padding: 3px 6px; border-radius: 3px; font-size: 12px; }
 .pl-toolbar select { flex: 0 0 auto; max-width: 130px; }
-.pl-btn { background: #2a2a2a; color: #ddd; border: 1px solid #444; padding: 3px 8px; cursor: pointer;
+.pl-btn { background: var(--pl-bg-elevated); color: var(--pl-fg); border: 1px solid var(--pl-border); padding: 3px 8px; cursor: pointer;
   border-radius: 3px; font-size: 12px; }
-.pl-btn:hover { background: #383838; }
+.pl-btn:hover { background: var(--pl-bg-hover); }
+.pl-btn[disabled], .pl-btn.pl-busy { opacity: 0.5; cursor: progress; }
+.pl-btn.pl-confirm-armed { background: var(--pl-danger); color: var(--pl-accent-fg); border-color: var(--pl-danger); }
 .pl-grid { flex: 1 1 0; min-height: 0; overflow-y: auto; display: grid; gap: 6px; align-content: start;
   grid-template-columns: repeat(auto-fill, minmax(var(--pl-tile-size, 110px), 1fr));
   grid-auto-rows: max-content;
   padding-right: 2px; }
 .pl-tile { position: relative; display: flex; flex-direction: column;
-  background: #2a2a2a; border: 2px solid transparent;
+  background: var(--pl-bg-elevated); border: 2px solid transparent;
   border-radius: 4px; cursor: pointer; overflow: hidden;
   transition: border-color 80ms ease, transform 80ms ease; }
-.pl-tile:hover { border-color: #555; transform: scale(1.02); }
-.pl-tile.selected, .pl-tile.selected:hover { border-color: #6cf; }
-.pl-tile.focused { box-shadow: 0 0 0 2px #f9a inset; }
+.pl-tile:hover { border-color: var(--pl-border-strong); transform: scale(1.02); }
+.pl-tile.selected, .pl-tile.selected:hover { border-color: var(--pl-accent); }
+.pl-tile.focused { box-shadow: 0 0 0 2px var(--pl-focus-outline) inset; }
 .pl-tile.dragging { opacity: 0.4; }
-.pl-tile.drag-over { outline: 2px dashed #6cf; outline-offset: -4px; }
+.pl-tile.drag-over { outline: 2px dashed var(--pl-accent); outline-offset: -4px; }
 .pl-tile-img { position: relative; width: 100%; height: 0; padding-bottom: 100%;
-  overflow: hidden; background: #1a1a1a; flex: 0 0 auto; }
+  overflow: hidden; background: var(--pl-bg-deep); flex: 0 0 auto; }
 .pl-tile-img > img, .pl-tile-img > .pl-placeholder {
   position: absolute; inset: 0; }
 .pl-tile-check { position: absolute; top: 4px; left: 4px; width: 16px; height: 16px;
-  background: rgba(0,0,0,0.7); color: #fff; border: 1px solid #888; border-radius: 3px;
+  background: rgba(0,0,0,0.7); color: var(--pl-fg-strong); border: 1px solid var(--pl-fg-muted); border-radius: 3px;
   display: none; align-items: center; justify-content: center; font-size: 11px;
   z-index: 1; cursor: pointer; user-select: none; }
 .pl-tile:hover .pl-tile-check, .pl-tile.selected .pl-tile-check { display: flex; }
-.pl-tile.selected .pl-tile-check { background: #6cf; color: #111; border-color: #6cf; }
-.pl-context-menu { position: fixed; z-index: 10001; background: #2a2a2a; color: #ddd;
-  border: 1px solid #444; border-radius: 4px; box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+.pl-tile.selected .pl-tile-check { background: var(--pl-accent); color: var(--pl-accent-fg); border-color: var(--pl-accent); }
+.pl-context-menu { position: fixed; z-index: 10001; background: var(--pl-bg-elevated); color: var(--pl-fg);
+  border: 1px solid var(--pl-border); border-radius: 4px; box-shadow: 0 4px 16px rgba(0,0,0,0.6);
   padding: 4px 0; min-width: 140px; font-size: 12px; user-select: none; }
 .pl-context-menu .item { padding: 6px 12px; cursor: pointer; }
-.pl-context-menu .item:hover { background: #3a3a3a; }
-.pl-context-menu .item.danger { color: #f88; }
-.pl-context-menu .sep { height: 1px; background: #444; margin: 4px 0; }
+.pl-context-menu .item:hover { background: var(--pl-bg-hover); }
+.pl-context-menu .item.danger { color: var(--pl-danger); }
+.pl-context-menu .sep { height: 1px; background: var(--pl-border); margin: 4px 0; }
 .pl-bulk-bar { display: flex; align-items: center; gap: 6px; padding: 6px 8px;
-  background: #1f3550; color: #ddd; border-radius: 4px; font-size: 12px; }
+  background: var(--pl-bg-selected); color: var(--pl-fg); border-radius: 4px; font-size: 12px; }
 .pl-bulk-bar .count { font-weight: bold; flex: 1; }
 .pl-empty-state { grid-column: 1 / -1; padding: 24px 12px; text-align: center;
-  color: #888; font-size: 12px; line-height: 1.5; background: #232323;
-  border: 1px dashed #444; border-radius: 4px; }
-.pl-empty-state strong { color: #ddd; display: block; margin-bottom: 4px; font-size: 13px; }
+  color: var(--pl-fg-muted); font-size: 12px; line-height: 1.5; background: var(--pl-bg-empty);
+  border: 1px dashed var(--pl-border); border-radius: 4px; }
+.pl-empty-state strong { color: var(--pl-fg); display: block; margin-bottom: 4px; font-size: 13px; }
 .pl-search-wrap { position: relative; flex: 1; min-width: 0; display: flex; }
 .pl-search-wrap input { width: 100%; padding-right: 22px; }
 .pl-search-clear { position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
-  background: transparent; border: none; color: #888; font-size: 14px;
+  background: transparent; border: none; color: var(--pl-fg-muted); font-size: 14px;
   cursor: pointer; padding: 0 4px; line-height: 1; }
-.pl-search-clear:hover { color: #fff; }
+.pl-search-clear:hover { color: var(--pl-fg-strong); }
 .pl-tile-size { display: flex; align-items: center; gap: 4px; }
 .pl-tile-size input { width: 70px; }
 .pl-tags-row { display: flex; flex-direction: column; gap: 3px; padding: 0 2px 2px; }
 .pl-tag-group { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
-.pl-tag-group-label { color: #888; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+.pl-tag-group-label { color: var(--pl-fg-muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
   margin-right: 2px; min-width: 60px; }
-.pl-tag-chip { background: #2a2a2a; color: #ccc; border: 1px solid #444; padding: 2px 8px;
+.pl-tag-chip { background: var(--pl-bg-elevated); color: var(--pl-fg); border: 1px solid var(--pl-border); padding: 2px 8px;
   border-radius: 10px; font-size: 11px; cursor: pointer; user-select: none; }
-.pl-tag-chip:hover { background: #353535; }
-.pl-tag-chip.active { background: #2d5070; color: #fff; border-color: #6cf; }
+.pl-tag-chip:hover { background: var(--pl-bg-hover); }
+.pl-tag-chip.active { background: var(--pl-bg-selected-strong); color: var(--pl-fg-strong); border-color: var(--pl-accent); }
 .pl-tag-chip.all { font-weight: bold; }
 .pl-tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .pl-tile .pl-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
-  font-size: 22px; color: #666; }
-.pl-tile .pl-name { background: #1c1c1c; color: #ddd; padding: 5px 6px; font-size: 11px;
+  font-size: 22px; color: var(--pl-fg-placeholder); }
+.pl-tile .pl-name { background: var(--pl-bg-input); color: var(--pl-fg); padding: 5px 6px; font-size: 11px;
   line-height: 1.3; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  border-top: 1px solid #111; }
-.pl-tile.selected .pl-name { background: #1f3550; color: #fff; }
-.pl-add { aspect-ratio: 1 / 1; align-items: center; justify-content: center; font-size: 28px; color: #888;
-  background: #232323; border: 2px dashed #555; }
-.pl-add:hover { color: #ddd; border-color: #888; }
+  border-top: 1px solid var(--pl-border-soft); }
+.pl-tile.selected .pl-name { background: var(--pl-bg-selected); color: var(--pl-fg-strong); }
+.pl-add { aspect-ratio: 1 / 1; align-items: center; justify-content: center; font-size: 28px; color: var(--pl-fg-muted);
+  background: var(--pl-bg-empty); border: 2px dashed var(--pl-border-strong); }
+.pl-add:hover { color: var(--pl-fg); border-color: var(--pl-fg-muted); }
 .pl-grid.list-view { grid-template-columns: 1fr; gap: 4px; grid-auto-rows: max-content; }
 .pl-grid.list-view .pl-tile { flex-direction: row; align-items: stretch; min-height: 56px; }
 .pl-grid.list-view .pl-tile-img { width: 56px !important; min-width: 56px; height: 56px !important;
   padding-bottom: 0 !important; flex: 0 0 56px !important; }
 .pl-grid.list-view .pl-tile .pl-name { flex: 1; display: flex; align-items: center;
-  padding: 6px 10px; font-size: 13px; border-top: none; border-left: 1px solid #111; }
+  padding: 6px 10px; font-size: 13px; border-top: none; border-left: 1px solid var(--pl-border-soft); }
 .pl-view-toggle { display: flex; gap: 2px; }
 .pl-view-toggle .pl-btn { padding: 3px 7px; font-size: 13px; line-height: 1; }
-.pl-view-toggle .pl-btn.active { background: #2d5070; border-color: #6cf; color: #fff; }
-.pl-modal { position: fixed; z-index: 10000; background: #2a2a2a; color: #ddd; padding: 0 14px 14px;
+.pl-view-toggle .pl-btn.active { background: var(--pl-bg-selected-strong); border-color: var(--pl-accent); color: var(--pl-fg-strong); }
+.pl-modal { position: fixed; z-index: 10000; background: var(--pl-bg-elevated); color: var(--pl-fg); padding: 0 14px 14px;
   border-radius: 6px; width: 460px; max-height: 80vh; overflow-y: auto;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.6); border: 1px solid #444;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6); border: 1px solid var(--pl-border);
   display: flex; flex-direction: column; gap: 10px; font-family: sans-serif; font-size: 13px; }
 .pl-modal-header { position: sticky; top: 0; z-index: 1; }
 .pl-modal-header { display: flex; align-items: center; gap: 8px; cursor: move;
-  user-select: none; padding: 6px 10px; margin: 0 -14px 4px; background: #1f1f1f;
-  border-radius: 6px 6px 0 0; border-bottom: 1px solid #444; }
+  user-select: none; padding: 6px 10px; margin: 0 -14px 4px; background: var(--pl-bg-modal-header);
+  border-radius: 6px 6px 0 0; border-bottom: 1px solid var(--pl-border); }
 .pl-modal-header h3 { flex: 1; margin: 0; font-size: 13px; }
-.pl-modal-close { background: transparent; border: none; color: #aaa; font-size: 18px;
+.pl-modal-close { background: transparent; border: none; color: var(--pl-fg-muted); font-size: 18px;
   line-height: 1; cursor: pointer; padding: 0 4px; }
-.pl-modal-close:hover { color: #fff; }
-.pl-modal label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: #aaa; }
-.pl-modal input[type=text], .pl-modal textarea { background: #1c1c1c; color: #ddd; border: 1px solid #444;
+.pl-modal-close:hover { color: var(--pl-fg-strong); }
+.pl-modal label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--pl-fg-muted); }
+.pl-modal input[type=text], .pl-modal textarea { background: var(--pl-bg-input); color: var(--pl-fg); border: 1px solid var(--pl-border);
   padding: 6px; border-radius: 3px; font-size: 12px; font-family: inherit; }
 .pl-modal textarea { resize: vertical; min-height: 100px; }
 .pl-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
-.pl-modal-actions .danger { color: #f88; border-color: #844; }
+.pl-modal-actions .danger { color: var(--pl-danger); border-color: #844; }
 .pl-thumb-preview { max-width: 120px; max-height: 120px; object-fit: contain;
-  background: #1c1c1c; border: 1px solid #444; border-radius: 3px; display: block; }
-.pl-status { font-size: 11px; color: #888; min-height: 14px; }
-.pl-status.error { color: #f88; }
+  background: var(--pl-bg-input); border: 1px solid var(--pl-border); border-radius: 3px; display: block; }
+.pl-status { font-size: 11px; color: var(--pl-fg-muted); min-height: 14px; }
+.pl-status.error { color: var(--pl-danger); }
 .pl-history { display: flex; flex-direction: column; gap: 6px; max-height: 240px;
-  overflow-y: auto; padding: 4px; background: #1c1c1c; border-radius: 4px;
+  overflow-y: auto; padding: 4px; background: var(--pl-bg-input); border-radius: 4px;
   margin-top: 4px; }
-.pl-history-empty { color: #666; font-size: 11px; padding: 6px; text-align: center; }
+.pl-history-empty { color: var(--pl-fg-placeholder); font-size: 11px; padding: 6px; text-align: center; }
+.pl-toast-stack { position: fixed; right: 16px; top: 16px; z-index: 10002;
+  display: flex; flex-direction: column; gap: 6px; max-width: 360px; pointer-events: none; }
+.pl-toast { background: var(--pl-bg-elevated, #2a2a2a); color: var(--pl-fg, #ddd);
+  border: 1px solid var(--pl-border, #444); border-radius: 4px; padding: 8px 12px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.6); font-size: 12px; line-height: 1.4;
+  pointer-events: auto; max-width: 360px; word-wrap: break-word;
+  animation: pl-toast-in 140ms ease-out; }
+.pl-toast.error { border-left: 4px solid var(--pl-danger, #f88); }
+.pl-toast.success { border-left: 4px solid var(--pl-accent, #6cf); }
+@keyframes pl-toast-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
 .pl-history-row { display: grid; grid-template-columns: auto 1fr auto; gap: 6px;
   align-items: start; padding: 6px; background: #2a2a2a; border-radius: 3px;
   font-size: 11px; }
@@ -140,6 +179,60 @@ function injectStyle() {
   el.id = STYLE_ID;
   el.textContent = CSS;
   document.head.appendChild(el);
+}
+
+const TOAST_STACK_ID = "pl-toast-stack";
+function toast(message, kind = "info", durationMs = 4000) {
+  let stack = document.getElementById(TOAST_STACK_ID);
+  if (!stack) {
+    stack = document.createElement("div");
+    stack.id = TOAST_STACK_ID;
+    stack.className = "pl-toast-stack";
+    document.body.appendChild(stack);
+  }
+  const t = document.createElement("div");
+  t.className = `pl-toast ${kind}`;
+  t.setAttribute("role", kind === "error" ? "alert" : "status");
+  t.textContent = message;
+  t.addEventListener("click", () => t.remove());
+  stack.appendChild(t);
+  setTimeout(() => t.remove(), durationMs);
+  return t;
+}
+
+function confirmDestructive(message, { confirmLabel = "Delete", timeoutMs = 8000 } = {}) {
+  return new Promise((resolve) => {
+    let stack = document.getElementById(TOAST_STACK_ID);
+    if (!stack) {
+      stack = document.createElement("div");
+      stack.id = TOAST_STACK_ID;
+      stack.className = "pl-toast-stack";
+      document.body.appendChild(stack);
+    }
+    const t = document.createElement("div");
+    t.className = "pl-toast error";
+    t.setAttribute("role", "alertdialog");
+    const msg = document.createElement("div");
+    msg.textContent = message;
+    msg.style.marginBottom = "8px";
+    const actions = document.createElement("div");
+    actions.style.cssText = "display:flex; gap:6px; justify-content:flex-end;";
+    const no = document.createElement("button");
+    no.className = "pl-btn";
+    no.textContent = "Cancel";
+    const yes = document.createElement("button");
+    yes.className = "pl-btn pl-confirm-armed";
+    yes.textContent = confirmLabel;
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; t.remove(); resolve(v); };
+    no.onclick = () => finish(false);
+    yes.onclick = () => finish(true);
+    actions.append(no, yes);
+    t.append(msg, actions);
+    stack.appendChild(t);
+    yes.focus();
+    setTimeout(() => finish(false), timeoutMs);
+  });
 }
 
 async function fetchList() {
@@ -489,7 +582,10 @@ function openPromptModal({ existing, onSave, onDelete }) {
         revertBtn.className = "pl-btn";
         revertBtn.textContent = "Revert";
         revertBtn.onclick = async () => {
-          if (!confirm(`Revert "${existing.name}" to this version?\n(The current values will be saved to history first.)`)) return;
+          if (!await confirmDestructive(
+            `Revert "${existing.name}" to this version? Current values will be saved to history first.`,
+            { confirmLabel: "Revert" }
+          )) return;
           revertBtn.disabled = true;
           try {
             await revertPrompt(existing.id, snap.ts);
@@ -597,7 +693,7 @@ function openPromptModal({ existing, onSave, onDelete }) {
     delBtn.className = "pl-btn danger";
     delBtn.textContent = "Delete";
     delBtn.onclick = async () => {
-      if (!confirm(`Delete "${existing.name}"?`)) return;
+      if (!await confirmDestructive(`Delete "${existing.name}"?`)) return;
       delBtn.disabled = true;
       try { await onDelete(existing.id); close(); }
       catch (e) { delBtn.disabled = false; status.classList.add("error"); status.textContent = e.message; }
@@ -832,20 +928,20 @@ function buildGallery(node, idWidget) {
       const { blob, count } = await exportZip(ids);
       const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       downloadBlob(blob, `ribbity-export-${stamp}-${count}prompts.zip`);
-    } catch (e) { alert(`Export failed: ${e.message}`); }
+    } catch (e) { toast(`Export failed: ${e.message}`, "error"); }
     finally { bulkExportBtn.disabled = false; }
   };
   bulkDeleteBtn.onclick = async () => {
     const ids = [...checkedIds];
     if (!ids.length) return;
-    if (!confirm(`Delete ${ids.length} prompts?`)) return;
+    if (!await confirmDestructive(`Delete ${ids.length} prompts?`)) return;
     bulkDeleteBtn.disabled = true;
     try {
       await bulkDelete(ids);
       checkedIds.clear();
       syncWidget();
       await refresh();
-    } catch (e) { alert(`Delete failed: ${e.message}`); }
+    } catch (e) { toast(`Delete failed: ${e.message}`, "error"); }
     finally { bulkDeleteBtn.disabled = false; }
   };
   bulkTagBtn.onclick = async () => {
@@ -876,7 +972,7 @@ function buildGallery(node, idWidget) {
         await api.fetchApi("/prompt_library/upsert", { method: "POST", body: fd });
       }
       await refresh();
-    } catch (e) { alert(`Tag update failed: ${e.message}`); }
+    } catch (e) { toast(`Tag update failed: ${e.message}`, "error"); }
     finally { bulkTagBtn.disabled = false; }
   };
 
@@ -1109,23 +1205,23 @@ function buildGallery(node, idWidget) {
             }) },
           { label: "Duplicate", action: async () => {
               try { await duplicatePrompt(p.id); await refresh(); }
-              catch (err) { alert(`Duplicate failed: ${err.message}`); }
+              catch (err) { toast(`Duplicate failed: ${err.message}`, "error"); }
             } },
           { label: "Export this", action: async () => {
               try {
                 const { blob } = await exportZip([p.id]);
                 const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
                 downloadBlob(blob, `ribbity-${p.id}-${stamp}.zip`);
-              } catch (err) { alert(`Export failed: ${err.message}`); }
+              } catch (err) { toast(`Export failed: ${err.message}`, "error"); }
             } },
           "sep",
           { label: "Delete", danger: true, action: async () => {
-              if (!confirm(`Delete "${p.name}"?`)) return;
+              if (!await confirmDestructive(`Delete "${p.name}"?`)) return;
               try {
                 await deletePrompt(p.id);
                 if (checkedIds.delete(p.id)) syncWidget();
                 await refresh();
-              } catch (err) { alert(`Delete failed: ${err.message}`); }
+              } catch (err) { toast(`Delete failed: ${err.message}`, "error"); }
             } },
         ]);
       };
@@ -1153,7 +1249,7 @@ function buildGallery(node, idWidget) {
           try {
             await reorderPrompts(ids);
             await refresh();
-          } catch (err) { alert(`Reorder failed: ${err.message}`); }
+          } catch (err) { toast(`Reorder failed: ${err.message}`, "error"); }
         };
       }
 
@@ -1199,10 +1295,15 @@ function buildGallery(node, idWidget) {
     render();
   };
   modelSelect.onchange = render;
-  fileInput.onchange = async () => {
-    const file = fileInput.files[0];
+  async function handleImportFile(file) {
     if (!file) return;
     const isZip = file.name.toLowerCase().endsWith(".zip") || file.type === "application/zip";
+    const isCsv = file.name.toLowerCase().endsWith(".csv") || file.type === "text/csv";
+    if (!isZip && !isCsv) {
+      grid.replaceChildren(Object.assign(document.createElement("div"),
+        { className: "pl-status error", textContent: `Unsupported file: ${file.name} (need .csv or .zip)` }));
+      return;
+    }
     try {
       const result = isZip ? await importZip(file) : await importCsv(file);
       const kind = isZip ? "ZIP" : "CSV";
@@ -1215,29 +1316,57 @@ function buildGallery(node, idWidget) {
     } catch (e) {
       grid.replaceChildren(Object.assign(document.createElement("div"),
         { className: "pl-status error", textContent: `Import failed: ${e.message}` }));
-    } finally {
-      fileInput.value = "";
     }
+  }
+  fileInput.onchange = async () => {
+    const file = fileInput.files[0];
+    try { await handleImportFile(file); }
+    finally { fileInput.value = ""; }
   };
+
+  // Drag-and-drop file import on the container. We only react to drops that
+  // carry actual files (dataTransfer.types includes "Files"); workflow-JSON
+  // drops, internal tile reorder drags, and chrome-internal drags pass through.
+  const onDragEnter = (e) => {
+    if (!e.dataTransfer?.types?.includes("Files")) return;
+    e.preventDefault();
+    container.classList.add("pl-drop-target");
+  };
+  const onDragOver = (e) => {
+    if (!e.dataTransfer?.types?.includes("Files")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  };
+  const onDragLeave = (e) => {
+    if (e.target === container) container.classList.remove("pl-drop-target");
+  };
+  const onDrop = async (e) => {
+    if (!e.dataTransfer?.types?.includes("Files")) return;
+    e.preventDefault();
+    container.classList.remove("pl-drop-target");
+    const file = e.dataTransfer.files?.[0];
+    await handleImportFile(file);
+  };
+  container.addEventListener("dragenter", onDragEnter);
+  container.addEventListener("dragover", onDragOver);
+  container.addEventListener("dragleave", onDragLeave);
+  container.addEventListener("drop", onDrop);
 
   exportBtn.onclick = async () => {
     if (!lastVisible.length) {
-      alert("Nothing to export (the current filter shows no prompts).");
+      toast("Nothing to export (the current filter shows no prompts).", "info");
       return;
     }
-    const exportingAll = lastVisible.length === prompts.length;
-    const summary = exportingAll
-      ? `Export all ${prompts.length} prompts (with thumbnails)?`
-      : `Export ${lastVisible.length} of ${prompts.length} visible prompts (with thumbnails)?`;
-    if (!confirm(summary)) return;
     exportBtn.disabled = true;
     try {
+      const exportingAll = lastVisible.length === prompts.length;
       const ids = exportingAll ? [] : lastVisible.map(p => p.id);
       const { blob, count } = await exportZip(ids);
       const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       downloadBlob(blob, `ribbity-export-${stamp}-${count}prompts.zip`);
+      toast(`Exported ${count} prompt${count === 1 ? "" : "s"}.`, "success");
     } catch (e) {
-      alert(`Export failed: ${e.message}`);
+      toast(`Export failed: ${e.message}`, "error");
     } finally {
       exportBtn.disabled = false;
     }
@@ -1293,11 +1422,14 @@ function buildGallery(node, idWidget) {
       e.preventDefault();
       const p = lastVisible[focusedIndex];
       if (!p) return;
-      if (!confirm(`Delete "${p.name}"?`)) return;
-      deletePrompt(p.id).then(() => {
-        if (checkedIds.delete(p.id)) syncWidget();
-        refresh();
-      }).catch(err => alert(`Delete failed: ${err.message}`));
+      (async () => {
+        if (!await confirmDestructive(`Delete "${p.name}"?`)) return;
+        try {
+          await deletePrompt(p.id);
+          if (checkedIds.delete(p.id)) syncWidget();
+          await refresh();
+        } catch (err) { toast(`Delete failed: ${err.message}`, "error"); }
+      })();
     }
     else if (e.key === "Escape") {
       e.preventDefault();

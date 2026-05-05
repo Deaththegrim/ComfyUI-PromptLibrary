@@ -366,7 +366,37 @@ class PromptLibraryMulti:
 
 _NAMED_REF_RE = re.compile(r"__([A-Za-z0-9_:.\-]+)__")
 _CHOICE_RE = re.compile(r"\{([^{}]+)\}")
+# Weighted choice prefix: "<float>::" — e.g. {0.25::a|0.75::b}. Bare alternatives
+# get an implicit weight of 1.0, so {a|b|c} stays uniform. Negative or non-numeric
+# prefixes fall back to weight 1.0.
+_WEIGHT_PREFIX_RE = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*::\s*(.*)$", re.DOTALL)
 _WILDCARD_MAX_DEPTH = 8
+
+
+def _parse_weighted_choices(content: str) -> tuple[list[str], list[float]]:
+    """Split a {…|…|…} content string into (texts, weights). Each alt may be
+    prefixed with `<float>::` to set its weight; missing prefix defaults to 1.0.
+    Negative or unparseable prefixes are clamped to 0.0 (the literal is kept,
+    just deweighted to nothing). All-zero weights fall back to uniform."""
+    texts: list[str] = []
+    weights: list[float] = []
+    for raw in content.split("|"):
+        m = _WEIGHT_PREFIX_RE.match(raw)
+        if m:
+            try:
+                w = float(m.group(1))
+            except ValueError:
+                w = 1.0
+            if w < 0:
+                w = 0.0
+            texts.append(m.group(2).strip())
+            weights.append(w)
+        else:
+            texts.append(raw.strip())
+            weights.append(1.0)
+    if sum(weights) <= 0:
+        weights = [1.0] * len(texts)
+    return texts, weights
 
 
 def _resolve_named_ref(ref: str, items: list[dict], rng: random.Random) -> str | None:
@@ -422,7 +452,11 @@ def _expand_wildcards(text: str, items: list[dict], rng: random.Random,
                 choice = _CHOICE_RE.search(s)
                 if choice:
                     content = choice.group(1)
-                    picked = rng.choice([c.strip() for c in content.split("|")]) if "|" in content else content
+                    if "|" in content:
+                        texts, weights = _parse_weighted_choices(content)
+                        picked = rng.choices(texts, weights=weights, k=1)[0]
+                    else:
+                        picked = content
                     s = s[:choice.start()] + picked + s[choice.end():]
                     continue
             break
@@ -1176,7 +1210,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 
 
 def _autobackup_on_version_change() -> None:
