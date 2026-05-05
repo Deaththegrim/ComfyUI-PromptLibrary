@@ -2139,37 +2139,13 @@ function _isReplaceable(value, defaultValue) {
   if (typeof value === "string" && STALE_THEME_COLORS.has(value.toLowerCase())) return true;
   return false;
 }
-// Custom title-text painter: bold + white drop-shadow halo around black
-// text. ComfyUI's bundled LiteGraph calls this in place of its default
-// title rendering when defined on a node. Signature comes from the
-// frontend bundle: (ctx, titleHeight, size, scale, titleFontStyle, selected).
-function _drawTitleText(ctx, titleHeight, size, scale, titleFontStyle, selected) {
-  let title = (this.getTitle ? this.getTitle() : (this.title || this.type)) || "";
-  if (this.pinned) title = String(title) + " 📌";
-  if (!title) return;
-
-  const padding = titleHeight;
-  const baseFont = titleFontStyle || "14px Arial";
-  ctx.font = baseFont.startsWith("bold ") ? baseFont : "bold " + baseFont;
-
-  // White drop-shadow halo so black text reads on any saturated bar at any
-  // zoom level. Reset before returning so widget/socket text isn't tinted.
-  ctx.shadowColor = "rgba(255, 255, 255, 0.9)";
-  ctx.shadowBlur = 5;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 0;
-
-  ctx.fillStyle = selected
-    ? (LiteGraph?.NODE_SELECTED_TITLE_COLOR || "#ffffff")
-    : (this.constructor.title_text_color || NODE_TITLE_TEXT_COLOR);
-  ctx.textAlign = "left";
-
-  const textY = (LiteGraph?.NODE_TITLE_TEXT_Y || 18) - padding;
-  ctx.fillText(String(title), padding, textY);
-
-  ctx.shadowColor = "transparent";
-  ctx.shadowBlur = 0;
-}
+// Earlier theme revisions hooked onDrawTitleText to paint a bold title
+// with a white drop-shadow halo. Some ComfyUI builds render the title
+// via Vue/HTML while ALSO firing the canvas hook, which produced a
+// doubled / ghosted title (visible on screenshots from a friend's
+// install). The styling is a nice-to-have; visible breakage isn't.
+// We keep `title_text_color` (which the default renderer respects) and
+// drop the canvas override entirely.
 
 function applyNodeColors(nodeType, nodeData) {
   const titleColor = NODE_COLORS[nodeData.name];
@@ -2201,14 +2177,9 @@ function applyNodeColors(nodeType, nodeData) {
     return r;
   };
 
-  // Class-level fallback for the title text color.
+  // Class-level fallback for the title text color. We deliberately do NOT
+  // install onDrawTitleText — see comment above _drawTitleText removal.
   nodeType.title_text_color = NODE_TITLE_TEXT_COLOR;
-  // Per-prototype custom title painter — wired once at registration so
-  // every instance picks it up without per-node bookkeeping. Don't clobber
-  // an onDrawTitleText that another extension already installed.
-  if (!nodeType.prototype.onDrawTitleText) {
-    nodeType.prototype.onDrawTitleText = _drawTitleText;
-  }
 }
 
 app.registerExtension({
