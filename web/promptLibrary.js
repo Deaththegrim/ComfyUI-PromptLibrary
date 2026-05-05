@@ -2052,8 +2052,10 @@ function installWebsocketBridge() {
 
 // Per-node-group color theming: bright coloured title bar (with black title
 // text) + uniform dark-grey body across the whole suite. Wraps
-// onNodeCreated so the colors apply on first creation. Chains cleanly with
-// the DOM-widget wrappers — each wrapper calls the inner one.
+// onNodeCreated AND onConfigure — the latter is needed because LiteGraph's
+// LGraphNode.configure() restores `color`/`bgcolor` from the saved workflow
+// JSON after onNodeCreated runs, undoing our theme. Re-applying in
+// onConfigure makes the theme stick on reload.
 const NODE_BODY_COLOR = "#1e1e1e";
 const NODE_TITLE_TEXT_COLOR = "#0a0a0a";
 const NODE_COLORS = {
@@ -2074,27 +2076,59 @@ const NODE_COLORS = {
   // Output / save — soft mint green title bar
   "GrimmRibbityCivitaiSave": "#a8d8b8",
 };
+// Colors used by previous theme revisions. When a saved workflow loads with
+// one of these stuck on a node, we treat it as stale and replace with the
+// current theme. Manual user colours (anything not in this list) are
+// preserved on reload.
+const STALE_THEME_COLORS = new Set([
+  // v0.22.1 dark theme bodies + bars
+  "#6b4a8c", "#3d2752",
+  "#b07a3a", "#5d3e1c",
+  "#3a7c8c", "#1f3d52",
+  "#3a8c5b", "#1f4d34",
+  // historical / future-proof: any value already in the current theme is
+  // also fine to overwrite (no-op if equal, refresh if subtly off).
+  "#c8a8e8", "#e8b878", "#8cc8d8", "#a8d8b8",
+  "#1e1e1e",
+]);
+function _isReplaceable(value, defaultValue) {
+  if (!value) return true;
+  if (value === defaultValue) return true;
+  if (typeof value === "string" && STALE_THEME_COLORS.has(value.toLowerCase())) return true;
+  return false;
+}
 function applyNodeColors(nodeType, nodeData) {
   const titleColor = NODE_COLORS[nodeData.name];
   if (!titleColor) return;
-  const orig = nodeType.prototype.onNodeCreated;
+
+  const setColors = (node) => {
+    if (_isReplaceable(node.color, LiteGraph?.NODE_DEFAULT_COLOR)) {
+      node.color = titleColor;
+    }
+    if (_isReplaceable(node.bgcolor, LiteGraph?.NODE_DEFAULT_BGCOLOR)) {
+      node.bgcolor = NODE_BODY_COLOR;
+    }
+    node.title_text_color = NODE_TITLE_TEXT_COLOR;
+  };
+
+  const origCreate = nodeType.prototype.onNodeCreated;
   nodeType.prototype.onNodeCreated = function () {
-    const r = orig?.apply(this, arguments);
-    // Don't overwrite a colour the user manually overrode via right-click —
-    // respect their choice on reload by checking against the LiteGraph default.
-    if (!this.color || this.color === LiteGraph?.NODE_DEFAULT_COLOR) {
-      this.color = titleColor;
-    }
-    if (!this.bgcolor || this.bgcolor === LiteGraph?.NODE_DEFAULT_BGCOLOR) {
-      this.bgcolor = NODE_BODY_COLOR;
-    }
-    // LiteGraph respects per-instance title_text_color when drawing the
-    // node title; fall back to the constructor-level for completeness.
-    this.title_text_color = NODE_TITLE_TEXT_COLOR;
+    const r = origCreate?.apply(this, arguments);
+    setColors(this);
     return r;
   };
-  // Class-level fallback so LiteGraph picks it up even if onNodeCreated isn't
-  // run for some reason (e.g. node manifests built early in the lifecycle).
+
+  // LGraphNode.configure() restores saved `color`/`bgcolor` AFTER
+  // onNodeCreated has run — re-apply here so the theme survives reload.
+  const origConfigure = nodeType.prototype.onConfigure;
+  nodeType.prototype.onConfigure = function () {
+    const r = origConfigure?.apply(this, arguments);
+    setColors(this);
+    return r;
+  };
+
+  // Class-level fallback so LiteGraph picks it up even if onNodeCreated
+  // isn't run for some reason (e.g. very early manifest builds).
   nodeType.title_text_color = NODE_TITLE_TEXT_COLOR;
 }
 
