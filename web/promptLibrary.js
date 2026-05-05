@@ -977,9 +977,10 @@ function buildGallery(node, idWidget) {
     const mode = SORT_MODES[sortSelect.value] || SORT_MODES.name_asc;
     visible = [...visible].sort(mode.cmp);
     lastVisible = visible;
-    // Drop checked ids that are no longer visible to avoid acting on hidden entries.
+    // Drop checked ids that no longer exist in the library; keep ones that
+    // are merely filtered out so multi-select persists across filter changes.
     for (const id of [...checkedIds]) {
-      if (!visible.some(p => p.id === id)) checkedIds.delete(id);
+      if (!prompts.some(p => p.id === id)) checkedIds.delete(id);
     }
     updateBulkBar();
     if (focusedIndex >= visible.length) focusedIndex = visible.length - 1;
@@ -1291,6 +1292,26 @@ function buildGallery(node, idWidget) {
   container.addEventListener("keydown", onGridKey);
   // Stop key events from propagating to LiteGraph when interacting with the gallery.
   container.addEventListener("keydown", (e) => e.stopPropagation());
+  // Let the wheel scroll the grid (and other inner scrollers) instead of
+  // zooming the LiteGraph canvas. Walk up to find a scrollable ancestor; if
+  // we have room to scroll in that direction, consume the event.
+  container.addEventListener("wheel", (e) => {
+    const dy = e.deltaY;
+    for (let el = e.target; el && el !== container.parentNode; el = el.parentNode) {
+      if (!(el instanceof HTMLElement)) continue;
+      const style = getComputedStyle(el);
+      const scrolls = /(auto|scroll)/.test(style.overflowY);
+      if (!scrolls) continue;
+      const canScroll = el.scrollHeight > el.clientHeight;
+      if (!canScroll) continue;
+      const atTop = el.scrollTop <= 0;
+      const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
+      if ((dy < 0 && !atTop) || (dy > 0 && !atBottom)) {
+        e.stopPropagation();
+        return;
+      }
+    }
+  }, { passive: true });
 
   container._promptLibraryCleanup = () => {
     window.removeEventListener("prompt-library-updated", onExternal);
