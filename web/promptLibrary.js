@@ -1010,8 +1010,8 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   importBgBtn.className = "pl-btn";
   importBgBtn.textContent = "Import BG";
   importBgBtn.title = "Bulk-import the GrimmRibbity Background node's preset locations as "
-    + "library entries (tagged 'background' + the category). Filter by the 'background' "
-    + "chip after import. Existing entries are skipped; Shift-click to refresh them.";
+    + "library entries (tagged 'location'). Filter by the 'location' chip after import. "
+    + "Existing entries are skipped; Shift-click to refresh them.";
 
   const queueAllBtn = document.createElement("button");
   queueAllBtn.className = "pl-btn";

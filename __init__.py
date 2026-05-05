@@ -1897,7 +1897,10 @@ def _import_backgrounds_internal(*, refresh_existing: bool = False) -> dict:
             continue
 
         display_name = f"{category}: {label}"
-        tags = ["background", category]
+        # Single 'location' tag for sorting — keeps the gallery filter row
+        # tidy. The category prefix is still visible in the entry's name +
+        # text, so users can search by category.
+        tags = ["location"]
 
         with _lock:
             items = _load()
@@ -2130,7 +2133,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.27.0"
+__version__ = "0.27.1"
 
 
 def _autobackup_on_version_change() -> None:
