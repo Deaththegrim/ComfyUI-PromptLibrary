@@ -645,9 +645,51 @@ class PromptLibraryWildcard:
 # =============================================================================
 
 
+_SCENE_NONE = "(none)"
+# Curated dropdown vocabularies for the Scene node. First entry of each list
+# is the "skip" sentinel and gets filtered out when joining the prompt.
+_SCENE_TIME_OF_DAY = [_SCENE_NONE,
+    "dawn", "early morning", "morning", "golden hour morning",
+    "midday", "afternoon", "late afternoon",
+    "golden hour evening", "dusk", "twilight",
+    "night", "midnight", "blue hour"]
+_SCENE_WEATHER = [_SCENE_NONE,
+    "clear sky", "sunny", "partly cloudy", "overcast", "stormy clouds",
+    "light fog", "heavy fog", "mist", "light rain", "heavy rain", "thunderstorm",
+    "drizzle", "snow", "heavy snowfall", "blizzard", "windy", "dust storm"]
+_SCENE_LIGHTING = [_SCENE_NONE,
+    "soft natural light", "warm sunlight", "cool sunlight", "harsh midday sun",
+    "soft window light", "hard shadows", "soft shadows",
+    "golden hour glow", "blue hour", "moonlight", "starlight",
+    "candlelight", "firelight", "lantern light",
+    "neon glow", "fluorescent", "tungsten", "stage lighting",
+    "rim lighting", "backlit", "silhouette",
+    "volumetric god rays", "dappled light"]
+_SCENE_CAMERA_ANGLE = [_SCENE_NONE,
+    "extreme close-up", "close-up", "medium close-up",
+    "medium shot", "medium wide shot", "wide shot", "extreme wide shot",
+    "eye level", "low angle", "high angle", "bird's-eye view", "worm's-eye view",
+    "Dutch angle", "over-the-shoulder", "point of view"]
+_SCENE_MOOD = [_SCENE_NONE,
+    "tense", "ominous", "anxious", "dramatic",
+    "melancholic", "nostalgic", "solemn", "lonely",
+    "peaceful", "serene", "contemplative",
+    "playful", "joyful", "whimsical",
+    "heroic", "triumphant", "epic",
+    "romantic", "intimate", "mysterious", "dreamy", "surreal"]
+_SCENE_FRAMING = [_SCENE_NONE,
+    "centered", "rule of thirds", "leading lines",
+    "symmetrical", "asymmetrical",
+    "frame within a frame", "negative space",
+    "dynamic diagonal", "low horizon", "high horizon",
+    "shallow depth of field", "deep depth of field"]
+
+
 class PromptLibraryScene:
-    """Structured-form scene description. Each field is optional; non-empty
-    values are joined with the separator. Use as the 'scene' anchor wired
+    """Structured-form scene description with dropdowns for the common axes.
+    Each field's '(none)' option is skipped, so you only contribute the
+    attributes you care about. The free-form `extra` textarea catches
+    anything the dropdowns don't cover. Use as the 'scene' anchor wired
     into the Comic Frame node so atmosphere stays consistent across panels.
     """
 
@@ -655,20 +697,15 @@ class PromptLibraryScene:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "time_of_day": ("STRING", {"default": "", "multiline": False,
-                                            "placeholder": "morning, dusk, midnight..."}),
-                "weather": ("STRING", {"default": "", "multiline": False,
-                                        "placeholder": "rainy, snowy, foggy..."}),
-                "lighting": ("STRING", {"default": "", "multiline": False,
-                                         "placeholder": "warm sunlight, neon, candlelit..."}),
-                "camera_angle": ("STRING", {"default": "", "multiline": False,
-                                              "placeholder": "wide shot, close-up, low angle..."}),
-                "mood": ("STRING", {"default": "", "multiline": False,
-                                     "placeholder": "tense, melancholic, playful..."}),
-                "framing": ("STRING", {"default": "", "multiline": False,
-                                        "placeholder": "centered, rule of thirds, Dutch tilt..."}),
+                "time_of_day": (_SCENE_TIME_OF_DAY,),
+                "weather": (_SCENE_WEATHER,),
+                "lighting": (_SCENE_LIGHTING,),
+                "camera_angle": (_SCENE_CAMERA_ANGLE,),
+                "mood": (_SCENE_MOOD,),
+                "framing": (_SCENE_FRAMING,),
                 "extra": ("STRING", {"default": "", "multiline": True,
-                                      "placeholder": "anything else: composition, style refs, lens..."}),
+                                      "placeholder": "anything the dropdowns don't cover: lens, "
+                                                     "art style, composition refs..."}),
                 "separator": ("STRING", {"default": ", ", "multiline": False}),
             },
         }
@@ -680,35 +717,114 @@ class PromptLibraryScene:
 
     def build(self, time_of_day, weather, lighting, camera_angle, mood, framing,
               extra, separator=", "):
-        parts = [p.strip() for p in (time_of_day, weather, lighting, camera_angle,
-                                      mood, framing, extra) if p and p.strip()]
+        raw = (time_of_day, weather, lighting, camera_angle, mood, framing, extra)
+        parts: list[str] = []
+        for value in raw:
+            if not value:
+                continue
+            text = str(value).strip()
+            if not text or text == _SCENE_NONE:
+                continue
+            parts.append(text)
         return (separator.join(parts),)
 
 
+_BG_NONE = "(none)"
+# Curated background presets, grouped by setting and prefixed with the
+# group name so the dropdown stays scannable when expanded. Each value
+# becomes the literal prompt text written into the background.
+_BG_PRESETS = [_BG_NONE,
+    # Urban
+    "city: rainy Tokyo street at night, neon reflections on wet asphalt",
+    "city: New York intersection at dusk, yellow taxis, steam vents",
+    "city: quiet European cobblestone alley with cafe tables",
+    "city: rooftop overlooking skyscrapers at golden hour",
+    "city: subway platform, fluorescent lights, empty",
+    "city: parking garage, harsh overhead lights, concrete pillars",
+    "city: street market, fabric awnings, bustling crowd",
+    "city: abandoned alleyway, dumpsters, graffiti on brick walls",
+    "city: fire escape, industrial metal grating, brick wall",
+    # Indoor / domestic
+    "home: cozy bedroom with string lights and an unmade bed",
+    "home: modern kitchen, marble counter, morning sunlight",
+    "home: suburban living room, beige couch, family photos",
+    "home: messy bathroom, bottles on the counter, fogged mirror",
+    "home: cluttered attic, dust motes, single hanging bulb",
+    "home: dim basement, exposed pipes, washing machine",
+    # Workspaces
+    "office: cubicle with monitors, papers stacked, ergonomic chair",
+    "office: open-plan workspace, hot-desk, whiteboards",
+    "office: corner office with floor-to-ceiling windows, city view",
+    "office: server room, blue-tinted lights, cabling overhead",
+    # School / institutional
+    "school: empty classroom, rows of desks, late afternoon",
+    "school: high school hallway, lockers, fluorescent lights",
+    "school: gymnasium, wood floor, basketball hoops",
+    "school: library, tall shelves, reading nooks, warm lamps",
+    "hospital: corridor with gurneys, sterile blue-white lighting",
+    "hospital: private room, IV stand, window with daylight",
+    "courtroom: dark wood paneling, judge's bench, gallery seats",
+    # Nature / outdoor
+    "nature: forest clearing with shafts of sunlight",
+    "nature: mountain peak above the clouds, snow patches",
+    "nature: ocean cliff at sunset, waves below",
+    "nature: riverbank with reeds and skipping stones",
+    "nature: autumn forest, orange leaves carpeting the ground",
+    "nature: snowy field at dusk, single set of footprints",
+    "nature: beach at sunset, low tide, footprints in sand",
+    "nature: desert dunes at golden hour, ripples in sand",
+    "nature: dense jungle, vines, dappled green light",
+    "nature: cave entrance, mossy rocks, light from outside",
+    # Industrial / decay
+    "industrial: abandoned warehouse, broken windows, crates",
+    "industrial: factory floor, machinery, sodium vapor lamps",
+    "industrial: shipping yard, stacked containers, cranes",
+    "industrial: derelict subway tunnel, rusted tracks, dripping water",
+    "industrial: construction site, scaffolding, exposed rebar",
+    # Fantasy / sci-fi
+    "fantasy: medieval castle hall, banners, torches in sconces",
+    "fantasy: wizard's tower study, scrolls, alchemical glassware",
+    "fantasy: tavern interior, fireplace, wooden tables, mugs",
+    "fantasy: enchanted forest, glowing mushrooms, hanging lanterns",
+    "scifi: spaceship bridge, holographic displays, viewport stars",
+    "scifi: alien planet surface, twin suns, purple sand",
+    "scifi: cyberpunk neon street, holographic billboards, rain",
+    "scifi: post-apocalyptic ruins, overgrown skyscrapers, ash sky",
+    "scifi: clean white laboratory, glass partitions, machinery"]
+
+
 class PromptLibraryBackground:
-    """Single multiline holder for the background description. Wire its output
-    into the Comic Frame node so the location reads as continuous across all
-    panels. The frontend gives it a visible 'locked' treatment so the role is
-    obvious in the workflow.
+    """Background anchor for a comic. Pick a preset from the curated list,
+    add custom detail in the textarea (both contribute when set), or skip
+    the preset entirely and just type your own. Wire the output into the
+    Comic Frame node so the location reads as continuous across panels.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "background": ("STRING", {"default": "", "multiline": True,
-                                            "placeholder": "abandoned warehouse with broken windows, "
-                                                           "crates scattered, wet concrete floor..."}),
+                "preset": (_BG_PRESETS,),
+                "custom": ("STRING", {"default": "", "multiline": True,
+                                       "placeholder": "extra detail, time-of-day overrides, "
+                                                      "props specific to this scene..."}),
+                "separator": ("STRING", {"default": ", ", "multiline": False}),
             },
         }
 
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("background",)
-    FUNCTION = "passthrough"
+    FUNCTION = "build"
     CATEGORY = "utils"
 
-    def passthrough(self, background):
-        return ((background or "").strip(),)
+    def build(self, preset, custom, separator=", "):
+        parts: list[str] = []
+        if preset and preset != _BG_NONE:
+            parts.append(str(preset).strip())
+        custom = (custom or "").strip()
+        if custom:
+            parts.append(custom)
+        return (separator.join(parts),)
 
 
 class PromptLibraryComicFrame:
@@ -1391,7 +1507,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.19.0"
+__version__ = "0.20.0"
 
 
 def _autobackup_on_version_change() -> None:

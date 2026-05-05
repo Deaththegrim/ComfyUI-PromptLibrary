@@ -935,15 +935,39 @@ class PromptLibraryTests(unittest.TestCase):
         out, = node.build("  morning  ", "", "  ", "", "", "", "", separator=", ")
         self.assertEqual(out, "morning")
 
-    def test_background_node_passthrough(self):
+    def test_background_node_preset_only(self):
         node = self.mod.PromptLibraryBackground()
-        out, = node.passthrough("abandoned warehouse, broken windows")
-        self.assertEqual(out, "abandoned warehouse, broken windows")
+        out, = node.build(preset="city: subway platform, fluorescent lights, empty",
+                           custom="", separator=", ")
+        self.assertEqual(out, "city: subway platform, fluorescent lights, empty")
 
-    def test_background_node_strips_whitespace(self):
+    def test_background_node_custom_only(self):
         node = self.mod.PromptLibraryBackground()
-        out, = node.passthrough("  rainy tokyo street  \n")
-        self.assertEqual(out, "rainy tokyo street")
+        out, = node.build(preset=self.mod._BG_NONE,
+                           custom="abandoned shrine in the woods", separator=", ")
+        self.assertEqual(out, "abandoned shrine in the woods")
+
+    def test_background_node_combines_preset_and_custom(self):
+        node = self.mod.PromptLibraryBackground()
+        out, = node.build(preset="home: cozy bedroom with string lights and an unmade bed",
+                           custom="rain pattering on the window", separator=", ")
+        self.assertEqual(out,
+            "home: cozy bedroom with string lights and an unmade bed, rain pattering on the window")
+
+    def test_background_node_both_empty_returns_empty(self):
+        node = self.mod.PromptLibraryBackground()
+        out, = node.build(preset=self.mod._BG_NONE, custom="", separator=", ")
+        self.assertEqual(out, "")
+
+    def test_scene_node_treats_none_sentinel_as_empty(self):
+        node = self.mod.PromptLibraryScene()
+        out, = node.build(
+            time_of_day=self.mod._SCENE_NONE, weather="light rain",
+            lighting=self.mod._SCENE_NONE, camera_angle="low angle",
+            mood=self.mod._SCENE_NONE, framing=self.mod._SCENE_NONE,
+            extra="", separator=", ",
+        )
+        self.assertEqual(out, "light rain, low angle")
 
     def test_comic_frame_combines_anchors_and_action(self):
         node = self.mod.PromptLibraryComicFrame()
