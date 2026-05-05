@@ -2,11 +2,22 @@ import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 
 const NODE_NAME = "PromptLibrary";
+const MULTI_NODE_NAME = "PromptLibraryMulti";
+const MULTI_PANELS = 3;
 const STYLE_ID = "prompt-library-style";
 
 const CSS = `
 .pl-gallery { display: flex; flex-direction: column; gap: 6px; padding: 4px; box-sizing: border-box;
   width: 100%; height: 100%; min-height: 0; color: #ddd; font-family: sans-serif; font-size: 12px; }
+.pl-panel { display: flex; flex-direction: column; gap: 4px; box-sizing: border-box;
+  width: 100%; height: 100%; min-height: 0; }
+.pl-panel-header { background: #2a2a2a; color: #ddd; padding: 4px 8px; border-radius: 3px;
+  font-weight: 600; font-size: 12px; outline: none; cursor: text;
+  border: 1px solid transparent; flex: 0 0 auto; }
+.pl-panel-header:hover { border-color: #444; }
+.pl-panel-header:focus { background: #1c1c1c; border-color: #6cf; }
+.pl-panel-body { flex: 1 1 0; min-height: 0; display: flex; }
+.pl-panel-body .pl-gallery { padding: 0; }
 .pl-toolbar { display: flex; gap: 6px; align-items: center; }
 .pl-toolbar input, .pl-toolbar select { flex: 1; min-width: 0; background: #1c1c1c; color: #ddd;
   border: 1px solid #444; padding: 3px 6px; border-radius: 3px; font-size: 12px; }
@@ -1335,6 +1346,88 @@ function buildGallery(node, idWidget) {
   return { container, refresh, render, syncFromWidget };
 }
 
+function buildMultiPanel(node, panelIndex) {
+  const labelWidget = node.widgets.find(w => w.name === `label_${panelIndex}`);
+  const idWidget = node.widgets.find(w => w.name === `prompt_id_${panelIndex}`);
+  const sepWidget = node.widgets.find(w => w.name === `separator_${panelIndex}`);
+
+  // Hide all three underlying string widgets — gallery + header drive them.
+  for (const w of [labelWidget, idWidget, sepWidget]) {
+    if (!w) continue;
+    w.hidden = true;
+    w.computeSize = () => [0, -4];
+    w.draw = () => {};
+  }
+
+  const panel = document.createElement("div");
+  panel.className = "pl-panel";
+
+  const header = document.createElement("div");
+  header.className = "pl-panel-header";
+  header.contentEditable = "true";
+  header.spellcheck = false;
+  header.textContent = labelWidget?.value || `Panel ${panelIndex}`;
+  header.title = "Click to rename this panel";
+  header.addEventListener("input", () => {
+    if (labelWidget) labelWidget.value = header.textContent;
+  });
+  // Stop typed keys from reaching LiteGraph (which would delete the node, etc.)
+  for (const ev of ["keydown", "keyup", "keypress"]) {
+    header.addEventListener(ev, (e) => e.stopPropagation());
+  }
+  // Enter commits without inserting a newline.
+  header.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); header.blur(); }
+  });
+
+  const body = document.createElement("div");
+  body.className = "pl-panel-body";
+
+  const { container, render, syncFromWidget } = buildGallery(node, idWidget);
+  body.appendChild(container);
+
+  panel.appendChild(header);
+  panel.appendChild(body);
+  panel.style.minHeight = "260px";
+  panel.style.width = "100%";
+
+  return { panel, render, syncFromWidget, header, labelWidget };
+}
+
+function registerMultiNode(nodeType) {
+  const onNodeCreated = nodeType.prototype.onNodeCreated;
+  nodeType.prototype.onNodeCreated = function () {
+    const r = onNodeCreated?.apply(this, arguments);
+
+    this._promptLibraryPanels = [];
+    for (let i = 1; i <= MULTI_PANELS; i++) {
+      const built = buildMultiPanel(this, i);
+      this.addDOMWidget(`panel_${i}`, "PromptLibraryGallery", built.panel, {
+        serialize: false,
+        hideOnZoom: false,
+        getMinHeight: () => 260,
+      });
+      this._promptLibraryPanels.push(built);
+    }
+
+    this.size = [380, 820];
+    if (typeof this.setSize === "function") this.setSize([380, 820]);
+    return r;
+  };
+
+  const onConfigure = nodeType.prototype.onConfigure;
+  nodeType.prototype.onConfigure = function () {
+    const r = onConfigure?.apply(this, arguments);
+    // Re-sync each panel with its (now-restored-from-workflow) widget values.
+    for (const p of this._promptLibraryPanels || []) {
+      if (p.labelWidget) p.header.textContent = p.labelWidget.value || p.header.textContent;
+      p.syncFromWidget?.();
+      p.render?.();
+    }
+    return r;
+  };
+}
+
 let _wsListenerInstalled = false;
 function installWebsocketBridge() {
   if (_wsListenerInstalled) return;
@@ -1351,6 +1444,11 @@ app.registerExtension({
     installWebsocketBridge();
   },
   async beforeRegisterNodeDef(nodeType, nodeData) {
+    if (nodeData.name === MULTI_NODE_NAME) {
+      injectStyle();
+      registerMultiNode(nodeType);
+      return;
+    }
     if (nodeData.name !== NODE_NAME) return;
     injectStyle();
 

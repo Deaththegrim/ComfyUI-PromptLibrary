@@ -753,6 +753,52 @@ class PromptLibraryTests(unittest.TestCase):
         out = self.mod._expand_wildcards("{__wizard__|knight}", self.mod._load(), rng)
         self.assertIn(out, {"wizard", "knight"})
 
+    # ---- PromptLibraryMulti node ---------------------------------------
+
+    def test_multi_node_three_outputs(self):
+        self.assertIn("PromptLibraryMulti", self.mod.NODE_CLASS_MAPPINGS)
+        cls = self.mod.PromptLibraryMulti
+        self.assertEqual(len(cls.RETURN_TYPES), 3)
+        self.assertEqual(cls.RETURN_NAMES, ("prompt_1", "prompt_2", "prompt_3"))
+
+    def test_multi_node_independent_panels(self):
+        self._seed_library([
+            {"id": "frieren", "text": "frieren", "tags": ["character"]},
+            {"id": "anime",   "text": "anime style",  "tags": ["style"]},
+            {"id": "hoodie",  "text": "hoodie",       "tags": ["clothing"]},
+        ])
+        node = self.mod.PromptLibraryMulti()
+        out = node.load_prompts(
+            prompt_id_1="frieren",
+            prompt_id_2="anime",
+            prompt_id_3="hoodie",
+            separator_1=", ", separator_2=", ", separator_3=", ",
+            label_1="Character", label_2="Style", label_3="Clothing",
+        )
+        self.assertEqual(out, ("frieren", "anime style", "hoodie"))
+
+    def test_multi_node_joins_multiple_ids(self):
+        self._seed_library([
+            {"id": "a", "text": "alpha"},
+            {"id": "b", "text": "bravo"},
+        ])
+        node = self.mod.PromptLibraryMulti()
+        out = node.load_prompts(
+            prompt_id_1="a,b",
+            prompt_id_2="",
+            prompt_id_3="",
+            separator_1=" | ",
+        )
+        self.assertEqual(out[0], "alpha | bravo")
+        self.assertEqual(out[1], "")
+        self.assertEqual(out[2], "")
+
+    def test_multi_node_skips_missing_ids(self):
+        self._seed_library([{"id": "a", "text": "alpha"}])
+        node = self.mod.PromptLibraryMulti()
+        out = node.load_prompts(prompt_id_1="a,nope", prompt_id_2="", prompt_id_3="")
+        self.assertEqual(out[0], "alpha")
+
     # ---- PromptLibraryRandom node --------------------------------------
 
     def test_random_picks_by_tag(self):

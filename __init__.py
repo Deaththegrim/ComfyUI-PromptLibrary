@@ -316,6 +316,54 @@ class PromptLibrary:
         return (separator.join(parts),)
 
 
+class PromptLibraryMulti:
+    """Three independent gallery panels in a single node, so a workflow can
+    pull a Character / Style / Clothing-style split selection without wiring
+    three separate Library nodes + Join Strings nodes together. Each panel
+    has its own search, filter, sort, and selection state, and emits its
+    own STRING output."""
+
+    PANELS = 3
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        req: dict = {}
+        for i in range(1, cls.PANELS + 1):
+            req[f"label_{i}"] = ("STRING", {"default": f"Panel {i}", "multiline": False})
+            req[f"prompt_id_{i}"] = ("STRING", {"default": "", "multiline": False})
+            req[f"separator_{i}"] = ("STRING", {"default": ", ", "multiline": False})
+        return {"required": req}
+
+    RETURN_TYPES = tuple(["STRING"] * PANELS)
+    RETURN_NAMES = tuple(f"prompt_{i}" for i in range(1, PANELS + 1))
+    FUNCTION = "load_prompts"
+    CATEGORY = "utils"
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        with _lock:
+            items = {i.get("id"): i.get("text", "") for i in _load()}
+        sigs = []
+        for n in range(1, cls.PANELS + 1):
+            ids = [p.strip() for p in (kwargs.get(f"prompt_id_{n}") or "").split(",") if p.strip()]
+            sep = kwargs.get(f"separator_{n}", ", ")
+            sigs.append(sep.join(items.get(pid, "") for pid in ids))
+        return "".join(sigs)
+
+    def load_prompts(self, **kwargs):
+        with _lock:
+            items = {i.get("id"): i.get("text", "") for i in _load()}
+        out = []
+        for n in range(1, self.PANELS + 1):
+            ids = [p.strip() for p in (kwargs.get(f"prompt_id_{n}") or "").split(",") if p.strip()]
+            sep = kwargs.get(f"separator_{n}", ", ")
+            missing = [pid for pid in ids if pid not in items]
+            if missing:
+                print(f"[PromptLibraryMulti] panel {n}: no prompt with id(s)={missing!r}; skipped")
+            out.append(sep.join(items[pid] for pid in ids if pid in items))
+        return tuple(out)
+
+
 _NAMED_REF_RE = re.compile(r"__([A-Za-z0-9_:.\-]+)__")
 _CHOICE_RE = re.compile(r"\{([^{}]+)\}")
 _WILDCARD_MAX_DEPTH = 8
@@ -1128,7 +1176,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.12.5"
+__version__ = "0.13.0"
 
 
 def _autobackup_on_version_change() -> None:
@@ -1173,6 +1221,7 @@ except Exception as _e:
 
 NODE_CLASS_MAPPINGS = {
     "PromptLibrary": PromptLibrary,
+    "PromptLibraryMulti": PromptLibraryMulti,
     "PromptLibrarySave": PromptLibrarySave,
     "PromptLibraryRandom": PromptLibraryRandom,
     "PromptLibraryWildcard": PromptLibraryWildcard,
@@ -1180,6 +1229,7 @@ NODE_CLASS_MAPPINGS = {
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptLibrary": "GrimmRibbity — Library",
+    "PromptLibraryMulti": "GrimmRibbity — Multi Library (3 panels)",
     "PromptLibrarySave": "GrimmRibbity — Save",
     "PromptLibraryRandom": "GrimmRibbity — Random by Tag",
     "PromptLibraryWildcard": "GrimmRibbity — Wildcard Expand",

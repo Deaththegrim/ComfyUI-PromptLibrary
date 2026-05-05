@@ -711,6 +711,8 @@ class CivitaiSaveImage:
                 "filename_prefix": ("STRING", {"default": "GrimmRibbity"}),
             },
             "optional": {
+                "output_path": ("STRING", {"default": "", "multiline": False,
+                                            "placeholder": "leave blank for ComfyUI/output, or absolute / ~ / relative path"}),
                 "model_override": ([_AUTO_LABEL] + list_all_model_choices()[1:],),
                 "positive_override": ("STRING", {"default": "", "multiline": True,
                                                   "placeholder": "leave blank to auto-detect"}),
@@ -729,6 +731,7 @@ class CivitaiSaveImage:
     CATEGORY = "image"
 
     def save(self, images, filename_prefix,
+             output_path="",
              model_override=_AUTO_LABEL,
              positive_override="", negative_override="",
              prompt=None, extra_pnginfo=None):
@@ -763,13 +766,37 @@ class CivitaiSaveImage:
         sampler_name = meta.get("sampler_name")
         scheduler = meta.get("scheduler")
 
-        output_dir = folder_paths.get_output_directory() if folder_paths else "output"
-        if folder_paths is not None:
+        default_output = folder_paths.get_output_directory() if folder_paths else "output"
+        custom = (output_path or "").strip()
+        if custom:
+            resolved = os.path.expanduser(custom)
+            if not os.path.isabs(resolved):
+                resolved = os.path.join(default_output, resolved)
+            os.makedirs(resolved, exist_ok=True)
+            output_dir = resolved
+        else:
+            output_dir = default_output
+        if folder_paths is not None and not custom:
             full_prefix, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
                 filename_prefix, output_dir, images.shape[2], images.shape[1]
             )
         else:
-            full_prefix, filename, counter, subfolder = (filename_prefix, filename_prefix, 0, "")
+            # Custom output_path bypasses Comfy's subfolder/counter logic so the
+            # files land exactly in the directory the user specified. Match the
+            # standard SaveImage counter scheme by scanning for existing files.
+            base = os.path.basename(filename_prefix) or "image"
+            existing = []
+            try:
+                for f in os.listdir(output_dir):
+                    if f.startswith(base + "_") and f.endswith(".png"):
+                        try:
+                            existing.append(int(f[len(base) + 1:].split("_")[0]))
+                        except ValueError:
+                            pass
+            except FileNotFoundError:
+                pass
+            counter = (max(existing) + 1) if existing else 0
+            full_prefix, filename, subfolder = output_dir, base, ""
 
         results = []
         for frame in images:
