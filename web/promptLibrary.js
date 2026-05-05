@@ -200,6 +200,26 @@ function toast(message, kind = "info", durationMs = 4000) {
   return t;
 }
 
+// Wrap an async button handler so the button is disabled and shows a busy
+// label while the work runs. Returns a function suitable for assignment to
+// btn.onclick. Restores the original label even if the handler throws.
+function withBusy(btn, busyLabel, fn) {
+  return async (...args) => {
+    if (btn.disabled) return;
+    const originalLabel = btn.textContent;
+    btn.disabled = true;
+    btn.classList.add("pl-busy");
+    if (busyLabel) btn.textContent = busyLabel;
+    try {
+      return await fn(...args);
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove("pl-busy");
+      btn.textContent = originalLabel;
+    }
+  };
+}
+
 function confirmDestructive(message, { confirmLabel = "Delete", timeoutMs = 8000 } = {}) {
   return new Promise((resolve) => {
     let stack = document.getElementById(TOAST_STACK_ID);
@@ -759,9 +779,31 @@ function makeDraggable(panel, handle) {
   };
 }
 
-function buildGallery(node, idWidget) {
+function buildGallery(node, idWidget, propsKey = "pl_state") {
   const container = document.createElement("div");
   container.className = "pl-gallery";
+  container.setAttribute("role", "region");
+  container.setAttribute("aria-label", "Prompt library gallery");
+  container.setAttribute("tabindex", "0");
+
+  // Per-node UI state (filter / tags / sort / tile size / view) persists via
+  // node.properties so it round-trips with the workflow JSON. localStorage
+  // still seeds defaults for fresh nodes that have nothing saved yet.
+  const readState = () => {
+    node.properties = node.properties || {};
+    return node.properties[propsKey] || {};
+  };
+  const writeState = () => {
+    node.properties = node.properties || {};
+    node.properties[propsKey] = {
+      filter: filter.value || "",
+      activeTags: [...activeTags],
+      sort: sortSelect.value,
+      tileSize: sizeInput.value,
+      view: viewMode,
+    };
+  };
+  const initialState = readState();
 
   const toolbar = document.createElement("div");
   toolbar.className = "pl-toolbar";
@@ -796,7 +838,7 @@ function buildGallery(node, idWidget) {
     opt.textContent = mode.label;
     sortSelect.appendChild(opt);
   }
-  sortSelect.value = localStorage.getItem(SORT_KEY) || "name_asc";
+  sortSelect.value = initialState.sort || localStorage.getItem(SORT_KEY) || "name_asc";
   sortSelect.title = "Sort";
 
   const importBtn = document.createElement("button");
@@ -826,7 +868,7 @@ function buildGallery(node, idWidget) {
   sizeInput.min = "60";
   sizeInput.max = "200";
   sizeInput.step = "8";
-  sizeInput.value = localStorage.getItem(SIZE_KEY) || "110";
+  sizeInput.value = initialState.tileSize || localStorage.getItem(SIZE_KEY) || "110";
   sizeInput.title = "Tile size";
   const applySize = () => {
     container.style.setProperty("--pl-tile-size", `${sizeInput.value}px`);
@@ -834,6 +876,7 @@ function buildGallery(node, idWidget) {
   sizeInput.oninput = () => {
     applySize();
     localStorage.setItem(SIZE_KEY, sizeInput.value);
+    writeState();
   };
   sizeWrap.appendChild(sizeInput);
 
@@ -849,15 +892,16 @@ function buildGallery(node, idWidget) {
   listViewBtn.textContent = "≡";
   listViewBtn.title = "List view";
   viewWrap.append(gridViewBtn, listViewBtn);
-  let viewMode = localStorage.getItem(VIEW_KEY) === "list" ? "list" : "grid";
+  let viewMode = initialState.view || localStorage.getItem(VIEW_KEY) || "grid";
+  if (viewMode !== "list" && viewMode !== "grid") viewMode = "grid";
   const applyView = () => {
     grid.classList.toggle("list-view", viewMode === "list");
     gridViewBtn.classList.toggle("active", viewMode === "grid");
     listViewBtn.classList.toggle("active", viewMode === "list");
     sizeWrap.style.display = viewMode === "list" ? "none" : "";
   };
-  gridViewBtn.onclick = () => { viewMode = "grid"; localStorage.setItem(VIEW_KEY, viewMode); applyView(); };
-  listViewBtn.onclick = () => { viewMode = "list"; localStorage.setItem(VIEW_KEY, viewMode); applyView(); };
+  gridViewBtn.onclick = () => { viewMode = "grid"; localStorage.setItem(VIEW_KEY, viewMode); applyView(); writeState(); };
+  listViewBtn.onclick = () => { viewMode = "list"; localStorage.setItem(VIEW_KEY, viewMode); applyView(); writeState(); };
 
   toolbar.append(searchWrap, modelSelect, sortSelect, sizeWrap, viewWrap, importBtn, exportBtn, refreshBtn, fileInput);
 
@@ -866,11 +910,15 @@ function buildGallery(node, idWidget) {
 
   const grid = document.createElement("div");
   grid.className = "pl-grid";
+  grid.setAttribute("role", "listbox");
+  grid.setAttribute("aria-multiselectable", "true");
+  grid.setAttribute("aria-label", "Prompts");
 
   let prompts = [];
   let lastVisible = [];
   let focusedIndex = -1;        // for keyboard nav
-  const activeTags = new Set();
+  const activeTags = new Set(Array.isArray(initialState.activeTags) ? initialState.activeTags : []);
+  if (initialState.filter) filter.value = initialState.filter;
   // Unified selection: drives both the prompt output (joined into idWidget.value)
   // and bulk actions (Tag/Export/Delete bar).
   const checkedIds = new Set();
@@ -920,31 +968,29 @@ function buildGallery(node, idWidget) {
       bulkCount.textContent = `${checkedIds.size} selected`;
     }
   };
-  bulkExportBtn.onclick = async () => {
+  bulkExportBtn.onclick = withBusy(bulkExportBtn, "Exporting…", async () => {
     const ids = [...checkedIds];
     if (!ids.length) return;
-    bulkExportBtn.disabled = true;
     try {
       const { blob, count } = await exportZip(ids);
       const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       downloadBlob(blob, `ribbity-export-${stamp}-${count}prompts.zip`);
+      toast(`Exported ${count} prompt${count === 1 ? "" : "s"}.`, "success");
     } catch (e) { toast(`Export failed: ${e.message}`, "error"); }
-    finally { bulkExportBtn.disabled = false; }
-  };
-  bulkDeleteBtn.onclick = async () => {
+  });
+  bulkDeleteBtn.onclick = withBusy(bulkDeleteBtn, "Deleting…", async () => {
     const ids = [...checkedIds];
     if (!ids.length) return;
     if (!await confirmDestructive(`Delete ${ids.length} prompts?`)) return;
-    bulkDeleteBtn.disabled = true;
     try {
       await bulkDelete(ids);
       checkedIds.clear();
       syncWidget();
       await refresh();
+      toast(`Deleted ${ids.length} prompt${ids.length === 1 ? "" : "s"}.`, "success");
     } catch (e) { toast(`Delete failed: ${e.message}`, "error"); }
-    finally { bulkDeleteBtn.disabled = false; }
-  };
-  bulkTagBtn.onclick = async () => {
+  });
+  bulkTagBtn.onclick = withBusy(bulkTagBtn, "Tagging…", async () => {
     const ids = [...checkedIds];
     if (!ids.length) return;
     const input = prompt(`Add tags to ${ids.length} prompts (comma-separated). Prefix - to remove (e.g. "-old, new"):`, "");
@@ -957,24 +1003,33 @@ function buildGallery(node, idWidget) {
       else adds.push(t);
     }
     if (!adds.length && !removes.length) return;
-    bulkTagBtn.disabled = true;
-    try {
-      for (const id of ids) {
-        const p = prompts.find(x => x.id === id);
-        if (!p) continue;
-        const newTags = new Set([...(p.tags || []), ...adds]);
-        for (const r of removes) newTags.delete(r);
-        const fd = new FormData();
-        fd.append("id", id);
-        fd.append("name", p.name);
-        fd.append("text", p.text || "");
-        fd.append("tags", [...newTags].join(", "));
+    let ok = 0;
+    const fails = [];
+    for (const id of ids) {
+      const p = prompts.find(x => x.id === id);
+      if (!p) { fails.push({ id, reason: "not found" }); continue; }
+      const newTags = new Set([...(p.tags || []), ...adds]);
+      for (const r of removes) newTags.delete(r);
+      const fd = new FormData();
+      fd.append("id", id);
+      fd.append("name", p.name);
+      fd.append("text", p.text || "");
+      fd.append("tags", [...newTags].join(", "));
+      try {
         await api.fetchApi("/prompt_library/upsert", { method: "POST", body: fd });
+        ok++;
+      } catch (e) {
+        fails.push({ id, reason: e.message });
       }
-      await refresh();
-    } catch (e) { toast(`Tag update failed: ${e.message}`, "error"); }
-    finally { bulkTagBtn.disabled = false; }
-  };
+    }
+    await refresh();
+    if (!fails.length) {
+      toast(`Tagged ${ok} prompt${ok === 1 ? "" : "s"}.`, "success");
+    } else {
+      console.warn("[PromptLibrary] bulk tag failures:", fails);
+      toast(`${ok}/${ids.length} tagged; ${fails.length} failed (see console).`, "error");
+    }
+  });
 
   const updateModelSelect = () => {
     const models = new Set();
@@ -1059,6 +1114,7 @@ function buildGallery(node, idWidget) {
   };
 
   const render = () => {
+    writeState();
     updateModelSelect();
     renderTags();
     grid.replaceChildren();
@@ -1130,6 +1186,9 @@ function buildGallery(node, idWidget) {
       tile.title = p.name;
       tile.dataset.promptId = p.id;
       tile.tabIndex = -1;
+      tile.setAttribute("role", "option");
+      tile.setAttribute("aria-label", p.name);
+      tile.setAttribute("aria-selected", checkedIds.has(p.id) ? "true" : "false");
       tile.draggable = isManual;
 
       const tileImg = document.createElement("div");
@@ -1287,7 +1346,7 @@ function buildGallery(node, idWidget) {
   };
 
   filter.addEventListener("input", render);
-  refreshBtn.onclick = refresh;
+  refreshBtn.onclick = withBusy(refreshBtn, "…", refresh);
   applySize();
   applyView();
   sortSelect.onchange = () => {
@@ -1300,22 +1359,28 @@ function buildGallery(node, idWidget) {
     const isZip = file.name.toLowerCase().endsWith(".zip") || file.type === "application/zip";
     const isCsv = file.name.toLowerCase().endsWith(".csv") || file.type === "text/csv";
     if (!isZip && !isCsv) {
-      grid.replaceChildren(Object.assign(document.createElement("div"),
-        { className: "pl-status error", textContent: `Unsupported file: ${file.name} (need .csv or .zip)` }));
+      toast(`Unsupported file: ${file.name} (need .csv or .zip)`, "error");
       return;
     }
+    const originalLabel = importBtn.textContent;
+    importBtn.disabled = true;
+    importBtn.classList.add("pl-busy");
+    importBtn.textContent = "Importing…";
     try {
       const result = isZip ? await importZip(file) : await importCsv(file);
       const kind = isZip ? "ZIP" : "CSV";
+      const errs = result.errors?.length || 0;
       const msg = `${kind} import: ${result.added} added, ${result.updated} updated`
-        + (result.errors?.length ? ` (${result.errors.length} errors — see console)` : "");
-      if (result.errors?.length) console.warn(`[PromptLibrary] ${kind} import errors:`, result.errors);
-      grid.replaceChildren(Object.assign(document.createElement("div"),
-        { className: "pl-status", textContent: msg }));
+        + (errs ? ` (${errs} errors — see console)` : "");
+      if (errs) console.warn(`[PromptLibrary] ${kind} import errors:`, result.errors);
+      toast(msg, errs ? "error" : "success");
       await refresh();
     } catch (e) {
-      grid.replaceChildren(Object.assign(document.createElement("div"),
-        { className: "pl-status error", textContent: `Import failed: ${e.message}` }));
+      toast(`Import failed: ${e.message}`, "error");
+    } finally {
+      importBtn.disabled = false;
+      importBtn.classList.remove("pl-busy");
+      importBtn.textContent = originalLabel;
     }
   }
   fileInput.onchange = async () => {
@@ -1352,12 +1417,11 @@ function buildGallery(node, idWidget) {
   container.addEventListener("dragleave", onDragLeave);
   container.addEventListener("drop", onDrop);
 
-  exportBtn.onclick = async () => {
+  exportBtn.onclick = withBusy(exportBtn, "Exporting…", async () => {
     if (!lastVisible.length) {
       toast("Nothing to export (the current filter shows no prompts).", "info");
       return;
     }
-    exportBtn.disabled = true;
     try {
       const exportingAll = lastVisible.length === prompts.length;
       const ids = exportingAll ? [] : lastVisible.map(p => p.id);
@@ -1367,10 +1431,8 @@ function buildGallery(node, idWidget) {
       toast(`Exported ${count} prompt${count === 1 ? "" : "s"}.`, "success");
     } catch (e) {
       toast(`Export failed: ${e.message}`, "error");
-    } finally {
-      exportBtn.disabled = false;
     }
-  };
+  });
 
   // Refresh whenever any save/delete fires server-side (incl. the Save node).
   const onExternal = () => refresh();
@@ -1465,9 +1527,10 @@ function buildGallery(node, idWidget) {
     }
   }, { passive: false, capture: true });
 
-  container._promptLibraryCleanup = () => {
+  const cleanup = () => {
     window.removeEventListener("prompt-library-updated", onExternal);
   };
+  container._promptLibraryCleanup = cleanup;
 
   grid.replaceChildren(Object.assign(document.createElement("div"), {
     className: "pl-status", textContent: "loading...",
@@ -1475,7 +1538,7 @@ function buildGallery(node, idWidget) {
   syncFromWidget();
   refresh();
 
-  return { container, refresh, render, syncFromWidget };
+  return { container, refresh, render, syncFromWidget, cleanup };
 }
 
 function buildMultiPanel(node, panelIndex) {
@@ -1515,7 +1578,7 @@ function buildMultiPanel(node, panelIndex) {
   const body = document.createElement("div");
   body.className = "pl-panel-body";
 
-  const { container, render, syncFromWidget } = buildGallery(node, idWidget);
+  const { container, render, syncFromWidget, cleanup } = buildGallery(node, idWidget, `pl_state_${panelIndex}`);
   body.appendChild(container);
 
   panel.appendChild(header);
@@ -1523,7 +1586,7 @@ function buildMultiPanel(node, panelIndex) {
   panel.style.minHeight = "260px";
   panel.style.width = "100%";
 
-  return { panel, render, syncFromWidget, header, labelWidget };
+  return { panel, render, syncFromWidget, cleanup, header, labelWidget };
 }
 
 function registerMultiNode(nodeType) {
@@ -1557,6 +1620,13 @@ function registerMultiNode(nodeType) {
       p.render?.();
     }
     return r;
+  };
+
+  const onRemoved = nodeType.prototype.onRemoved;
+  nodeType.prototype.onRemoved = function () {
+    for (const p of this._promptLibraryPanels || []) p.cleanup?.();
+    this._promptLibraryPanels = [];
+    return onRemoved?.apply(this, arguments);
   };
 }
 
@@ -1604,7 +1674,7 @@ app.registerExtension({
         idWidget.draw = () => {};
       }
 
-      const { container, render, syncFromWidget } = buildGallery(this, idWidget);
+      const { container, render, syncFromWidget, cleanup } = buildGallery(this, idWidget);
       // Defensive: container needs explicit dimensions because Nodes 2.0
       // doesn't always give DOM widgets a sized wrapper before first paint.
       container.style.minHeight = "240px";
@@ -1625,6 +1695,7 @@ app.registerExtension({
       });
       this._promptLibraryRender = render;
       this._promptLibrarySyncFromWidget = syncFromWidget;
+      this._promptLibraryCleanup = cleanup;
       this._promptLibraryGalleryWidget = galleryWidget;
 
       this.size = [320, 320];
@@ -1639,6 +1710,13 @@ app.registerExtension({
       this._promptLibrarySyncFromWidget?.();
       this._promptLibraryRender?.();
       return r;
+    };
+
+    const onRemoved = nodeType.prototype.onRemoved;
+    nodeType.prototype.onRemoved = function () {
+      this._promptLibraryCleanup?.();
+      this._promptLibraryCleanup = null;
+      return onRemoved?.apply(this, arguments);
     };
   },
 });
