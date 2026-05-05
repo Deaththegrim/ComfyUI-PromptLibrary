@@ -2050,44 +2050,52 @@ function installWebsocketBridge() {
   });
 }
 
-// Per-node-group color theming. Wraps onNodeCreated so the node gets its
-// title-bar (color) + body (bgcolor) tinted on first creation. Works
-// alongside the existing DOM-widget wrappers — when both wrap onNodeCreated,
-// each wrapper calls the inner one and chains cleanly.
+// Per-node-group color theming: bright coloured title bar (with black title
+// text) + uniform dark-grey body across the whole suite. Wraps
+// onNodeCreated so the colors apply on first creation. Chains cleanly with
+// the DOM-widget wrappers — each wrapper calls the inner one.
+const NODE_BODY_COLOR = "#1e1e1e";
+const NODE_TITLE_TEXT_COLOR = "#0a0a0a";
 const NODE_COLORS = {
-  // Library / data nodes — deep purple
-  "PromptLibrary":         { color: "#6b4a8c", bgcolor: "#3d2752" },
-  "PromptLibraryMulti":    { color: "#6b4a8c", bgcolor: "#3d2752" },
-  "PromptLibrarySave":     { color: "#6b4a8c", bgcolor: "#3d2752" },
-  "PromptLibraryRandom":   { color: "#6b4a8c", bgcolor: "#3d2752" },
-  "PromptLibraryWildcard": { color: "#6b4a8c", bgcolor: "#3d2752" },
-  // Comic authoring — warm amber / burnt orange
-  "PromptLibraryScene":      { color: "#b07a3a", bgcolor: "#5d3e1c" },
-  "PromptLibraryBackground": { color: "#b07a3a", bgcolor: "#5d3e1c" },
-  "PromptLibraryComicFrame": { color: "#b07a3a", bgcolor: "#5d3e1c" },
-  // Sampling — teal / steel blue
-  "GrimmRibbitySamplerSDXL":    { color: "#3a7c8c", bgcolor: "#1f3d52" },
-  "GrimmRibbityHiResFixScript": { color: "#3a7c8c", bgcolor: "#1f3d52" },
-  "GrimmRibbityPackSDXLTuple":  { color: "#3a7c8c", bgcolor: "#1f3d52" },
-  // Output / save — forest green
-  "GrimmRibbityCivitaiSave": { color: "#3a8c5b", bgcolor: "#1f4d34" },
+  // Library / data nodes — light lavender title bar
+  "PromptLibrary":         "#c8a8e8",
+  "PromptLibraryMulti":    "#c8a8e8",
+  "PromptLibrarySave":     "#c8a8e8",
+  "PromptLibraryRandom":   "#c8a8e8",
+  "PromptLibraryWildcard": "#c8a8e8",
+  // Comic authoring — peachy amber title bar
+  "PromptLibraryScene":      "#e8b878",
+  "PromptLibraryBackground": "#e8b878",
+  "PromptLibraryComicFrame": "#e8b878",
+  // Sampling — light teal title bar
+  "GrimmRibbitySamplerSDXL":    "#8cc8d8",
+  "GrimmRibbityHiResFixScript": "#8cc8d8",
+  "GrimmRibbityPackSDXLTuple":  "#8cc8d8",
+  // Output / save — soft mint green title bar
+  "GrimmRibbityCivitaiSave": "#a8d8b8",
 };
 function applyNodeColors(nodeType, nodeData) {
-  const colors = NODE_COLORS[nodeData.name];
-  if (!colors) return;
+  const titleColor = NODE_COLORS[nodeData.name];
+  if (!titleColor) return;
   const orig = nodeType.prototype.onNodeCreated;
   nodeType.prototype.onNodeCreated = function () {
     const r = orig?.apply(this, arguments);
-    // Don't overwrite a color the user explicitly set — respect their override
-    // when reopening a workflow they recoloured manually via right-click.
+    // Don't overwrite a colour the user manually overrode via right-click —
+    // respect their choice on reload by checking against the LiteGraph default.
     if (!this.color || this.color === LiteGraph?.NODE_DEFAULT_COLOR) {
-      this.color = colors.color;
+      this.color = titleColor;
     }
     if (!this.bgcolor || this.bgcolor === LiteGraph?.NODE_DEFAULT_BGCOLOR) {
-      this.bgcolor = colors.bgcolor;
+      this.bgcolor = NODE_BODY_COLOR;
     }
+    // LiteGraph respects per-instance title_text_color when drawing the
+    // node title; fall back to the constructor-level for completeness.
+    this.title_text_color = NODE_TITLE_TEXT_COLOR;
     return r;
   };
+  // Class-level fallback so LiteGraph picks it up even if onNodeCreated isn't
+  // run for some reason (e.g. node manifests built early in the lifecycle).
+  nodeType.title_text_color = NODE_TITLE_TEXT_COLOR;
 }
 
 app.registerExtension({
