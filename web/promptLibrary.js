@@ -999,6 +999,13 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   exportBtn.textContent = "Export";
   exportBtn.title = "Export the currently visible prompts (with thumbnails) as a .zip";
 
+  const scanLorasBtn = document.createElement("button");
+  scanLorasBtn.className = "pl-btn";
+  scanLorasBtn.textContent = "Scan LoRAs";
+  scanLorasBtn.title = "Walk models/loras/ and add a library entry per LoRA, with "
+    + "auto-detected preview thumbnails and trigger words from the safetensors metadata. "
+    + "Existing entries are skipped — re-running won't clobber edits.";
+
   const refreshBtn = document.createElement("button");
   refreshBtn.className = "pl-btn";
   refreshBtn.textContent = "Refresh";
@@ -1058,7 +1065,7 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   const countBadge = document.createElement("span");
   countBadge.className = "pl-count-badge";
   countBadge.title = "Visible / total prompts";
-  toolbar.append(searchWrap, modelSelect, sortSelect, sizeWrap, viewWrap, favBtn, countBadge, importBtn, exportBtn, refreshBtn, fileInput);
+  toolbar.append(searchWrap, modelSelect, sortSelect, sizeWrap, viewWrap, favBtn, countBadge, importBtn, exportBtn, scanLorasBtn, refreshBtn, fileInput);
 
   const tagsRow = document.createElement("div");
   tagsRow.className = "pl-tags-row";
@@ -1642,6 +1649,38 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       toast(`Exported ${count} prompt${count === 1 ? "" : "s"}.`, "success");
     } catch (e) {
       toast(`Export failed: ${e.message}`, "error");
+    }
+  });
+
+  scanLorasBtn.onclick = withBusy(scanLorasBtn, "Scanning…", async () => {
+    // Default-on: include triggers from safetensors metadata, skip existing
+    // entries so re-runs don't clobber user edits. Hold shift while clicking
+    // to switch into refresh-mode (re-reads metadata + thumbnails for
+    // already imported LoRAs).
+    const refreshExisting = !!(window.event && window.event.shiftKey);
+    try {
+      const res = await api.fetchApi("/prompt_library/scan_loras", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          default_weight: 1.0,
+          include_triggers: true,
+          refresh_existing: refreshExisting,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const errs = data.errors?.length || 0;
+      const summary = `LoRA scan: ${data.added} added, ${data.updated} refreshed, `
+        + `${data.skipped} skipped${errs ? ` (${errs} errors — see console)` : ""}`;
+      if (errs) console.warn("[PromptLibrary] LoRA scan errors:", data.errors);
+      toast(summary, errs ? "error" : "success", 6000);
+      await refresh();
+    } catch (e) {
+      toast(`LoRA scan failed: ${e.message}`, "error");
     }
   });
 

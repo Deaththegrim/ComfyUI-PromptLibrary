@@ -21,6 +21,13 @@ except ImportError:
     # maintenance script doesn't need ComfyUI's server module).
     PromptServer = None
 
+try:
+    import folder_paths
+except ImportError:
+    # Standalone import (tests, maintenance) — LoRA scanning is unavailable
+    # but the rest of the package keeps working.
+    folder_paths = None
+
 ROOT = Path(__file__).parent
 DATA_DIR = ROOT / "data"
 IMAGES_DIR = DATA_DIR / "images"
@@ -1606,6 +1613,232 @@ async def import_zip_route(request):
     return web.json_response({"added": added, "updated": updated, "errors": errors})
 
 
+# --------------------------------------------------------------------------
+# LoRA scan / bulk import — turns every installed .safetensors LoRA into a
+# library entry with auto-detected preview thumbnail and trigger words from
+# the safetensors metadata. Re-runnable: existing entries are skipped or
+# refreshed (no duplicate spam) based on the LoRA's relative path.
+# --------------------------------------------------------------------------
+
+_LORA_PREVIEW_EXTS = (".preview.png", ".preview.jpg", ".preview.jpeg",
+                       ".preview.webp", ".png", ".jpg", ".jpeg", ".webp")
+# Hard-cap how many top trigger tags we ingest from a single LoRA. Some
+# Kohya training runs record thousands of tags with falling frequencies;
+# the long tail isn't useful and would bloat the entry's tag list.
+_LORA_MAX_TRIGGER_TAGS = 12
+# Per-tag minimum frequency: skip very rare tags that appear once or twice
+# across the whole dataset — usually one-off names that aren't real triggers.
+_LORA_MIN_TAG_FREQ = 5
+_LORA_TAG_NORMALIZE = str.maketrans({"_": " "})
+
+
+def _find_lora_preview(full_path: str) -> str | None:
+    """Look for a preview image stored alongside the .safetensors. Civitai's
+    SD-Civitai-Helper writes <name>.preview.png; some Kohya / kohya_ss
+    setups write <name>.png. Returns the first match or None."""
+    base, _ = os.path.splitext(full_path)
+    for ext in _LORA_PREVIEW_EXTS:
+        candidate = base + ext
+        try:
+            if os.path.isfile(candidate):
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _read_safetensors_metadata(full_path: str) -> dict:
+    """Parse only the safetensors header so we don't have to load the
+    weights. Format: 8-byte little-endian length, then JSON header, then
+    tensor data. The training metadata lives under '__metadata__'.
+    Returns an empty dict on any failure (corrupt file, missing key, etc.)."""
+    import struct
+    try:
+        with open(full_path, "rb") as f:
+            length_bytes = f.read(8)
+            if len(length_bytes) != 8:
+                return {}
+            (header_size,) = struct.unpack("<Q", length_bytes)
+            # Defensive cap — header should be tiny relative to the file.
+            if header_size <= 0 or header_size > 100 * 1024 * 1024:
+                return {}
+            header_raw = f.read(header_size)
+        if len(header_raw) != header_size:
+            return {}
+        header = json.loads(header_raw.decode("utf-8"))
+        meta = header.get("__metadata__")
+        return meta if isinstance(meta, dict) else {}
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def _extract_lora_triggers(metadata: dict, top_n: int = _LORA_MAX_TRIGGER_TAGS) -> list[str]:
+    """Pull the most common training tags from Kohya's `ss_tag_frequency`,
+    summed across all training subfolders. Tags returned in descending
+    frequency, capped at top_n, normalised (underscores → spaces)."""
+    raw = metadata.get("ss_tag_frequency")
+    if not isinstance(raw, str):
+        return []
+    try:
+        freq_by_dir = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(freq_by_dir, dict):
+        return []
+    summed: dict[str, int] = {}
+    for cat in freq_by_dir.values():
+        if not isinstance(cat, dict):
+            continue
+        for tag, count in cat.items():
+            if not isinstance(tag, str) or not isinstance(count, (int, float)):
+                continue
+            if count < _LORA_MIN_TAG_FREQ:
+                continue
+            summed[tag] = summed.get(tag, 0) + int(count)
+    ordered = sorted(summed.items(), key=lambda kv: (-kv[1], kv[0]))
+    out: list[str] = []
+    for tag, _count in ordered[:top_n]:
+        clean = tag.translate(_LORA_TAG_NORMALIZE).strip().lower()
+        if clean and clean not in out:
+            out.append(clean)
+    return out
+
+
+def _lora_id_for_path(rel_path: str) -> str:
+    """Stable ID derived from the LoRA's relative path so re-scans hit the
+    same library entry. Path separators flattened to underscores so the
+    safe-id regex accepts it."""
+    base, _ = os.path.splitext(rel_path)
+    flat = base.replace("/", "_").replace("\\", "_").replace(" ", "_")
+    return _slugify(f"lora_{flat}")[:64] or "lora_unknown"
+
+
+def _scan_loras_internal(*, default_weight: float = 1.0,
+                          include_triggers: bool = True,
+                          use_windows_separators: bool = False,
+                          refresh_existing: bool = False) -> dict:
+    """Walk the configured loras directory, upsert one library entry per
+    file. Returns counts + per-LoRA results. refresh_existing=True
+    updates entries whose source LoRA still resolves; otherwise existing
+    entries are skipped (so re-runs don't clobber user edits)."""
+    if folder_paths is None:
+        return {"added": 0, "updated": 0, "skipped": 0,
+                "errors": ["folder_paths unavailable (running outside ComfyUI?)"]}
+    try:
+        names = folder_paths.get_filename_list("loras")
+    except Exception as e:
+        return {"added": 0, "updated": 0, "skipped": 0, "errors": [f"folder_paths failed: {e}"]}
+
+    added = updated = skipped = 0
+    errors: list[str] = []
+    notify = False
+
+    with _lock:
+        items = _load()
+        index_by_id = {i.get("id"): i for i in items}
+
+    for rel in names:
+        try:
+            full_path = folder_paths.get_full_path("loras", rel)
+            if not full_path or not os.path.isfile(full_path):
+                continue
+        except Exception as e:
+            errors.append(f"{rel}: {e}")
+            continue
+
+        entry_id = _lora_id_for_path(rel)
+        existed = entry_id in index_by_id
+        if existed and not refresh_existing:
+            skipped += 1
+            continue
+
+        # Read safetensors header once — used for both triggers and the
+        # ss_base_model_version tag heuristic.
+        md = _read_safetensors_metadata(full_path) if (
+            include_triggers or os.path.getsize(full_path) > 0
+        ) else {}
+
+        # Compose the entry text: <lora:path:weight>, triggers
+        path_token = rel.replace("/", "\\") if use_windows_separators else rel
+        text = f"<lora:{path_token}:{default_weight:g}>"
+        if include_triggers:
+            triggers = _extract_lora_triggers(md)
+            if triggers:
+                text += ", " + ", ".join(triggers)
+
+        # Display name = filename without extension, replacing path separators
+        # with " / " so nested subfolder LoRAs read cleanly in the gallery.
+        display_name = os.path.splitext(rel)[0].replace("/", " / ").replace("\\", " / ")
+
+        # Tags: 'lora' + the top-level subfolder (if any) + 'sdxl' if metadata
+        # hints SDXL training, since users often filter by both.
+        tags: list[str] = ["lora"]
+        if "/" in rel or "\\" in rel:
+            top = rel.replace("\\", "/").split("/", 1)[0].lower()
+            if top and top not in tags:
+                tags.append(top)
+        base_model = md.get("ss_base_model_version", "") if isinstance(md, dict) else ""
+        if isinstance(base_model, str) and "xl" in base_model.lower():
+            tags.append("sdxl")
+
+        # Upsert: build a row dict in the storage format and write directly
+        # rather than going through the multipart upsert route — we own this
+        # process and need to attach an arbitrary file as the thumbnail.
+        with _lock:
+            items = _load()
+            existing = next((i for i in items if i.get("id") == entry_id), None)
+            created = existing is None
+            if created:
+                existing = {"id": entry_id}
+                items.append(existing)
+            existing["name"] = display_name
+            existing["text"] = text
+            existing["tags"] = tags
+            existing["notes"] = (
+                f"LoRA path: {rel}\n"
+                f"Default weight: {default_weight:g}\n"
+                f"Auto-imported by GrimmRibbity LoRA scanner."
+            )
+            _touch(existing, created=created)
+
+            preview_path = _find_lora_preview(full_path)
+            if preview_path:
+                try:
+                    with open(preview_path, "rb") as f:
+                        img_bytes = f.read()
+                    if len(img_bytes) <= _MAX_IMAGE_BYTES:
+                        _save_thumbnail_bytes(entry_id, img_bytes)
+                except OSError as e:
+                    errors.append(f"{rel}: preview {preview_path}: {e}")
+            _save(items)
+            notify = True
+
+        if existed:
+            updated += 1
+        else:
+            added += 1
+
+    if notify:
+        _notify_change()
+    return {"added": added, "updated": updated, "skipped": skipped, "errors": errors}
+
+
+@routes.post("/prompt_library/scan_loras")
+async def scan_loras_route(request):
+    payload = await request.json() if request.body_exists else {}
+    default_weight = float(payload.get("default_weight", 1.0) or 1.0)
+    include_triggers = bool(payload.get("include_triggers", True))
+    use_windows_separators = bool(payload.get("use_windows_separators", False))
+    refresh_existing = bool(payload.get("refresh_existing", False))
+    result = _scan_loras_internal(
+        default_weight=default_weight,
+        include_triggers=include_triggers,
+        use_windows_separators=use_windows_separators,
+        refresh_existing=refresh_existing,
+    )
+    return web.json_response(result)
+
+
 # Files we never want to ingest from a Prompt Builder zip:
 #   - the "_Master_Filtered*" union files (they duplicate the per-category files)
 #   - the user-managed Custom / Deleted lists (empty by design)
@@ -1800,7 +2033,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.24.0"
+__version__ = "0.25.0"
 
 
 def _autobackup_on_version_change() -> None:
