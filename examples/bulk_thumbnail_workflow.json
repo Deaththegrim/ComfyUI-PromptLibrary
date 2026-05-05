@@ -1,0 +1,258 @@
+{
+  "last_node_id": 14,
+  "last_link_id": 16,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "CheckpointLoaderSimple",
+      "pos": [-540, 60],
+      "size": [320, 100],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {"name": "MODEL", "type": "MODEL", "links": [1], "slot_index": 0},
+        {"name": "CLIP", "type": "CLIP", "links": [2, 3], "slot_index": 1},
+        {"name": "VAE", "type": "VAE", "links": [10], "slot_index": 2}
+      ],
+      "title": "Checkpoint",
+      "properties": {"Node name for S&R": "CheckpointLoaderSimple"},
+      "widgets_values": ["krakenNOIR_v3.safetensors"]
+    },
+    {
+      "id": 2,
+      "type": "PromptLibrary",
+      "pos": [-540, 220],
+      "size": [320, 320],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {"name": "prompt", "type": "STRING", "links": [4], "slot_index": 0}
+      ],
+      "title": "GrimmRibbity — Library (driven by Queue ▶▶)",
+      "properties": {"Node name for S&R": "PromptLibrary"},
+      "widgets_values": ["", ", "]
+    },
+    {
+      "id": 3,
+      "type": "CLIPTextEncodeSDXL",
+      "pos": [-180, 60],
+      "size": [400, 320],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {"name": "clip", "type": "CLIP", "link": 2},
+        {"name": "text_g", "type": "STRING", "link": 4, "widget": {"name": "text_g"}},
+        {"name": "text_l", "type": "STRING", "link": 5, "widget": {"name": "text_l"}}
+      ],
+      "outputs": [
+        {"name": "CONDITIONING", "type": "CONDITIONING", "links": [6], "slot_index": 0}
+      ],
+      "title": "Positive (SDXL)",
+      "properties": {"Node name for S&R": "CLIPTextEncodeSDXL"},
+      "widgets_values": [1024, 1024, 0, 0, 1024, 1024, "", ""]
+    },
+    {
+      "id": 13,
+      "type": "PrimitiveStringMultiline",
+      "pos": [-540, 560],
+      "size": [320, 100],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {"name": "STRING", "type": "STRING", "links": [5], "slot_index": 0}
+      ],
+      "title": "positive_l (tags / shorter cues)",
+      "properties": {"Node name for S&R": "PrimitiveStringMultiline"},
+      "widgets_values": ["masterpiece, best quality, highly detailed"]
+    },
+    {
+      "id": 4,
+      "type": "CLIPTextEncodeSDXL",
+      "pos": [-180, 400],
+      "size": [400, 240],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {"name": "clip", "type": "CLIP", "link": 3}
+      ],
+      "outputs": [
+        {"name": "CONDITIONING", "type": "CONDITIONING", "links": [7], "slot_index": 0}
+      ],
+      "title": "Negative (SDXL)",
+      "properties": {"Node name for S&R": "CLIPTextEncodeSDXL"},
+      "widgets_values": [1024, 1024, 0, 0, 1024, 1024,
+        "low quality, worst quality, blurry, watermark, signature, jpeg artifacts",
+        "low quality, worst quality"]
+    },
+    {
+      "id": 5,
+      "type": "GrimmRibbityPackSDXLTuple",
+      "pos": [260, 60],
+      "size": [240, 200],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {"name": "base_model", "type": "MODEL", "link": 1},
+        {"name": "base_clip", "type": "CLIP", "link": 8},
+        {"name": "base_positive", "type": "CONDITIONING", "link": 6},
+        {"name": "base_negative", "type": "CONDITIONING", "link": 7}
+      ],
+      "outputs": [
+        {"name": "sdxl_tuple", "type": "SDXL_TUPLE", "links": [9], "slot_index": 0}
+      ],
+      "title": "Pack SDXL Tuple",
+      "properties": {"Node name for S&R": "GrimmRibbityPackSDXLTuple"},
+      "widgets_values": []
+    },
+    {
+      "id": 14,
+      "type": "Reroute",
+      "pos": [-180, 380],
+      "size": [75, 26],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {"name": "", "type": "*", "link": null}
+      ],
+      "outputs": [
+        {"name": "", "type": "CLIP", "links": [8]}
+      ],
+      "title": "(reroute clip → pack)",
+      "properties": {"showOutputText": false, "horizontal": false}
+    },
+    {
+      "id": 6,
+      "type": "EmptyLatentImage",
+      "pos": [260, 280],
+      "size": [240, 100],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {"name": "LATENT", "type": "LATENT", "links": [11], "slot_index": 0}
+      ],
+      "title": "Empty Latent",
+      "properties": {"Node name for S&R": "EmptyLatentImage"},
+      "widgets_values": [1024, 1024, 1]
+    },
+    {
+      "id": 7,
+      "type": "GrimmRibbitySamplerSDXL",
+      "pos": [540, 60],
+      "size": [380, 360],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {"name": "sdxl_tuple", "type": "SDXL_TUPLE", "link": 9},
+        {"name": "latent_image", "type": "LATENT", "link": 11},
+        {"name": "optional_vae", "type": "VAE", "link": 10},
+        {"name": "script", "type": "GRIMM_SDXL_SCRIPT", "link": null}
+      ],
+      "outputs": [
+        {"name": "image", "type": "IMAGE", "links": [12], "slot_index": 0},
+        {"name": "latent", "type": "LATENT", "links": [], "slot_index": 1},
+        {"name": "model", "type": "MODEL", "links": [], "slot_index": 2},
+        {"name": "clip", "type": "CLIP", "links": [], "slot_index": 3},
+        {"name": "vae", "type": "VAE", "links": [], "slot_index": 4},
+        {"name": "seed", "type": "INT", "links": [], "slot_index": 5},
+        {"name": "sdxl_tuple", "type": "SDXL_TUPLE", "links": [], "slot_index": 6}
+      ],
+      "title": "GrimmRibbity — SDXL Sampler",
+      "properties": {"Node name for S&R": "GrimmRibbitySamplerSDXL"},
+      "widgets_values": [0, "randomize", 25, 7, "dpmpp_2m_sde_gpu", "karras", 0, 10000, "true"]
+    },
+    {
+      "id": 8,
+      "type": "PromptLibraryThumbnailSaver",
+      "pos": [960, 60],
+      "size": [320, 160],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {"name": "image", "type": "IMAGE", "link": 12}
+      ],
+      "outputs": [
+        {"name": "id", "type": "STRING", "links": [], "slot_index": 0}
+      ],
+      "title": "GrimmRibbity — Thumbnail Saver (driven by Queue ▶▶)",
+      "properties": {"Node name for S&R": "PromptLibraryThumbnailSaver"},
+      "widgets_values": ["", 1]
+    },
+    {
+      "id": 9,
+      "type": "PreviewImage",
+      "pos": [960, 260],
+      "size": [320, 280],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {"name": "images", "type": "IMAGE", "link": 13}
+      ],
+      "outputs": [],
+      "title": "Preview (live thumbnails as they're saved)",
+      "properties": {"Node name for S&R": "PreviewImage"}
+    }
+  ],
+  "links": [
+    [1,  1, 0, 5, 0, "MODEL"],
+    [2,  1, 1, 3, 0, "CLIP"],
+    [3,  1, 1, 4, 0, "CLIP"],
+    [4,  2, 0, 3, 1, "STRING"],
+    [5, 13, 0, 3, 2, "STRING"],
+    [6,  3, 0, 5, 2, "CONDITIONING"],
+    [7,  4, 0, 5, 3, "CONDITIONING"],
+    [8, 14, 0, 5, 1, "CLIP"],
+    [9,  5, 0, 7, 0, "SDXL_TUPLE"],
+    [10, 1, 2, 7, 2, "VAE"],
+    [11, 6, 0, 7, 1, "LATENT"],
+    [12, 7, 0, 8, 0, "IMAGE"],
+    [13, 7, 0, 9, 0, "IMAGE"]
+  ],
+  "groups": [
+    {
+      "title": "Bulk-thumbnail driver",
+      "bounding": [-560, 200, 360, 360],
+      "color": "#3f789e",
+      "font_size": 14,
+      "flags": {}
+    },
+    {
+      "title": "Sampling chain",
+      "bounding": [-200, 30, 1100, 410],
+      "color": "#a1309b",
+      "font_size": 14,
+      "flags": {}
+    },
+    {
+      "title": "Thumbnail save target",
+      "bounding": [940, 30, 360, 530],
+      "color": "#629e3f",
+      "font_size": 14,
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {"scale": 0.85, "offset": [600, 50]},
+    "info": {
+      "name": "GrimmRibbity bulk-thumbnail flow",
+      "author": "GrimmRibbity",
+      "description": "Filter the gallery by a tag, click Queue ▶▶ — each entry runs once and its thumbnail gets saved back into the library."
+    }
+  },
+  "version": 0.4
+}

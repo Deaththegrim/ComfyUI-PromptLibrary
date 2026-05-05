@@ -606,6 +606,98 @@ class PromptLibrarySave:
 _INT_MAX = 0xffffffffffffffff
 
 
+class PromptLibraryThumbnailSaver:
+    """Updates ONLY the thumbnail on an existing library entry — leaves name,
+    text, tags, rating, and notes alone. Pair with the gallery's Queue ▶▶
+    button: it drives this node's `prompt_id` widget alongside the Library
+    node's, so each queued run thumbnails its own entry.
+
+    Workflow shape:
+      Library (gallery-driven) → text → CLIPTextEncode → Sampler → IMAGE
+                                                                     ↓
+                                                          ThumbnailSaver (prompt_id matched)
+
+    Skips silently if `prompt_id` is empty (so the workflow doesn't crash
+    when someone runs it interactively without the bulk-driver). Skips
+    with a console note if the id doesn't resolve to an existing entry.
+    """
+
+    DESCRIPTION = (
+        "Update an existing library entry's thumbnail. Wire IMAGE + the "
+        "entry's prompt_id; on workflow run, the entry's thumbnail is "
+        "replaced. Doesn't change the entry's name / text / tags. Use with "
+        "the gallery's Queue ▶▶ button — it drives this node's prompt_id "
+        "in lock-step with the Library loader."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE", {"tooltip": "Image to save as the thumbnail. The first "
+                                                "frame of a batch is used unless frame_index "
+                                                "is set."}),
+                "prompt_id": ("STRING", {"default": "", "multiline": False,
+                    "tooltip": "Library entry ID to update. Driven by Queue ▶▶ in lock-step "
+                               "with the Library loader."}),
+            },
+            "optional": {
+                "frame_index": ("INT", {"default": 1, "min": 1, "max": 4096,
+                    "tooltip": "When the wired IMAGE is a batch, which frame to use as the "
+                               "thumbnail (1-based)."}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("id",)
+    OUTPUT_TOOLTIPS = ("The prompt_id that was processed, or empty string if skipped.",)
+    FUNCTION = "save_thumb"
+    CATEGORY = "GrimmRibbity/Library"
+    OUTPUT_NODE = True
+
+    def save_thumb(self, image, prompt_id, frame_index=1):
+        pid = (prompt_id or "").strip()
+        if not pid:
+            print("[ThumbnailSaver] prompt_id empty; skipping (workflow probably "
+                  "running interactively, not via Queue ▶▶)")
+            return ("",)
+        if not _safe_id(pid):
+            print(f"[ThumbnailSaver] invalid prompt_id {pid!r}; skipping")
+            return ("",)
+
+        with _lock:
+            items = _load()
+            if not any(i.get("id") == pid for i in items):
+                print(f"[ThumbnailSaver] no entry with id={pid!r}; skipping")
+                return ("",)
+
+        # Encode the chosen frame to PNG bytes. _save_thumbnail_bytes handles
+        # the downscale + JPEG re-encode for storage.
+        from PIL import Image
+        import numpy as np
+        idx = max(0, min(int(frame_index) - 1, image.shape[0] - 1))
+        frame = image[idx]
+        if hasattr(frame, "cpu"):
+            frame = frame.cpu().numpy()
+        arr = (frame.clip(0, 1) * 255).astype(np.uint8)
+        pil = Image.fromarray(arr)
+        buf = io.BytesIO()
+        pil.save(buf, format="PNG")
+
+        if _save_thumbnail_bytes(pid, buf.getvalue()) is None:
+            print(f"[ThumbnailSaver] failed to process thumbnail for {pid!r}")
+            return ("",)
+        # Bump the entry's updated_at so the watcher fires + UIs refresh.
+        with _lock:
+            items = _load()
+            entry = next((i for i in items if i.get("id") == pid), None)
+            if entry is not None:
+                _touch(entry, created=False)
+                _save(items)
+        _notify_change()
+        return (pid,)
+
+
 class PromptLibraryRandom:
     """Pick a random library entry whose tags match a filter (AND across listed tags).
 
@@ -2133,7 +2225,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.27.1"
+__version__ = "0.27.2"
 
 
 def _autobackup_on_version_change() -> None:
@@ -2225,6 +2317,7 @@ NODE_CLASS_MAPPINGS = {
     "PromptLibrary": PromptLibrary,
     "PromptLibraryMulti": PromptLibraryMulti,
     "PromptLibrarySave": PromptLibrarySave,
+    "PromptLibraryThumbnailSaver": PromptLibraryThumbnailSaver,
     "PromptLibraryRandom": PromptLibraryRandom,
     "PromptLibraryWildcard": PromptLibraryWildcard,
     "PromptLibraryScene": PromptLibraryScene,
@@ -2239,6 +2332,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptLibrary": "GrimmRibbity — Library",
     "PromptLibraryMulti": "GrimmRibbity — Multi Library (3 panels)",
     "PromptLibrarySave": "GrimmRibbity — Save",
+    "PromptLibraryThumbnailSaver": "GrimmRibbity — Thumbnail Saver",
     "PromptLibraryRandom": "GrimmRibbity — Random by Tag",
     "PromptLibraryWildcard": "GrimmRibbity — Wildcard Expand",
     "PromptLibraryScene": "GrimmRibbity — Scene",

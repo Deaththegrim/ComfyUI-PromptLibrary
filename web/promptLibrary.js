@@ -1747,6 +1747,10 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
         + "version. Re-add the node.", "error");
       return;
     }
+    // If the workflow includes a Thumbnail Saver, drive its prompt_id in
+    // lock-step so each run thumbnails the entry it loaded.
+    const saverNode = app.graph?._nodes?.find(n => n.type === "PromptLibraryThumbnailSaver");
+    const saverIdWidget = saverNode?.widgets?.find(w => w.name === "prompt_id");
     if (ids.length > 10) {
       const ok = await confirmDestructive(
         `Queue ${ids.length} workflow runs? Each will run with a different library entry.`,
@@ -1757,7 +1761,9 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
     const fails = [];
     for (const id of ids) {
       idWidget.value = id;
+      if (saverIdWidget) saverIdWidget.value = id;
       libraryNode.setDirtyCanvas?.(true, true);
+      if (saverNode) saverNode.setDirtyCanvas?.(true, true);
       try {
         await app.queuePrompt(0, 1);
         queued++;
@@ -2188,11 +2194,12 @@ const NODE_BODY_COLOR = "#1e1e1e";
 const NODE_TITLE_TEXT_COLOR = "#0a0a0a";
 const NODE_COLORS = {
   // Library / data nodes — saturated purple
-  "PromptLibrary":         "#a060e0",
-  "PromptLibraryMulti":    "#a060e0",
-  "PromptLibrarySave":     "#a060e0",
-  "PromptLibraryRandom":   "#a060e0",
-  "PromptLibraryWildcard": "#a060e0",
+  "PromptLibrary":              "#a060e0",
+  "PromptLibraryMulti":         "#a060e0",
+  "PromptLibrarySave":          "#a060e0",
+  "PromptLibraryThumbnailSaver":"#a060e0",
+  "PromptLibraryRandom":        "#a060e0",
+  "PromptLibraryWildcard":      "#a060e0",
   // Comic authoring — burnt orange
   "PromptLibraryScene":      "#e8852f",
   "PromptLibraryBackground": "#e8852f",
