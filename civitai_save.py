@@ -828,8 +828,8 @@ class CivitaiSaveImage:
     RETURN_TYPES = ("INT",)
     RETURN_NAMES = ("seed",)
     OUTPUT_TOOLTIPS = (
-        "The actually-used seed (override if set, else auto-detected, else -1). "
-        "Wire into a logger or filename builder.",
+        "The actually-used seed (override if set, else auto-detected, else 0). "
+        "Wire into a logger, filename builder, or another node's seed input.",
     )
     FUNCTION = "save"
     OUTPUT_NODE = True
@@ -949,4 +949,7 @@ class CivitaiSaveImage:
 
         # OUTPUT_NODE = True puts the previews in the UI; the result tuple
         # under "result" feeds the seed output port for downstream wiring.
-        return {"ui": {"images": results}, "result": (int(seed) if seed is not None else -1,)}
+        # Fall back to 0 (not -1) when no seed was found — many other nodes
+        # declare their seed input with min=0, and emitting -1 here trips
+        # ComfyUI's wire-validation ("Value -1 smaller than min of 0").
+        return {"ui": {"images": results}, "result": (int(seed) if seed is not None else 0,)}
