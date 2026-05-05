@@ -1800,7 +1800,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.23.1"
+__version__ = "0.24.0"
 
 
 def _autobackup_on_version_change() -> None:
@@ -1866,6 +1866,14 @@ except Exception as _e:
     print(f"[PromptLibrary] SDXL sampler unavailable: {_e}")
     _sampler_node, _sampler_label = {}, {}
 
+try:
+    from .lora_picker import GrimmRibbityLoraPicker
+    _lora_node = {"GrimmRibbityLoraPicker": GrimmRibbityLoraPicker}
+    _lora_label = {"GrimmRibbityLoraPicker": "GrimmRibbity — LoRA Picker"}
+except Exception as _e:
+    print(f"[PromptLibrary] LoRA picker unavailable: {_e}")
+    _lora_node, _lora_label = {}, {}
+
 NODE_CLASS_MAPPINGS = {
     "PromptLibrary": PromptLibrary,
     "PromptLibraryMulti": PromptLibraryMulti,
@@ -1877,6 +1885,7 @@ NODE_CLASS_MAPPINGS = {
     "PromptLibraryComicFrame": PromptLibraryComicFrame,
     **_civitai_node,
     **_sampler_node,
+    **_lora_node,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptLibrary": "GrimmRibbity — Library",
@@ -1889,6 +1898,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptLibraryComicFrame": "GrimmRibbity — Comic Frame",
     **_civitai_label,
     **_sampler_label,
+    **_lora_label,
 }
 WEB_DIRECTORY = "./web"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
