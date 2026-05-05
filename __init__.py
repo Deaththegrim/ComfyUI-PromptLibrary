@@ -1839,6 +1839,103 @@ async def scan_loras_route(request):
     return web.json_response(result)
 
 
+# --------------------------------------------------------------------------
+# Bulk-import the Background node's preset list into the library so users can
+# browse locations through the gallery rather than picking from the node's
+# combo. Re-runnable: existing entries are skipped (or refreshed) based on
+# the slug derived from the preset string.
+# --------------------------------------------------------------------------
+
+
+def _bg_preset_short_label(preset: str, max_len: int = 60) -> str:
+    """Pull a human-readable short label out of a preset string.
+    'city: Tokyo street, narrow road wet with rain, neon kanji signs...'
+        →  ('city', 'Tokyo street')
+    The category is the prefix up to the first ':', the label is the chunk
+    up to the first ',' inside the description (or the whole description
+    if it has no commas, truncated to max_len)."""
+    if ":" in preset:
+        category, description = preset.split(":", 1)
+        category = category.strip().lower()
+        description = description.strip()
+    else:
+        category = "background"
+        description = preset.strip()
+    label = description.split(",", 1)[0].strip()
+    if len(label) > max_len:
+        label = label[: max_len - 1].rstrip() + "…"
+    return category, label
+
+
+def _bg_id_for(category: str, label: str) -> str:
+    return _slugify(f"bg_{category}_{label}")[:64] or "bg_unknown"
+
+
+def _import_backgrounds_internal(*, refresh_existing: bool = False) -> dict:
+    """Walk _BG_PRESETS and upsert one library entry per location preset.
+    Skips the (none) sentinel and divider rows ('───── home / interior ─────')
+    automatically. Idempotent: same slug on re-run, no clobber unless
+    refresh_existing=True."""
+    added = updated = skipped = 0
+    errors: list[str] = []
+    notify = False
+
+    with _lock:
+        items = _load()
+        index_by_id = {i.get("id"): i for i in items}
+
+    for preset in _BG_PRESETS:
+        if not preset or preset == _BG_NONE:
+            continue
+        if preset.startswith(_BG_DIVIDER_CHAR):
+            continue
+        category, label = _bg_preset_short_label(preset)
+        entry_id = _bg_id_for(category, label)
+        existed = entry_id in index_by_id
+        if existed and not refresh_existing:
+            skipped += 1
+            continue
+
+        display_name = f"{category}: {label}"
+        tags = ["background", category]
+
+        with _lock:
+            items = _load()
+            existing = next((i for i in items if i.get("id") == entry_id), None)
+            created = existing is None
+            if created:
+                existing = {"id": entry_id}
+                items.append(existing)
+            existing["name"] = display_name
+            existing["text"] = preset
+            existing["tags"] = tags
+            existing["notes"] = (
+                "Auto-imported from the GrimmRibbity Background node preset list. "
+                "Update the Background node's _BG_PRESETS to add more, then re-run "
+                "the import (Shift-click to refresh existing entries)."
+            )
+            _touch(existing, created=created)
+            _save(items)
+            notify = True
+
+        if existed:
+            updated += 1
+        else:
+            added += 1
+
+    if notify:
+        _notify_change()
+    return {"added": added, "updated": updated, "skipped": skipped, "errors": errors}
+
+
+@routes.post("/prompt_library/import_backgrounds")
+async def import_backgrounds_route(request):
+    payload = await request.json() if request.body_exists else {}
+    refresh_existing = bool(payload.get("refresh_existing", False))
+    result = _import_backgrounds_internal(refresh_existing=refresh_existing)
+    return web.json_response(result)
+
+
 # Files we never want to ingest from a Prompt Builder zip:
 #   - the "_Master_Filtered*" union files (they duplicate the per-category files)
 #   - the user-managed Custom / Deleted lists (empty by design)
@@ -2033,7 +2130,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.26.1"
+__version__ = "0.27.0"
 
 
 def _autobackup_on_version_change() -> None:

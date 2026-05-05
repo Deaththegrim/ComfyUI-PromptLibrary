@@ -1006,6 +1006,21 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
     + "auto-detected preview thumbnails and trigger words from the safetensors metadata. "
     + "Existing entries are skipped — re-running won't clobber edits.";
 
+  const importBgBtn = document.createElement("button");
+  importBgBtn.className = "pl-btn";
+  importBgBtn.textContent = "Import BG";
+  importBgBtn.title = "Bulk-import the GrimmRibbity Background node's preset locations as "
+    + "library entries (tagged 'background' + the category). Filter by the 'background' "
+    + "chip after import. Existing entries are skipped; Shift-click to refresh them.";
+
+  const queueAllBtn = document.createElement("button");
+  queueAllBtn.className = "pl-btn";
+  queueAllBtn.textContent = "Queue ▶▶";
+  queueAllBtn.title = "Queue the current workflow once per selected entry (or per visible "
+    + "entry if no selection). Sets the first GrimmRibbity Library node's prompt_id to "
+    + "that entry's id before each queue. Pair with a PromptLibrarySave node wired to "
+    + "your output (with the same prompt_id) to auto-fill thumbnails across many entries.";
+
   const refreshBtn = document.createElement("button");
   refreshBtn.className = "pl-btn";
   refreshBtn.textContent = "Refresh";
@@ -1065,7 +1080,7 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   const countBadge = document.createElement("span");
   countBadge.className = "pl-count-badge";
   countBadge.title = "Visible / total prompts";
-  toolbar.append(searchWrap, modelSelect, sortSelect, sizeWrap, viewWrap, favBtn, countBadge, importBtn, exportBtn, scanLorasBtn, refreshBtn, fileInput);
+  toolbar.append(searchWrap, modelSelect, sortSelect, sizeWrap, viewWrap, favBtn, countBadge, importBtn, exportBtn, scanLorasBtn, importBgBtn, queueAllBtn, refreshBtn, fileInput);
 
   const tagsRow = document.createElement("div");
   tagsRow.className = "pl-tags-row";
@@ -1681,6 +1696,81 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       await refresh();
     } catch (e) {
       toast(`LoRA scan failed: ${e.message}`, "error");
+    }
+  });
+
+  importBgBtn.onclick = withBusy(importBgBtn, "Importing…", async () => {
+    const refreshExisting = !!(window.event && window.event.shiftKey);
+    try {
+      const res = await api.fetchApi("/prompt_library/import_backgrounds", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_existing: refreshExisting }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const errs = data.errors?.length || 0;
+      const summary = `Background import: ${data.added} added, ${data.updated} refreshed, `
+        + `${data.skipped} skipped${errs ? ` (${errs} errors — see console)` : ""}`;
+      if (errs) console.warn("[PromptLibrary] Background import errors:", data.errors);
+      toast(summary, errs ? "error" : "success", 6000);
+      await refresh();
+    } catch (e) {
+      toast(`Background import failed: ${e.message}`, "error");
+    }
+  });
+
+  // Queue-many: drives the workflow's first PromptLibrary node through every
+  // checked-or-visible entry, queueing one run per id. Pairs with a
+  // PromptLibrarySave node wired to your output to auto-fill thumbnails.
+  queueAllBtn.onclick = withBusy(queueAllBtn, "Queueing…", async () => {
+    const ids = checkedIds.size > 0
+      ? [...checkedIds]
+      : lastVisible.map(p => p.id);
+    if (!ids.length) {
+      toast("Nothing to queue (no selection, no visible entries).", "info");
+      return;
+    }
+    // Find the first PromptLibrary node in the active graph.
+    const libraryNode = app.graph?._nodes?.find(n => n.type === "PromptLibrary");
+    if (!libraryNode) {
+      toast("No GrimmRibbity Library node found in the current workflow. Add one and "
+        + "wire it to your sampler chain first.", "error", 8000);
+      return;
+    }
+    const idWidget = libraryNode.widgets?.find(w => w.name === "prompt_id");
+    if (!idWidget) {
+      toast("Library node has no prompt_id widget — workflow may be from an older "
+        + "version. Re-add the node.", "error");
+      return;
+    }
+    if (ids.length > 10) {
+      const ok = await confirmDestructive(
+        `Queue ${ids.length} workflow runs? Each will run with a different library entry.`,
+        { confirmLabel: "Queue all" });
+      if (!ok) return;
+    }
+    let queued = 0;
+    const fails = [];
+    for (const id of ids) {
+      idWidget.value = id;
+      libraryNode.setDirtyCanvas?.(true, true);
+      try {
+        await app.queuePrompt(0, 1);
+        queued++;
+      } catch (e) {
+        fails.push({ id, error: e?.message || String(e) });
+      }
+    }
+    if (!fails.length) {
+      toast(`Queued ${queued} workflow run${queued === 1 ? "" : "s"}.`, "success", 6000);
+    } else {
+      console.warn("[PromptLibrary] queue failures:", fails);
+      toast(`${queued}/${ids.length} queued; ${fails.length} failed (see console).`,
+        "error", 8000);
     }
   });
 
