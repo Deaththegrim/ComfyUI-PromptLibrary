@@ -713,6 +713,11 @@ class CivitaiSaveImage:
             "optional": {
                 "output_path": ("STRING", {"default": "", "multiline": False,
                                             "placeholder": "leave blank for ComfyUI/output, or absolute / ~ / relative path"}),
+                # -1 means "auto-detect from the workflow trace". Any other
+                # value is written into the saved metadata verbatim so the
+                # image can be re-rolled later. The same value is emitted on
+                # the seed output so downstream nodes can log / reuse it.
+                "seed_override": ("INT", {"default": -1, "min": -1, "max": 0xffffffffffffffff}),
                 "model_override": ([_AUTO_LABEL] + list_all_model_choices()[1:],),
                 "positive_override": ("STRING", {"default": "", "multiline": True,
                                                   "placeholder": "leave blank to auto-detect"}),
@@ -725,13 +730,15 @@ class CivitaiSaveImage:
             },
         }
 
-    RETURN_TYPES = ()
+    RETURN_TYPES = ("INT",)
+    RETURN_NAMES = ("seed",)
     FUNCTION = "save"
     OUTPUT_NODE = True
     CATEGORY = "image"
 
     def save(self, images, filename_prefix,
              output_path="",
+             seed_override=-1,
              model_override=_AUTO_LABEL,
              positive_override="", negative_override="",
              prompt=None, extra_pnginfo=None):
@@ -760,7 +767,9 @@ class CivitaiSaveImage:
 
         positive = positive_override.strip() or meta.get("positive", "")
         negative = negative_override.strip() or meta.get("negative", "")
-        seed = meta.get("seed")
+        # Seed: explicit override wins (anything >= 0); -1 falls back to the
+        # auto-detected value from the workflow trace.
+        seed = seed_override if (isinstance(seed_override, int) and seed_override >= 0) else meta.get("seed")
         steps = meta.get("steps")
         cfg = meta.get("cfg")
         sampler_name = meta.get("sampler_name")
@@ -839,4 +848,6 @@ class CivitaiSaveImage:
                 "type": "output",
             })
 
-        return {"ui": {"images": results}}
+        # OUTPUT_NODE = True puts the previews in the UI; the result tuple
+        # under "result" feeds the seed output port for downstream wiring.
+        return {"ui": {"images": results}, "result": (int(seed) if seed is not None else -1,)}
