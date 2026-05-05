@@ -84,6 +84,11 @@ const CSS = `
 .pl-context-menu .item:hover { background: var(--pl-bg-hover); }
 .pl-context-menu .item.danger { color: var(--pl-danger); }
 .pl-context-menu .sep { height: 1px; background: var(--pl-border); margin: 4px 0; }
+.pl-context-menu .pl-ctx-stars { display: flex; align-items: center; gap: 2px; cursor: default; }
+.pl-context-menu .pl-ctx-stars:hover { background: transparent; }
+.pl-ctx-star { color: var(--pl-fg-muted); font-size: 14px; cursor: pointer; padding: 0 1px; }
+.pl-ctx-star.on { color: #f5b94a; }
+.pl-ctx-star:hover { color: #f5b94a; }
 .pl-bulk-bar { display: flex; align-items: center; gap: 6px; padding: 6px 8px;
   background: var(--pl-bg-selected); color: var(--pl-fg); border-radius: 4px; font-size: 12px; }
 .pl-bulk-bar .count { font-weight: bold; flex: 1; }
@@ -177,6 +182,8 @@ const CSS = `
   margin-right: 6px; }
 .pl-notes { min-height: 40px !important; max-height: 100px; }
 .pl-count-badge { font-size: 11px; color: var(--pl-fg-muted); padding: 0 4px; white-space: nowrap; }
+.pl-fav-btn { font-size: 14px; line-height: 1; padding: 2px 7px; }
+.pl-fav-btn.active { color: #f5b94a; border-color: #f5b94a; background: var(--pl-bg-input); }
 .pl-history-row { display: grid; grid-template-columns: auto 1fr auto; gap: 6px;
   align-items: start; padding: 6px; background: #2a2a2a; border-radius: 3px;
   font-size: 11px; }
@@ -382,6 +389,7 @@ function openContextMenu(x, y, items) {
   if (_activeContextMenu) _activeContextMenu.remove();
   const menu = document.createElement("div");
   menu.className = "pl-context-menu";
+  const closeMenu = () => { menu.remove(); _activeContextMenu = null; };
   for (const entry of items) {
     if (entry === "sep") {
       const sep = document.createElement("div");
@@ -389,12 +397,36 @@ function openContextMenu(x, y, items) {
       menu.appendChild(sep);
       continue;
     }
+    // Special "stars" entry: 5 inline clickable stars for quick rating.
+    // {kind:"stars", label, current, action(n)}
+    if (entry?.kind === "stars") {
+      const row = document.createElement("div");
+      row.className = "item pl-ctx-stars";
+      const lbl = document.createElement("span");
+      lbl.textContent = entry.label;
+      lbl.style.flex = "1";
+      row.appendChild(lbl);
+      for (let i = 1; i <= 5; i++) {
+        const star = document.createElement("span");
+        star.className = "pl-ctx-star" + (i <= (entry.current || 0) ? " on" : "");
+        star.textContent = i <= (entry.current || 0) ? "★" : "☆";
+        star.title = `${i} star${i === 1 ? "" : "s"}`;
+        star.onclick = (ev) => {
+          ev.stopPropagation();
+          closeMenu();
+          // Click same rating to clear.
+          entry.action(i === (entry.current || 0) ? 0 : i);
+        };
+        row.appendChild(star);
+      }
+      menu.appendChild(row);
+      continue;
+    }
     const el = document.createElement("div");
     el.className = "item" + (entry.danger ? " danger" : "");
     el.textContent = entry.label;
     el.onclick = () => {
-      menu.remove();
-      _activeContextMenu = null;
+      closeMenu();
       entry.action();
     };
     menu.appendChild(el);
@@ -698,6 +730,30 @@ function openPromptModal({ existing, onSave, onDelete }) {
     }
   };
 
+  // Paste-from-clipboard: when the modal is focused and the user pastes an
+  // image (Ctrl+V from a screenshot, browser, etc.), drop it into the file
+  // input via DataTransfer so the existing change handler picks it up.
+  const onPaste = (e) => {
+    if (!modal.contains(document.activeElement) && !modal.contains(e.target)) return;
+    const items = e.clipboardData?.items || [];
+    for (const item of items) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+        if (!file) continue;
+        const ext = (file.type.split("/")[1] || "png").replace("jpeg", "jpg");
+        const named = new File([file], `pasted-${Date.now()}.${ext}`, { type: file.type });
+        const dt = new DataTransfer();
+        dt.items.add(named);
+        imgInput.files = dt.files;
+        imgInput.dispatchEvent(new Event("change"));
+        e.preventDefault();
+        toast("Pasted image from clipboard.", "success", 2000);
+        return;
+      }
+    }
+  };
+  document.addEventListener("paste", onPaste);
+
   const status = document.createElement("div");
   status.className = "pl-status";
 
@@ -726,6 +782,7 @@ function openPromptModal({ existing, onSave, onDelete }) {
   };
   const close = () => {
     document.removeEventListener("keydown", onKey, true);
+    document.removeEventListener("paste", onPaste);
     dragCleanup?.();
     modal.remove();
     _modalStack = Math.max(0, _modalStack - 1);
@@ -856,6 +913,7 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       filter: filter.value || "",
       activeTags: [...activeTags],
       tagFilterMode,
+      favoritesOnly,
       sort: sortSelect.value,
       tileSize: sizeInput.value,
       view: viewMode,
@@ -961,10 +1019,19 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   gridViewBtn.onclick = () => { viewMode = "grid"; localStorage.setItem(VIEW_KEY, viewMode); applyView(); writeState(); };
   listViewBtn.onclick = () => { viewMode = "list"; localStorage.setItem(VIEW_KEY, viewMode); applyView(); writeState(); };
 
+  const favBtn = document.createElement("button");
+  favBtn.className = "pl-btn pl-fav-btn";
+  favBtn.textContent = "★";
+  favBtn.title = "Show only favorites (rating ≥ 4)";
+  let favoritesOnly = !!initialState.favoritesOnly;
+  const applyFavBtn = () => favBtn.classList.toggle("active", favoritesOnly);
+  applyFavBtn();
+  favBtn.onclick = () => { favoritesOnly = !favoritesOnly; applyFavBtn(); render(); };
+
   const countBadge = document.createElement("span");
   countBadge.className = "pl-count-badge";
   countBadge.title = "Visible / total prompts";
-  toolbar.append(searchWrap, modelSelect, sortSelect, sizeWrap, viewWrap, countBadge, importBtn, exportBtn, refreshBtn, fileInput);
+  toolbar.append(searchWrap, modelSelect, sortSelect, sizeWrap, viewWrap, favBtn, countBadge, importBtn, exportBtn, refreshBtn, fileInput);
 
   const tagsRow = document.createElement("div");
   tagsRow.className = "pl-tags-row";
@@ -1209,6 +1276,9 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
         : (p) => (p.tags || []).some(t => activeTags.has(t));
       visible = visible.filter(tagPredicate);
     }
+    if (favoritesOnly) {
+      visible = visible.filter(p => (p.rating || 0) >= 4);
+    }
     if (terms.length) {
       visible = visible.filter(p => {
         const haystacks = [
@@ -1269,7 +1339,15 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       tile.className = "pl-tile"
         + (checkedIds.has(p.id) ? " selected" : "")
         + (idx === focusedIndex ? " focused" : "");
-      tile.title = p.name;
+      // Tooltip composes name + rating stars + notes excerpt so the user can
+      // scan content without opening the modal.
+      const tipParts = [p.name];
+      if (p.rating) tipParts.push("★".repeat(p.rating) + "☆".repeat(5 - p.rating));
+      if (p.notes) {
+        const excerpt = p.notes.length > 140 ? p.notes.slice(0, 140) + "…" : p.notes;
+        tipParts.push(excerpt);
+      }
+      tile.title = tipParts.join("\n");
       tile.dataset.promptId = p.id;
       tile.tabIndex = -1;
       tile.setAttribute("role", "option");
@@ -1347,6 +1425,18 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       tile.oncontextmenu = (e) => {
         e.preventDefault();
         openContextMenu(e.clientX, e.clientY, [
+          { kind: "stars", label: "Rate", current: p.rating || 0,
+            action: async (n) => {
+              try {
+                await upsert({
+                  id: p.id, name: p.name, text: p.text || "",
+                  tags: (p.tags || []).join(", "),
+                  rating: n, notes: p.notes || "",
+                });
+                await refresh();
+              } catch (err) { toast(`Rating failed: ${err.message}`, "error"); }
+            } },
+          "sep",
           { label: "Edit...", action: () => openPromptModal({
               existing: p,
               onSave: async (payload) => { await upsert(payload); await refresh(); },
