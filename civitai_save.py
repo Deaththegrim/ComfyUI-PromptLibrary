@@ -781,26 +781,43 @@ class CivitaiSaveImage:
     is wrong (e.g., your workflow has two KSamplers and we picked the wrong
     one for the final pass)."""
 
+    DESCRIPTION = (
+        "SaveImage replacement that writes A1111/Civitai-compatible PNG metadata. "
+        "Auto-detects model, LoRAs, positive/negative, seed, sampler, and scheduler "
+        "from the workflow trace. Override any field if auto-detection picks the "
+        "wrong sampler in a multi-KSampler workflow. Drops the file into "
+        "ComfyUI/output by default — use 'output_path' to redirect."
+    )
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "images": ("IMAGE",),
-                "filename_prefix": ("STRING", {"default": "GrimmRibbity"}),
+                "images": ("IMAGE", {"tooltip": "The IMAGE batch to save. Each frame becomes one PNG."}),
+                "filename_prefix": ("STRING", {"default": "GrimmRibbity",
+                    "tooltip": "Prefix for the saved file (counter and .png are appended). "
+                               "Supports ComfyUI's date/time substitutions like %date:yyyy-MM-dd%."}),
             },
             "optional": {
                 "output_path": ("STRING", {"default": "", "multiline": False,
-                                            "placeholder": "leave blank for ComfyUI/output, or absolute / ~ / relative path"}),
-                # -1 means "auto-detect from the workflow trace". Any other
-                # value is written into the saved metadata verbatim so the
-                # image can be re-rolled later. The same value is emitted on
-                # the seed output so downstream nodes can log / reuse it.
-                "seed_override": ("INT", {"default": -1, "min": -1, "max": 0xffffffffffffffff}),
-                "model_override": ([_AUTO_LABEL] + list_all_model_choices()[1:],),
+                                            "placeholder": "leave blank for ComfyUI/output, or absolute / ~ / relative path",
+                    "tooltip": "Custom save directory. Empty = ComfyUI/output (default). "
+                               "Accepts absolute paths, ~-relative, or output-relative. "
+                               "Created if missing; counter resumes from highest existing image."}),
+                "seed_override": ("INT", {"default": -1, "min": -1, "max": 0xffffffffffffffff,
+                    "tooltip": "Pin the seed in saved metadata. -1 = auto-detect from the workflow "
+                               "(default). Use this when auto-detection picks the wrong KSampler in "
+                               "a multi-sampler workflow."}),
+                "model_override": ([_AUTO_LABEL] + list_all_model_choices()[1:], {
+                    "tooltip": "Pin the saved model name. (auto) follows the workflow trace."}),
                 "positive_override": ("STRING", {"default": "", "multiline": True,
-                                                  "placeholder": "leave blank to auto-detect"}),
+                                                  "placeholder": "leave blank to auto-detect",
+                    "tooltip": "Pin the positive prompt in metadata. Useful when the workflow's "
+                               "actual prompt is stitched together from multiple sources and you "
+                               "want a clean Civitai page."}),
                 "negative_override": ("STRING", {"default": "", "multiline": True,
-                                                  "placeholder": "leave blank to auto-detect"}),
+                                                  "placeholder": "leave blank to auto-detect",
+                    "tooltip": "Pin the negative prompt in metadata."}),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -810,6 +827,10 @@ class CivitaiSaveImage:
 
     RETURN_TYPES = ("INT",)
     RETURN_NAMES = ("seed",)
+    OUTPUT_TOOLTIPS = (
+        "The actually-used seed (override if set, else auto-detected, else -1). "
+        "Wire into a logger or filename builder.",
+    )
     FUNCTION = "save"
     OUTPUT_NODE = True
     CATEGORY = "image"

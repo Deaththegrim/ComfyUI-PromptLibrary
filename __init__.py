@@ -284,17 +284,27 @@ if "unittest" not in sys.modules and not os.environ.get("PROMPT_LIBRARY_NO_WATCH
 
 
 class PromptLibrary:
+    DESCRIPTION = (
+        "Visual prompt picker. Browse the gallery, click tiles to select one "
+        "or many entries, and the joined prompt text is emitted on the output. "
+        "Multi-select is persistent across filter/search changes."
+    )
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "prompt_id": ("STRING", {"default": "", "multiline": False}),
-                "separator": ("STRING", {"default": ", ", "multiline": False}),
+                "prompt_id": ("STRING", {"default": "", "multiline": False,
+                    "tooltip": "Comma-separated entry IDs. Driven by the gallery widget — "
+                               "you don't normally type here, but you can paste IDs to pre-select."}),
+                "separator": ("STRING", {"default": ", ", "multiline": False,
+                    "tooltip": "Glue between joined entries when multiple tiles are selected."}),
             }
         }
 
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("prompt",)
+    OUTPUT_TOOLTIPS = ("The selected prompt(s) joined by the separator.",)
     FUNCTION = "load_prompt"
     CATEGORY = "utils"
 
@@ -333,18 +343,32 @@ class PromptLibraryMulti:
     own STRING output."""
 
     PANELS = 3
+    DESCRIPTION = (
+        "Three independent gallery panels in a single node. Use it to replace "
+        "Character / Style / Clothing → 3× Library + 2× Join Strings spaghetti "
+        "with a tidy single node that emits three STRING outputs. Each panel has "
+        "its own search, tag filter, sort mode, and selection. Click a panel "
+        "header to rename it inline."
+    )
 
     @classmethod
     def INPUT_TYPES(cls):
         req: dict = {}
         for i in range(1, cls.PANELS + 1):
-            req[f"label_{i}"] = ("STRING", {"default": f"Panel {i}", "multiline": False})
-            req[f"prompt_id_{i}"] = ("STRING", {"default": "", "multiline": False})
-            req[f"separator_{i}"] = ("STRING", {"default": ", ", "multiline": False})
+            req[f"label_{i}"] = ("STRING", {"default": f"Panel {i}", "multiline": False,
+                "tooltip": f"Display label for panel {i}. Click the panel header in the "
+                           "node UI to rename inline."})
+            req[f"prompt_id_{i}"] = ("STRING", {"default": "", "multiline": False,
+                "tooltip": f"Comma-separated entry IDs for panel {i}. Driven by the gallery; "
+                           "saved with the workflow."})
+            req[f"separator_{i}"] = ("STRING", {"default": ", ", "multiline": False,
+                "tooltip": f"Glue between joined entries for panel {i}."})
         return {"required": req}
 
     RETURN_TYPES = tuple(["STRING"] * PANELS)
     RETURN_NAMES = tuple(f"prompt_{i}" for i in range(1, PANELS + 1))
+    OUTPUT_TOOLTIPS = tuple(f"Panel {i} selection joined by separator_{i}."
+                             for i in range(1, PANELS + 1))
     FUNCTION = "load_prompts"
     CATEGORY = "utils"
 
@@ -485,23 +509,46 @@ class PromptLibrarySave:
     open gallery widgets refresh automatically.
     """
 
+    DESCRIPTION = (
+        "Save a prompt to the GrimmRibbity library when the workflow runs. "
+        "Wire any STRING source into 'text' and an IMAGE source into 'thumbnail'. "
+        "On Queue, the entry is appended (or updated, if you provide prompt_id "
+        "or set overwrite_by_name). The open gallery widgets refresh "
+        "automatically via websocket. Errors on empty 'name' or 'text'."
+    )
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "name": ("STRING", {"default": "", "multiline": False}),
-                "text": ("STRING", {"default": "", "multiline": True}),
+                "name": ("STRING", {"default": "", "multiline": False,
+                    "tooltip": "Display name shown on tiles and used for slug-based "
+                               "ID auto-generation. Required."}),
+                "text": ("STRING", {"default": "", "multiline": True,
+                    "tooltip": "Prompt text to store. Required — empty values raise an error so "
+                               "an unwired input doesn't silently save a blank entry."}),
             },
             "optional": {
-                "thumbnail": ("IMAGE",),
-                "tags": ("STRING", {"default": "", "multiline": False}),
-                "prompt_id": ("STRING", {"default": "", "multiline": False}),
-                "overwrite_by_name": ("BOOLEAN", {"default": False}),
+                "thumbnail": ("IMAGE", {"tooltip": "Optional preview image. The first frame is "
+                                                      "downsized to <=512px and stored as a thumbnail."}),
+                "tags": ("STRING", {"default": "", "multiline": False,
+                    "tooltip": "Comma-separated tags. Use 'category:value' (e.g. model:anima, "
+                               "style:cyberpunk) to enable category-grouped filter chips."}),
+                "prompt_id": ("STRING", {"default": "", "multiline": False,
+                    "tooltip": "Override the auto-derived ID. Must match [A-Za-z0-9_-]{1,64}. "
+                               "Leave blank to slug from 'name'."}),
+                "overwrite_by_name": ("BOOLEAN", {"default": False,
+                    "tooltip": "When prompt_id is unset and an entry with this name already exists, "
+                               "update that entry instead of inserting a new one."}),
             },
         }
 
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("text", "id")
+    OUTPUT_TOOLTIPS = (
+        "The saved prompt text (passthrough of the input).",
+        "The entry's ID — wire into the loader's prompt_id or use for re-runs.",
+    )
     FUNCTION = "save"
     CATEGORY = "utils"
     OUTPUT_NODE = True
@@ -560,20 +607,36 @@ class PromptLibraryRandom:
     every queue draws a fresh combination from the library.
     """
 
+    DESCRIPTION = (
+        "Pick a random library entry whose tags match an AND filter. Set "
+        "control_after_generate=randomize on the seed to draw a fresh entry "
+        "every queue — useful for overnight loops where you chain "
+        "RandomByTag(character) + RandomByTag(background) + RandomByTag(action)."
+    )
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "tag_filter": ("STRING", {"default": "", "multiline": False}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": _INT_MAX}),
+                "tag_filter": ("STRING", {"default": "", "multiline": False,
+                    "tooltip": "Comma-separated tags that EVERY matched entry must have. "
+                               "Empty matches all entries."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": _INT_MAX,
+                    "tooltip": "Set control_after_generate=randomize for fresh picks per queue. "
+                               "Same seed + same filter = deterministic pick."}),
             },
             "optional": {
-                "expand_wildcards": ("BOOLEAN", {"default": True}),
+                "expand_wildcards": ("BOOLEAN", {"default": True,
+                    "tooltip": "Expand {a|b|c} alternatives and __id_or_tag__ refs in the picked text."}),
             },
         }
 
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("text", "id")
+    OUTPUT_TOOLTIPS = (
+        "The randomly picked entry's prompt text (after wildcard expansion).",
+        "The picked entry's ID — useful for logging or re-running.",
+    )
     FUNCTION = "pick"
     CATEGORY = "utils"
 
@@ -608,21 +671,35 @@ class PromptLibraryWildcard:
     toggled independently.
     """
 
+    DESCRIPTION = (
+        "Expand {a|b|c} alternatives and __id_or_tag__ library refs in a string. "
+        "Supports weighted choices ({0.25::a|0.75::b}). Cycle-safe (max depth 8). "
+        "Use when you want to author a template directly in the workflow rather "
+        "than save it as a library entry."
+    )
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "text": ("STRING", {"default": "", "multiline": True}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": _INT_MAX}),
+                "text": ("STRING", {"default": "", "multiline": True,
+                    "tooltip": "Template text. {a|b|c} picks one alternative; "
+                               "{0.25::a|0.75::b} weighted; __knight__ pulls from a library entry "
+                               "with id 'knight' or a random entry tagged 'knight'."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": _INT_MAX,
+                    "tooltip": "Drives all random picks. Same seed = same expansion."}),
             },
             "optional": {
-                "expand_choices": ("BOOLEAN", {"default": True}),
-                "expand_named_refs": ("BOOLEAN", {"default": True}),
+                "expand_choices": ("BOOLEAN", {"default": True,
+                    "tooltip": "Toggle {a|b|c} alternation. Off = leave braces literal."}),
+                "expand_named_refs": ("BOOLEAN", {"default": True,
+                    "tooltip": "Toggle __name__ library refs. Off = leave them literal."}),
             },
         }
 
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("text",)
+    OUTPUT_TOOLTIPS = ("Expanded text. Unknown refs and unmatched braces are left as-is.",)
     FUNCTION = "expand"
     CATEGORY = "utils"
 
@@ -693,25 +770,43 @@ class PromptLibraryScene:
     into the Comic Frame node so atmosphere stays consistent across panels.
     """
 
+    DESCRIPTION = (
+        "Structured scene/atmosphere builder for comic strips. Pick from curated "
+        "dropdowns (time of day, weather, lighting, camera angle, mood, framing) "
+        "and add anything else in the free-form 'extra' textarea. (none) entries "
+        "are skipped. Wire the output into Comic Frame.scene so atmosphere stays "
+        "consistent across panels."
+    )
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "time_of_day": (_SCENE_TIME_OF_DAY,),
-                "weather": (_SCENE_WEATHER,),
-                "lighting": (_SCENE_LIGHTING,),
-                "camera_angle": (_SCENE_CAMERA_ANGLE,),
-                "mood": (_SCENE_MOOD,),
-                "framing": (_SCENE_FRAMING,),
+                "time_of_day": (_SCENE_TIME_OF_DAY, {
+                    "tooltip": "When the scene is set. Affects sky color, shadow direction, light temperature."}),
+                "weather": (_SCENE_WEATHER, {
+                    "tooltip": "Atmospheric conditions. Drives haze, reflections, mood."}),
+                "lighting": (_SCENE_LIGHTING, {
+                    "tooltip": "Light source/quality. Mix with time_of_day for the full atmosphere."}),
+                "camera_angle": (_SCENE_CAMERA_ANGLE, {
+                    "tooltip": "Camera perspective and shot distance — close-up vs wide, low vs high."}),
+                "mood": (_SCENE_MOOD, {
+                    "tooltip": "Emotional tone. Influences color grading, expression cues."}),
+                "framing": (_SCENE_FRAMING, {
+                    "tooltip": "Composition rule — how the subject sits in the frame."}),
                 "extra": ("STRING", {"default": "", "multiline": True,
                                       "placeholder": "anything the dropdowns don't cover: lens, "
-                                                     "art style, composition refs..."}),
-                "separator": ("STRING", {"default": ", ", "multiline": False}),
+                                                     "art style, composition refs...",
+                    "tooltip": "Free-form extra description appended to the joined scene. "
+                               "Use for lens (50mm, anamorphic), art style refs, or anything else."}),
+                "separator": ("STRING", {"default": ", ", "multiline": False,
+                    "tooltip": "Glue between non-empty fields."}),
             },
         }
 
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("scene",)
+    OUTPUT_TOOLTIPS = ("All non-skip fields joined by separator. Wire into Comic Frame.scene.",)
     FUNCTION = "build"
     CATEGORY = "utils"
 
@@ -800,20 +895,34 @@ class PromptLibraryBackground:
     Comic Frame node so the location reads as continuous across panels.
     """
 
+    DESCRIPTION = (
+        "Locked background description for a comic strip. Pick a curated preset "
+        "(grouped by setting: city / home / office / nature / industrial / "
+        "fantasy / scifi / etc.) and/or add free-form custom detail. Both "
+        "contribute when set. Wire the output into Comic Frame.background — "
+        "the location reads as continuous across all panels."
+    )
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "preset": (_BG_PRESETS,),
+                "preset": (_BG_PRESETS, {
+                    "tooltip": "Curated background description. (none) skips the preset entirely "
+                               "so you can rely on 'custom' alone."}),
                 "custom": ("STRING", {"default": "", "multiline": True,
                                        "placeholder": "extra detail, time-of-day overrides, "
-                                                      "props specific to this scene..."}),
-                "separator": ("STRING", {"default": ", ", "multiline": False}),
+                                                      "props specific to this scene...",
+                    "tooltip": "Free-form text appended after the preset. Either field alone "
+                               "works; both together get joined with the separator."}),
+                "separator": ("STRING", {"default": ", ", "multiline": False,
+                    "tooltip": "Glue between preset and custom when both are set."}),
             },
         }
 
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("background",)
+    OUTPUT_TOOLTIPS = ("Final background description. Wire into Comic Frame.background.",)
     FUNCTION = "build"
     CATEGORY = "utils"
 
@@ -834,31 +943,58 @@ class PromptLibraryComicFrame:
     of textareas; the list is persisted into the workflow JSON.
     """
 
+    DESCRIPTION = (
+        "Comic-strip frame assembler. Combines anchor STRINGs (character / scene / "
+        "background) with the per-frame action selected by frame_index. Frames are "
+        "authored in the node's UI as an ordered list of textareas; the list is "
+        "saved with the workflow. Bump frame_index between queues to render each "
+        "panel — anchors stay locked so the comic reads as continuous."
+    )
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 # JSON list of frame action strings, edited via the DOM widget
                 # in the frontend. Stored on the workflow so it round-trips.
-                "frames_json": ("STRING", {"default": "[]", "multiline": True}),
-                "frame_index": ("INT", {"default": 1, "min": 1, "max": 999}),
-                "separator": ("STRING", {"default": ", ", "multiline": False}),
+                "frames_json": ("STRING", {"default": "[]", "multiline": True,
+                    "tooltip": "JSON array of per-frame action texts. Driven by the frame "
+                               "editor widget in the node — you don't normally type here."}),
+                "frame_index": ("INT", {"default": 1, "min": 1, "max": 999,
+                    "tooltip": "1-based index of the panel to render. Auto-clamped to the "
+                               "frame count. Bump between queues to render each panel."}),
+                "separator": ("STRING", {"default": ", ", "multiline": False,
+                    "tooltip": "Glue between character / scene / background / action."}),
             },
             "optional": {
                 "character": ("STRING", {"default": "", "multiline": True,
-                                          "forceInput": True}),
+                                          "forceInput": True,
+                    "tooltip": "Wire from a Library node filtered to your character entries. "
+                               "Repeated verbatim on every frame."}),
                 "scene": ("STRING", {"default": "", "multiline": True,
-                                      "forceInput": True}),
+                                      "forceInput": True,
+                    "tooltip": "Wire from a GrimmRibbity Scene node. Repeated verbatim on every frame."}),
                 "background": ("STRING", {"default": "", "multiline": True,
-                                           "forceInput": True}),
+                                           "forceInput": True,
+                    "tooltip": "Wire from a GrimmRibbity Background node. Repeated verbatim on every frame."}),
                 # Adds frame_index to whatever upstream seed you wire in,
                 # giving each panel a deterministic-but-different seed.
-                "base_seed": ("INT", {"default": 0, "min": 0, "max": _INT_MAX}),
+                "base_seed": ("INT", {"default": 0, "min": 0, "max": _INT_MAX,
+                    "tooltip": "Base for the per-frame seed output. Frame N emits "
+                               "base_seed + (N - 1). Wire the seed output into "
+                               "CivitaiSaveImage.seed_override for deterministic-but-different "
+                               "seeds across panels."}),
             },
         }
 
     RETURN_TYPES = ("STRING", "STRING", "INT", "INT")
     RETURN_NAMES = ("prompt", "action", "seed", "frame_count")
+    OUTPUT_TOOLTIPS = (
+        "Final positive prompt: character + scene + background + frames[index].",
+        "Just the per-frame action text. Useful for filename builders or text overlays.",
+        "base_seed + (frame_index - 1). Wire into CivitaiSaveImage.seed_override.",
+        "Total number of authored frames. Useful for downstream branching/looping.",
+    )
     FUNCTION = "assemble"
     CATEGORY = "utils"
 
@@ -1507,7 +1643,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.20.0"
+__version__ = "0.20.1"
 
 
 def _autobackup_on_version_change() -> None:
