@@ -640,6 +640,139 @@ class PromptLibraryWildcard:
         return (out,)
 
 
+# =============================================================================
+# Comic-strip authoring: Scene + Background anchors + per-frame assembler.
+# =============================================================================
+
+
+class PromptLibraryScene:
+    """Structured-form scene description. Each field is optional; non-empty
+    values are joined with the separator. Use as the 'scene' anchor wired
+    into the Comic Frame node so atmosphere stays consistent across panels.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "time_of_day": ("STRING", {"default": "", "multiline": False,
+                                            "placeholder": "morning, dusk, midnight..."}),
+                "weather": ("STRING", {"default": "", "multiline": False,
+                                        "placeholder": "rainy, snowy, foggy..."}),
+                "lighting": ("STRING", {"default": "", "multiline": False,
+                                         "placeholder": "warm sunlight, neon, candlelit..."}),
+                "camera_angle": ("STRING", {"default": "", "multiline": False,
+                                              "placeholder": "wide shot, close-up, low angle..."}),
+                "mood": ("STRING", {"default": "", "multiline": False,
+                                     "placeholder": "tense, melancholic, playful..."}),
+                "framing": ("STRING", {"default": "", "multiline": False,
+                                        "placeholder": "centered, rule of thirds, Dutch tilt..."}),
+                "extra": ("STRING", {"default": "", "multiline": True,
+                                      "placeholder": "anything else: composition, style refs, lens..."}),
+                "separator": ("STRING", {"default": ", ", "multiline": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("scene",)
+    FUNCTION = "build"
+    CATEGORY = "utils"
+
+    def build(self, time_of_day, weather, lighting, camera_angle, mood, framing,
+              extra, separator=", "):
+        parts = [p.strip() for p in (time_of_day, weather, lighting, camera_angle,
+                                      mood, framing, extra) if p and p.strip()]
+        return (separator.join(parts),)
+
+
+class PromptLibraryBackground:
+    """Single multiline holder for the background description. Wire its output
+    into the Comic Frame node so the location reads as continuous across all
+    panels. The frontend gives it a visible 'locked' treatment so the role is
+    obvious in the workflow.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "background": ("STRING", {"default": "", "multiline": True,
+                                            "placeholder": "abandoned warehouse with broken windows, "
+                                                           "crates scattered, wet concrete floor..."}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("background",)
+    FUNCTION = "passthrough"
+    CATEGORY = "utils"
+
+    def passthrough(self, background):
+        return ((background or "").strip(),)
+
+
+class PromptLibraryComicFrame:
+    """Comic-strip frame assembler. Combines anchor STRINGs (character / scene
+    / background) with the per-frame action text for the panel selected by
+    `frame_index`. Frames are authored in the node's UI as an ordered list
+    of textareas; the list is persisted into the workflow JSON.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                # JSON list of frame action strings, edited via the DOM widget
+                # in the frontend. Stored on the workflow so it round-trips.
+                "frames_json": ("STRING", {"default": "[]", "multiline": True}),
+                "frame_index": ("INT", {"default": 1, "min": 1, "max": 999}),
+                "separator": ("STRING", {"default": ", ", "multiline": False}),
+            },
+            "optional": {
+                "character": ("STRING", {"default": "", "multiline": True,
+                                          "forceInput": True}),
+                "scene": ("STRING", {"default": "", "multiline": True,
+                                      "forceInput": True}),
+                "background": ("STRING", {"default": "", "multiline": True,
+                                           "forceInput": True}),
+                # Adds frame_index to whatever upstream seed you wire in,
+                # giving each panel a deterministic-but-different seed.
+                "base_seed": ("INT", {"default": 0, "min": 0, "max": _INT_MAX}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "INT", "INT")
+    RETURN_NAMES = ("prompt", "action", "seed", "frame_count")
+    FUNCTION = "assemble"
+    CATEGORY = "utils"
+
+    @staticmethod
+    def _parse_frames(frames_json: str) -> list[str]:
+        try:
+            data = json.loads(frames_json or "[]")
+        except (json.JSONDecodeError, TypeError):
+            return []
+        if not isinstance(data, list):
+            return []
+        return [str(f).strip() for f in data]
+
+    def assemble(self, frames_json, frame_index, separator=", ",
+                 character="", scene="", background="", base_seed=0):
+        frames = self._parse_frames(frames_json)
+        if not frames:
+            print("[PromptLibraryComicFrame] no frames defined; emitting anchors only")
+            action = ""
+        else:
+            # Clamp into range and 1-index for the user-visible widget.
+            idx = max(1, min(int(frame_index), len(frames))) - 1
+            action = frames[idx]
+        parts = [p.strip() for p in (character, scene, background, action)
+                 if p and p.strip()]
+        prompt = separator.join(parts)
+        seed = (int(base_seed) + max(0, int(frame_index) - 1)) & _INT_MAX
+        return (prompt, action, seed, len(frames))
+
+
 if PromptServer is not None:
     routes = PromptServer.instance.routes
 else:
@@ -1258,7 +1391,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.18.0"
+__version__ = "0.19.0"
 
 
 def _autobackup_on_version_change() -> None:
@@ -1307,6 +1440,9 @@ NODE_CLASS_MAPPINGS = {
     "PromptLibrarySave": PromptLibrarySave,
     "PromptLibraryRandom": PromptLibraryRandom,
     "PromptLibraryWildcard": PromptLibraryWildcard,
+    "PromptLibraryScene": PromptLibraryScene,
+    "PromptLibraryBackground": PromptLibraryBackground,
+    "PromptLibraryComicFrame": PromptLibraryComicFrame,
     **_civitai_node,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1315,6 +1451,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptLibrarySave": "GrimmRibbity — Save",
     "PromptLibraryRandom": "GrimmRibbity — Random by Tag",
     "PromptLibraryWildcard": "GrimmRibbity — Wildcard Expand",
+    "PromptLibraryScene": "GrimmRibbity — Scene",
+    "PromptLibraryBackground": "GrimmRibbity — Background (locked)",
+    "PromptLibraryComicFrame": "GrimmRibbity — Comic Frame",
     **_civitai_label,
 }
 WEB_DIRECTORY = "./web"

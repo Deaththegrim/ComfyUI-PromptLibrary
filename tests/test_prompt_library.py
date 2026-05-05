@@ -914,6 +914,97 @@ class PromptLibraryTests(unittest.TestCase):
         out = node.load_prompts(prompt_id_1="a,nope", prompt_id_2="", prompt_id_3="")
         self.assertEqual(out[0], "alpha")
 
+    # ---- Comic-strip nodes ---------------------------------------------
+
+    def test_scene_node_joins_non_empty_fields(self):
+        node = self.mod.PromptLibraryScene()
+        out, = node.build(
+            time_of_day="dusk", weather="", lighting="warm orange glow",
+            camera_angle="low angle", mood="", framing="rule of thirds",
+            extra="50mm lens", separator=", ",
+        )
+        self.assertEqual(out, "dusk, warm orange glow, low angle, rule of thirds, 50mm lens")
+
+    def test_scene_node_all_blank_returns_empty(self):
+        node = self.mod.PromptLibraryScene()
+        out, = node.build("", "", "", "", "", "", "", separator=", ")
+        self.assertEqual(out, "")
+
+    def test_scene_node_strips_whitespace(self):
+        node = self.mod.PromptLibraryScene()
+        out, = node.build("  morning  ", "", "  ", "", "", "", "", separator=", ")
+        self.assertEqual(out, "morning")
+
+    def test_background_node_passthrough(self):
+        node = self.mod.PromptLibraryBackground()
+        out, = node.passthrough("abandoned warehouse, broken windows")
+        self.assertEqual(out, "abandoned warehouse, broken windows")
+
+    def test_background_node_strips_whitespace(self):
+        node = self.mod.PromptLibraryBackground()
+        out, = node.passthrough("  rainy tokyo street  \n")
+        self.assertEqual(out, "rainy tokyo street")
+
+    def test_comic_frame_combines_anchors_and_action(self):
+        node = self.mod.PromptLibraryComicFrame()
+        prompt, action, seed, count = node.assemble(
+            frames_json='["kicks the door open", "phone rings", "answers, surprised"]',
+            frame_index=2, separator=", ",
+            character="frieren, white hair",
+            scene="dusk, warm light",
+            background="abandoned warehouse",
+            base_seed=1000,
+        )
+        self.assertEqual(prompt, "frieren, white hair, dusk, warm light, abandoned warehouse, phone rings")
+        self.assertEqual(action, "phone rings")
+        self.assertEqual(seed, 1001)
+        self.assertEqual(count, 3)
+
+    def test_comic_frame_clamps_index_above_range(self):
+        node = self.mod.PromptLibraryComicFrame()
+        prompt, action, seed, count = node.assemble(
+            frames_json='["a", "b"]', frame_index=99,
+            character="x",
+        )
+        self.assertEqual(action, "b")  # clamped to last frame
+        self.assertEqual(prompt, "x, b")
+
+    def test_comic_frame_clamps_index_below_range(self):
+        node = self.mod.PromptLibraryComicFrame()
+        prompt, action, _seed, _count = node.assemble(
+            frames_json='["a", "b"]', frame_index=0,
+        )
+        self.assertEqual(action, "a")
+
+    def test_comic_frame_no_frames_emits_anchors_only(self):
+        node = self.mod.PromptLibraryComicFrame()
+        prompt, action, _seed, count = node.assemble(
+            frames_json='[]', frame_index=1,
+            character="hero", scene="night", background="rooftop",
+        )
+        self.assertEqual(prompt, "hero, night, rooftop")
+        self.assertEqual(action, "")
+        self.assertEqual(count, 0)
+
+    def test_comic_frame_invalid_frames_json_falls_back(self):
+        node = self.mod.PromptLibraryComicFrame()
+        prompt, action, _, count = node.assemble(
+            frames_json='not valid json', frame_index=1, character="x",
+        )
+        self.assertEqual(prompt, "x")
+        self.assertEqual(action, "")
+        self.assertEqual(count, 0)
+
+    def test_comic_frame_seed_offset_per_frame(self):
+        node = self.mod.PromptLibraryComicFrame()
+        seeds = []
+        for i in range(1, 4):
+            _, _, seed, _ = node.assemble(
+                frames_json='["a","b","c"]', frame_index=i, base_seed=12345,
+            )
+            seeds.append(seed)
+        self.assertEqual(seeds, [12345, 12346, 12347])
+
     # ---- PromptLibraryRandom node --------------------------------------
 
     def test_random_picks_by_tag(self):

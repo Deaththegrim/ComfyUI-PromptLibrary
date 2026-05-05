@@ -4,6 +4,8 @@ import { api } from "../../../scripts/api.js";
 const NODE_NAME = "PromptLibrary";
 const MULTI_NODE_NAME = "PromptLibraryMulti";
 const MULTI_PANELS = 3;
+const COMIC_FRAME_NODE_NAME = "PromptLibraryComicFrame";
+const BACKGROUND_NODE_NAME = "PromptLibraryBackground";
 const STYLE_ID = "prompt-library-style";
 
 const CSS = `
@@ -184,6 +186,31 @@ const CSS = `
 .pl-count-badge { font-size: 11px; color: var(--pl-fg-muted); padding: 0 4px; white-space: nowrap; }
 .pl-fav-btn { font-size: 14px; line-height: 1; padding: 2px 7px; }
 .pl-fav-btn.active { color: #f5b94a; border-color: #f5b94a; background: var(--pl-bg-input); }
+.pl-comic { display: flex; flex-direction: column; gap: 6px; padding: 6px; box-sizing: border-box;
+  width: 100%; height: 100%; min-height: 0; color: var(--pl-fg); font-family: sans-serif; font-size: 12px; }
+.pl-comic-header { display: flex; align-items: center; gap: 6px; padding: 2px 0;
+  border-bottom: 1px solid var(--pl-border); margin-bottom: 4px; }
+.pl-comic-header strong { flex: 1; color: var(--pl-fg); font-size: 12px; }
+.pl-comic-header .pl-count-badge { color: var(--pl-fg-muted); }
+.pl-comic-frames { flex: 1 1 0; min-height: 0; overflow-y: auto; display: flex;
+  flex-direction: column; gap: 4px; padding-right: 2px; }
+.pl-frame-row { display: flex; gap: 4px; align-items: stretch;
+  background: var(--pl-bg-elevated); border: 1px solid var(--pl-border);
+  border-radius: 3px; padding: 4px; }
+.pl-frame-row.current { border-color: var(--pl-accent); background: var(--pl-bg-selected); }
+.pl-frame-num { flex: 0 0 22px; display: flex; align-items: center; justify-content: center;
+  font-weight: bold; color: var(--pl-fg-muted); font-size: 11px; cursor: grab; user-select: none; }
+.pl-frame-row.current .pl-frame-num { color: var(--pl-accent); }
+.pl-frame-text { flex: 1; min-width: 0; background: var(--pl-bg-input); color: var(--pl-fg);
+  border: 1px solid var(--pl-border); border-radius: 3px; padding: 4px 6px;
+  font-family: inherit; font-size: 12px; resize: vertical; min-height: 32px; }
+.pl-frame-actions { display: flex; flex-direction: column; gap: 2px; flex: 0 0 auto; }
+.pl-frame-actions .pl-btn { padding: 1px 6px; font-size: 11px; line-height: 1; }
+.pl-comic-toolbar { display: flex; gap: 6px; align-items: center; flex: 0 0 auto; }
+.pl-bg-locked-wrap { display: flex; align-items: center; gap: 6px; padding: 4px 8px;
+  background: var(--pl-bg-selected); color: var(--pl-fg); border-radius: 3px;
+  border-left: 4px solid var(--pl-accent); font-size: 11px; }
+.pl-bg-locked-wrap .lock { font-size: 14px; }
 .pl-history-row { display: grid; grid-template-columns: auto 1fr auto; gap: 6px;
   align-items: start; padding: 6px; background: #2a2a2a; border-radius: 3px;
   font-size: 11px; }
@@ -1814,6 +1841,205 @@ function registerMultiNode(nodeType) {
   };
 }
 
+// =============================================================================
+// Background node — adds a small "🔒 LOCKED" header above the textarea so the
+// node's role as a continuity anchor is obvious in the workflow. Pure visual
+// — the value still flows through the underlying STRING widget unchanged.
+// =============================================================================
+
+function registerBackgroundNode(nodeType) {
+  const onNodeCreated = nodeType.prototype.onNodeCreated;
+  nodeType.prototype.onNodeCreated = function () {
+    const r = onNodeCreated?.apply(this, arguments);
+    const banner = document.createElement("div");
+    banner.className = "pl-bg-locked-wrap";
+    const lockIcon = document.createElement("span");
+    lockIcon.className = "lock";
+    lockIcon.textContent = "🔒";
+    const lockText = document.createElement("span");
+    lockText.textContent = "LOCKED — every frame uses this background";
+    banner.append(lockIcon, lockText);
+    this.addDOMWidget("locked_banner", "PromptLibraryBackgroundBanner", banner, {
+      serialize: false, hideOnZoom: false, getMinHeight: () => 28,
+    });
+    return r;
+  };
+}
+
+// =============================================================================
+// Comic Frame node — DOM widget that edits an ordered list of per-frame
+// action strings. The list is serialized into the hidden `frames_json` STRING
+// widget so it round-trips with the workflow. The frame_index INT widget gets
+// its `max` clamped to the current frame count so the user can't pick out of
+// range.
+// =============================================================================
+
+function buildComicEditor(node, framesWidget, indexWidget) {
+  const root = document.createElement("div");
+  root.className = "pl-comic";
+
+  const parseFrames = () => {
+    try {
+      const v = JSON.parse(framesWidget?.value || "[]");
+      return Array.isArray(v) ? v.map(s => String(s)) : [];
+    } catch { return []; }
+  };
+  const writeFrames = (frames) => {
+    if (framesWidget) framesWidget.value = JSON.stringify(frames);
+    if (indexWidget) {
+      indexWidget.options.max = Math.max(1, frames.length);
+      if (indexWidget.value > frames.length) indexWidget.value = Math.max(1, frames.length);
+    }
+    node.setDirtyCanvas?.(true, true);
+  };
+
+  let frames = parseFrames();
+
+  const header = document.createElement("div");
+  header.className = "pl-comic-header";
+  const title = document.createElement("strong");
+  title.textContent = "Frames";
+  const count = document.createElement("span");
+  count.className = "pl-count-badge";
+  header.append(title, count);
+
+  const list = document.createElement("div");
+  list.className = "pl-comic-frames";
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "pl-comic-toolbar";
+  const addBtn = document.createElement("button");
+  addBtn.className = "pl-btn";
+  addBtn.textContent = "+ Add frame";
+  const clearBtn = document.createElement("button");
+  clearBtn.className = "pl-btn";
+  clearBtn.textContent = "Clear all";
+  toolbar.append(addBtn, clearBtn);
+
+  const render = () => {
+    list.replaceChildren();
+    count.textContent = `${frames.length} frame${frames.length === 1 ? "" : "s"}`;
+    const currentIdx = (indexWidget?.value || 1) - 1;
+    frames.forEach((text, i) => {
+      const row = document.createElement("div");
+      row.className = "pl-frame-row" + (i === currentIdx ? " current" : "");
+      const num = document.createElement("div");
+      num.className = "pl-frame-num";
+      num.textContent = i + 1;
+      num.title = "Click to make this the current frame";
+      num.onclick = () => {
+        if (indexWidget) {
+          indexWidget.value = i + 1;
+          render();
+          node.setDirtyCanvas?.(true, true);
+        }
+      };
+      const ta = document.createElement("textarea");
+      ta.className = "pl-frame-text";
+      ta.value = text;
+      ta.placeholder = `frame ${i + 1} action — e.g. "kicks the door open"`;
+      ta.rows = 2;
+      ta.oninput = () => { frames[i] = ta.value; writeFrames(frames); };
+      for (const ev of ["keydown", "keyup", "keypress"]) {
+        ta.addEventListener(ev, (e) => e.stopPropagation());
+      }
+      const actions = document.createElement("div");
+      actions.className = "pl-frame-actions";
+      const upBtn = document.createElement("button");
+      upBtn.className = "pl-btn"; upBtn.textContent = "↑"; upBtn.title = "Move up";
+      upBtn.onclick = () => {
+        if (i === 0) return;
+        [frames[i - 1], frames[i]] = [frames[i], frames[i - 1]];
+        writeFrames(frames); render();
+      };
+      const downBtn = document.createElement("button");
+      downBtn.className = "pl-btn"; downBtn.textContent = "↓"; downBtn.title = "Move down";
+      downBtn.onclick = () => {
+        if (i >= frames.length - 1) return;
+        [frames[i + 1], frames[i]] = [frames[i], frames[i + 1]];
+        writeFrames(frames); render();
+      };
+      const delBtn = document.createElement("button");
+      delBtn.className = "pl-btn"; delBtn.textContent = "✕"; delBtn.title = "Delete frame";
+      delBtn.style.color = "var(--pl-danger)";
+      delBtn.onclick = () => {
+        frames.splice(i, 1);
+        writeFrames(frames); render();
+      };
+      actions.append(upBtn, downBtn, delBtn);
+      row.append(num, ta, actions);
+      list.appendChild(row);
+    });
+    if (frames.length === 0) {
+      const hint = document.createElement("div");
+      hint.className = "pl-empty-state";
+      hint.textContent = "No frames yet — click \"+ Add frame\" to start your comic.";
+      list.appendChild(hint);
+    }
+  };
+
+  addBtn.onclick = () => {
+    frames.push("");
+    writeFrames(frames);
+    if (indexWidget) indexWidget.value = frames.length;
+    render();
+  };
+  clearBtn.onclick = async () => {
+    if (!frames.length) return;
+    if (!await confirmDestructive(`Clear all ${frames.length} frames?`, { confirmLabel: "Clear" })) return;
+    frames = [];
+    writeFrames(frames);
+    render();
+  };
+
+  // External index changes (user edits the INT widget) → re-highlight the row.
+  if (indexWidget) {
+    const origCallback = indexWidget.callback;
+    indexWidget.callback = function (...args) {
+      const r = origCallback?.apply(this, args);
+      render();
+      return r;
+    };
+  }
+
+  root.append(header, list, toolbar);
+  // Kick the index widget's max into shape on first paint.
+  writeFrames(frames);
+  render();
+  return { root, refresh: () => { frames = parseFrames(); render(); } };
+}
+
+function registerComicFrameNode(nodeType) {
+  const onNodeCreated = nodeType.prototype.onNodeCreated;
+  nodeType.prototype.onNodeCreated = function () {
+    const r = onNodeCreated?.apply(this, arguments);
+    const framesWidget = this.widgets.find(w => w.name === "frames_json");
+    const indexWidget = this.widgets.find(w => w.name === "frame_index");
+    if (framesWidget) {
+      framesWidget.hidden = true;
+      framesWidget.computeSize = () => [0, -4];
+      framesWidget.draw = () => {};
+    }
+    const { root, refresh } = buildComicEditor(this, framesWidget, indexWidget);
+    root.style.minHeight = "240px";
+    root.style.width = "100%";
+    this.addDOMWidget("frames", "PromptLibraryComicFrames", root, {
+      serialize: false, hideOnZoom: false, getMinHeight: () => 240,
+    });
+    this._comicRefresh = refresh;
+    this.size = [380, 360];
+    if (typeof this.setSize === "function") this.setSize([380, 360]);
+    return r;
+  };
+
+  const onConfigure = nodeType.prototype.onConfigure;
+  nodeType.prototype.onConfigure = function () {
+    const r = onConfigure?.apply(this, arguments);
+    this._comicRefresh?.();
+    return r;
+  };
+}
+
 let _wsListenerInstalled = false;
 function installWebsocketBridge() {
   if (_wsListenerInstalled) return;
@@ -1833,6 +2059,16 @@ app.registerExtension({
     if (nodeData.name === MULTI_NODE_NAME) {
       injectStyle();
       registerMultiNode(nodeType);
+      return;
+    }
+    if (nodeData.name === COMIC_FRAME_NODE_NAME) {
+      injectStyle();
+      registerComicFrameNode(nodeType);
+      return;
+    }
+    if (nodeData.name === BACKGROUND_NODE_NAME) {
+      injectStyle();
+      registerBackgroundNode(nodeType);
       return;
     }
     if (nodeData.name !== NODE_NAME) return;
