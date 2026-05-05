@@ -344,9 +344,10 @@ async function deletePrompt(id) {
   return res.json();
 }
 
-async function importCsv(file) {
+async function importCsv(file, mode = "add_only") {
   const body = new FormData();
   body.append("file", file, file.name);
+  body.append("mode", mode);
   const res = await api.fetchApi("/prompt_library/import_csv", { method: "POST", body });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -355,10 +356,24 @@ async function importCsv(file) {
   return res.json();
 }
 
-async function importZip(file) {
+async function importZip(file, mode = "add_only") {
   const body = new FormData();
   body.append("file", file, file.name);
+  body.append("mode", mode);
   const res = await api.fetchApi("/prompt_library/import_zip", { method: "POST", body });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+async function restoreLastSnapshot() {
+  const res = await api.fetchApi("/prompt_library/restore_snapshot", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || `HTTP ${res.status}`);
@@ -987,12 +1002,26 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   const importBtn = document.createElement("button");
   importBtn.className = "pl-btn";
   importBtn.textContent = "Import";
-  importBtn.title = "Import from a CSV (name,text,tags,id) or a GrimmRibbity .zip";
+  importBtn.title = "Import a CSV (name,text,tags,id) or a GrimmRibbity .zip. Default skips "
+    + "entries whose id already exists (preserves your local edits and thumbnails). "
+    + "Shift-click to overwrite existing entries with the file's values.";
   const fileInput = document.createElement("input");
   fileInput.type = "file";
   fileInput.accept = ".csv,text/csv,.zip,application/zip";
   fileInput.style.display = "none";
-  importBtn.onclick = () => fileInput.click();
+  // Stash the mode on the button so the change handler reads the right value.
+  importBtn.dataset.importMode = "add_only";
+  importBtn.onclick = (e) => {
+    importBtn.dataset.importMode = e.shiftKey ? "update" : "add_only";
+    fileInput.click();
+  };
+
+  const undoBtn = document.createElement("button");
+  undoBtn.className = "pl-btn";
+  undoBtn.textContent = "Undo Import";
+  undoBtn.title = "Restore the library from the most recent pre-import snapshot. "
+    + "Useful if a CSV / ZIP / Scan LoRAs / Import BG run clobbered something. "
+    + "The undo itself is also snapshotted, so you can redo by undoing again.";
 
   const exportBtn = document.createElement("button");
   exportBtn.className = "pl-btn";
@@ -1080,7 +1109,7 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   const countBadge = document.createElement("span");
   countBadge.className = "pl-count-badge";
   countBadge.title = "Visible / total prompts";
-  toolbar.append(searchWrap, modelSelect, sortSelect, sizeWrap, viewWrap, favBtn, countBadge, importBtn, exportBtn, scanLorasBtn, importBgBtn, queueAllBtn, refreshBtn, fileInput);
+  toolbar.append(searchWrap, modelSelect, sortSelect, sizeWrap, viewWrap, favBtn, countBadge, importBtn, undoBtn, exportBtn, scanLorasBtn, importBgBtn, queueAllBtn, refreshBtn, fileInput);
 
   const tagsRow = document.createElement("div");
   tagsRow.className = "pl-tags-row";
@@ -1587,7 +1616,7 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
     render();
   };
   modelSelect.onchange = render;
-  async function handleImportFile(file) {
+  async function handleImportFile(file, mode) {
     if (!file) return;
     const isZip = file.name.toLowerCase().endsWith(".zip") || file.type === "application/zip";
     const isCsv = file.name.toLowerCase().endsWith(".csv") || file.type === "text/csv";
@@ -1600,13 +1629,15 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
     importBtn.classList.add("pl-busy");
     importBtn.textContent = "Importing…";
     try {
-      const result = isZip ? await importZip(file) : await importCsv(file);
+      const result = isZip ? await importZip(file, mode) : await importCsv(file, mode);
       const kind = isZip ? "ZIP" : "CSV";
       const errs = result.errors?.length || 0;
-      const msg = `${kind} import: ${result.added} added, ${result.updated} updated`
+      const skipped = result.skipped || 0;
+      const summary = `${kind} import (${mode}): ${result.added} added, `
+        + `${result.updated} updated, ${skipped} skipped`
         + (errs ? ` (${errs} errors — see console)` : "");
       if (errs) console.warn(`[PromptLibrary] ${kind} import errors:`, result.errors);
-      toast(msg, errs ? "error" : "success");
+      toast(summary, errs ? "error" : "success", 6000);
       await refresh();
     } catch (e) {
       toast(`Import failed: ${e.message}`, "error");
@@ -1618,9 +1649,29 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   }
   fileInput.onchange = async () => {
     const file = fileInput.files[0];
-    try { await handleImportFile(file); }
-    finally { fileInput.value = ""; }
+    const mode = importBtn.dataset.importMode || "add_only";
+    try { await handleImportFile(file, mode); }
+    finally {
+      fileInput.value = "";
+      importBtn.dataset.importMode = "add_only"; // reset for next time
+    }
   };
+
+  undoBtn.onclick = withBusy(undoBtn, "Restoring…", async () => {
+    if (!await confirmDestructive(
+      "Restore the library from the most recent pre-import snapshot? "
+      + "This will replace the current library state. The current state is "
+      + "snapshotted first so you can re-undo.",
+      { confirmLabel: "Undo import" }
+    )) return;
+    try {
+      const result = await restoreLastSnapshot();
+      toast(`Restored from ${result.restored_from} (${result.entries} entries).`, "success", 6000);
+      await refresh();
+    } catch (e) {
+      toast(`Undo failed: ${e.message}`, "error");
+    }
+  });
 
   // Drag-and-drop file import on the container. We only react to drops that
   // carry actual files (dataTransfer.types includes "Files"); workflow-JSON

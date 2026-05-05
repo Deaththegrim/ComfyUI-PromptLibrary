@@ -60,6 +60,11 @@ _EXPORT_THUMBNAIL_JPEG_QUALITY = 75
 _MAX_IMPORT_ZIP_BYTES = 500 * 1024 * 1024      # protects against zip-bomb-y uploads
 # Per-entry history (revert disclosure in the modal)
 _HISTORY_CAP = 20
+# Pre-import snapshots — bulk imports save prompts.json under data/snapshots/
+# before mutating, so the user can undo a destructive import. Older snapshots
+# beyond _SNAPSHOT_CAP are pruned automatically.
+SNAPSHOT_DIR = ROOT / "data" / "snapshots"
+_SNAPSHOT_CAP = 10
 # IDs: short URL-safe slug, used as a filename component for thumbnails so
 # anything outside this charset is rejected to prevent path traversal.
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -90,6 +95,95 @@ def _save(items: list[dict]) -> None:
         _last_known_mtime = STORE_PATH.stat().st_mtime
     except OSError:
         pass
+
+
+def _snapshot_prompts(label: str) -> str:
+    """Save a copy of the current prompts.json under data/snapshots/ so the
+    user can roll back a destructive bulk operation. Returns the snapshot
+    filename (basename only). Old snapshots beyond _SNAPSHOT_CAP are pruned."""
+    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    if not STORE_PATH.exists():
+        return ""
+    safe_label = "".join(c if c.isalnum() else "_" for c in (label or "import"))[:32]
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    name = f"{ts}-{safe_label}.json"
+    out = SNAPSHOT_DIR / name
+    try:
+        shutil.copy2(STORE_PATH, out)
+    except OSError as e:
+        print(f"[PromptLibrary] snapshot failed: {e}")
+        return ""
+    # Prune older snapshots beyond the cap
+    try:
+        snaps = sorted(SNAPSHOT_DIR.glob("*.json"))
+        for old in snaps[:-_SNAPSHOT_CAP]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return name
+
+
+def _list_snapshots() -> list[dict]:
+    """Return the available snapshots, newest first, with parsed metadata."""
+    if not SNAPSHOT_DIR.exists():
+        return []
+    out = []
+    for path in sorted(SNAPSHOT_DIR.glob("*.json"), reverse=True):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        # Filename: <YYYYMMDD-HHMMSS>-<label>.json
+        stem = path.stem
+        ts_part, _, label = stem.partition("-")
+        if len(ts_part) == 8 and "-" in stem:
+            # New format: YYYYMMDD-HHMMSS-label
+            date_part, _, rest = stem.partition("-")
+            time_part, _, label = rest.partition("-")
+            label = label or "import"
+        else:
+            label = "snapshot"
+        out.append({
+            "name": path.name,
+            "size_bytes": stat.st_size,
+            "mtime": int(stat.st_mtime),
+            "label": label,
+        })
+    return out
+
+
+def _restore_snapshot(name: str) -> dict:
+    """Restore prompts.json from a snapshot. Returns a dict describing what
+    happened. Refuses paths with separators (no escapes outside the
+    snapshot dir)."""
+    if not name or "/" in name or "\\" in name or ".." in name:
+        return {"ok": False, "error": f"invalid snapshot name {name!r}"}
+    src = SNAPSHOT_DIR / name
+    if not src.is_file():
+        return {"ok": False, "error": f"snapshot {name!r} not found"}
+    # Take a "current state" snapshot too so undo is itself undoable.
+    pre_undo = _snapshot_prompts("pre_undo")
+    with _lock:
+        try:
+            shutil.copy2(src, STORE_PATH)
+        except OSError as e:
+            return {"ok": False, "error": f"copy failed: {e}"}
+        # Force-update mtime tracker so the watcher fires the refresh event.
+        global _last_known_mtime
+        try:
+            _last_known_mtime = STORE_PATH.stat().st_mtime
+        except OSError:
+            pass
+        items = _load()
+    return {
+        "ok": True,
+        "restored_from": name,
+        "pre_undo_snapshot": pre_undo,
+        "entries": len(items),
+    }
 
 
 def _safe_id(value: str) -> str | None:
@@ -1426,14 +1520,24 @@ async def upsert_prompt(request):
     })
 
 
-def _import_csv(text: str) -> tuple[int, int, list[str]]:
-    """Parse CSV body and upsert each row. Returns (added, updated, errors)."""
+def _import_csv(text: str, *, mode: str = "add_only") -> tuple[int, int, int, list[str]]:
+    """Parse CSV body and upsert each row. Returns (added, updated, skipped, errors).
+
+    mode="add_only" (default) — entries whose resolved id already exists in
+    the library are skipped, preserving any thumbnail / rating / notes /
+    edits the user has made. Only genuinely new entries get added.
+
+    mode="update" — existing entries are overwritten with the CSV row's
+    values (the historical default; equivalent to upsert)."""
+    if mode not in ("add_only", "update"):
+        raise ValueError(f"unknown import mode {mode!r}")
     reader = csv.DictReader(io.StringIO(text))
-    added = updated = 0
+    added = updated = skipped = 0
     errors: list[str] = []
     if not reader.fieldnames or "name" not in reader.fieldnames:
-        return 0, 0, ["CSV missing required 'name' column"]
+        return 0, 0, 0, ["CSV missing required 'name' column"]
 
+    _snapshot_prompts("import_csv")
     with _lock:
         items = _load()
         index = {i.get("id"): i for i in items}
@@ -1453,6 +1557,9 @@ def _import_csv(text: str) -> tuple[int, int, list[str]]:
                 row_id = _unique_id(_slugify(name), set(index.keys()))
 
             existing = index.get(row_id)
+            if existing is not None and mode == "add_only":
+                skipped += 1
+                continue
             created = existing is None
             if created:
                 existing = {"id": row_id}
@@ -1469,7 +1576,7 @@ def _import_csv(text: str) -> tuple[int, int, list[str]]:
 
         _save(items)
 
-    return added, updated, errors
+    return added, updated, skipped, errors
 
 
 @routes.post("/prompt_library/import_csv")
@@ -1482,9 +1589,13 @@ async def import_csv_route(request):
         body = reader.get("csv") or ""
     if not body.strip():
         return web.json_response({"error": "no CSV body provided"}, status=400)
-    added, updated, errors = _import_csv(body)
+    mode = (reader.get("mode") or "add_only").strip()
+    if mode not in ("add_only", "update"):
+        return web.json_response({"error": f"invalid mode {mode!r} (use add_only or update)"}, status=400)
+    added, updated, skipped, errors = _import_csv(body, mode=mode)
     _notify_change()
-    return web.json_response({"added": added, "updated": updated, "errors": errors})
+    return web.json_response({"added": added, "updated": updated,
+                               "skipped": skipped, "errors": errors})
 
 
 @routes.get("/prompt_library/history/{prompt_id}")
@@ -1640,28 +1751,40 @@ async def export_zip(request):
     })
 
 
-def _import_zip(zip_bytes: bytes) -> tuple[int, int, list[str]]:
-    """Import a GrimmRibbity export zip. Returns (added, updated, errors)."""
+def _import_zip(zip_bytes: bytes, *, mode: str = "add_only") -> tuple[int, int, int, list[str]]:
+    """Import a GrimmRibbity export zip. Returns (added, updated, skipped, errors).
+
+    mode="add_only" (default) — entries whose id already exists in the
+    library are skipped (no overwrite, no history push, no thumbnail
+    replace). Protects local edits / curation when re-importing a shared
+    zip.
+
+    mode="update" — existing entries are overwritten with the zip's
+    values, with history push for user-visible field changes (the
+    historical default behaviour)."""
+    if mode not in ("add_only", "update"):
+        return 0, 0, 0, [f"unknown import mode {mode!r}"]
     errors: list[str] = []
     try:
         zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
     except zipfile.BadZipFile:
-        return 0, 0, ["not a valid zip file"]
+        return 0, 0, 0, ["not a valid zip file"]
 
     with zf:
         try:
             manifest_raw = zf.read("prompts.json").decode("utf-8")
             manifest = json.loads(manifest_raw)
         except (KeyError, json.JSONDecodeError, UnicodeDecodeError) as e:
-            return 0, 0, [f"missing or invalid prompts.json in zip: {e}"]
+            return 0, 0, 0, [f"missing or invalid prompts.json in zip: {e}"]
 
         new_prompts = manifest.get("prompts") if isinstance(manifest, dict) else None
         if not isinstance(new_prompts, list):
-            return 0, 0, ["prompts.json has no 'prompts' list"]
+            return 0, 0, 0, ["prompts.json has no 'prompts' list"]
 
-        added = updated = 0
+        added = updated = skipped = 0
         names_in_zip = set(zf.namelist())
 
+        _snapshot_prompts("import_zip")
         with _lock:
             items = _load()
             index = {i.get("id"): i for i in items}
@@ -1679,11 +1802,17 @@ def _import_zip(zip_bytes: bytes) -> tuple[int, int, list[str]]:
                     errors.append(f"skipping entry id={pid!r} with empty name")
                     continue
 
+                existing = index.get(pid)
+                if existing is not None and mode == "add_only":
+                    # Add-only: don't overwrite established entries. Don't
+                    # touch the thumbnail either (might've been customised).
+                    skipped += 1
+                    continue
+
                 text_val = raw.get("text", "") or ""
                 tags = _parse_tags(raw.get("tags") or [])
                 history = raw.get("history") if isinstance(raw.get("history"), list) else None
 
-                existing = index.get(pid)
                 created = existing is None
                 if created:
                     existing = {"id": pid}
@@ -1733,7 +1862,7 @@ def _import_zip(zip_bytes: bytes) -> tuple[int, int, list[str]]:
 
             _save(items)
 
-    return added, updated, errors
+    return added, updated, skipped, errors
 
 
 @routes.post("/prompt_library/import_zip")
@@ -1745,9 +1874,13 @@ async def import_zip_route(request):
     body = field.file.read()
     if len(body) > _MAX_IMPORT_ZIP_BYTES:
         return web.json_response({"error": "zip too large"}, status=400)
-    added, updated, errors = _import_zip(body)
+    mode = (reader.get("mode") or "add_only").strip()
+    if mode not in ("add_only", "update"):
+        return web.json_response({"error": f"invalid mode {mode!r} (use add_only or update)"}, status=400)
+    added, updated, skipped, errors = _import_zip(body, mode=mode)
     _notify_change()
-    return web.json_response({"added": added, "updated": updated, "errors": errors})
+    return web.json_response({"added": added, "updated": updated,
+                               "skipped": skipped, "errors": errors})
 
 
 # --------------------------------------------------------------------------
@@ -1870,6 +2003,7 @@ def _scan_loras_internal(*, default_weight: float = 1.0,
     errors: list[str] = []
     notify = False
 
+    _snapshot_prompts("scan_loras")
     with _lock:
         items = _load()
         index_by_id = {i.get("id"): i for i in items}
@@ -2017,6 +2151,7 @@ def _import_backgrounds_internal(*, refresh_existing: bool = False) -> dict:
     errors: list[str] = []
     notify = False
 
+    _snapshot_prompts("import_backgrounds")
     with _lock:
         items = _load()
         index_by_id = {i.get("id"): i for i in items}
@@ -2066,6 +2201,29 @@ def _import_backgrounds_internal(*, refresh_existing: bool = False) -> dict:
     if notify:
         _notify_change()
     return {"added": added, "updated": updated, "skipped": skipped, "errors": errors}
+
+
+@routes.get("/prompt_library/snapshots")
+async def list_snapshots_route(_request):
+    return web.json_response({"snapshots": _list_snapshots(), "cap": _SNAPSHOT_CAP})
+
+
+@routes.post("/prompt_library/restore_snapshot")
+async def restore_snapshot_route(request):
+    """Restore prompts.json from a snapshot. With no name, restores the most
+    recent. Returns {ok, restored_from, pre_undo_snapshot, entries}."""
+    payload = await request.json() if request.body_exists else {}
+    name = (payload.get("name") or "").strip()
+    if not name:
+        snaps = _list_snapshots()
+        if not snaps:
+            return web.json_response({"ok": False, "error": "no snapshots available"}, status=404)
+        name = snaps[0]["name"]
+    result = _restore_snapshot(name)
+    if result.get("ok"):
+        _notify_change()
+        return web.json_response(result)
+    return web.json_response(result, status=400)
 
 
 @routes.post("/prompt_library/import_backgrounds")
@@ -2270,7 +2428,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.27.6"
+__version__ = "0.27.7"
 
 
 def _autobackup_on_version_change() -> None:

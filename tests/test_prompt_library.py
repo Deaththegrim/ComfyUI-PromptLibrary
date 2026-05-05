@@ -555,9 +555,10 @@ class PromptLibraryTests(unittest.TestCase):
 
     def test_import_csv_basic(self):
         text = "name,text,tags,id\nKnight,armor,character;fantasy,knight\nMage,staff,character;magic,\n"
-        added, updated, errors = self.mod._import_csv(text)
+        added, updated, skipped, errors = self.mod._import_csv(text)
         self.assertEqual(added, 2)
         self.assertEqual(updated, 0)
+        self.assertEqual(skipped, 0)
         self.assertEqual(errors, [])
         items = self.mod._load()
         self.assertEqual(len(items), 2)
@@ -572,23 +573,40 @@ class PromptLibraryTests(unittest.TestCase):
         req = FakeRequest(post_data={"name": "Knight", "text": "v1"})
         body = json.loads(asyncio.run(self.mod.upsert_prompt(req)).body)
         pid = body["id"]
-        # Then import a CSV that updates the same id
+        # Then import a CSV that updates the same id — must opt into update mode
+        # since the default is add_only (no overwrite).
         text = f"name,text,tags,id\nKnight,v2,character,{pid}\n"
-        added, updated, errors = self.mod._import_csv(text)
+        added, updated, skipped, errors = self.mod._import_csv(text, mode="update")
         self.assertEqual(added, 0)
         self.assertEqual(updated, 1)
+        self.assertEqual(skipped, 0)
         items = self.mod._load()
         self.assertEqual(items[0]["text"], "v2")
 
+    def test_import_csv_add_only_skips_existing(self):
+        # Default add_only mode: existing entries are preserved verbatim.
+        req = FakeRequest(post_data={"name": "Knight", "text": "v1", "tags": "original_tag"})
+        body = json.loads(asyncio.run(self.mod.upsert_prompt(req)).body)
+        pid = body["id"]
+        text = f"name,text,tags,id\nKnight,v2,clobbered_tag,{pid}\n"
+        added, updated, skipped, errors = self.mod._import_csv(text)  # default add_only
+        self.assertEqual(added, 0)
+        self.assertEqual(updated, 0)
+        self.assertEqual(skipped, 1)
+        items = self.mod._load()
+        # Original values preserved, NOT overwritten by CSV
+        self.assertEqual(items[0]["text"], "v1")
+        self.assertEqual(items[0]["tags"], ["original_tag"])
+
     def test_import_csv_skips_invalid_rows(self):
         text = "name,text,tags,id\n,nothing,,\nGood,t,,\nBad,t,,../etc\n"
-        added, _, errors = self.mod._import_csv(text)
+        added, _, _, errors = self.mod._import_csv(text)
         self.assertEqual(added, 1)
         self.assertEqual(len(errors), 2)
 
     def test_import_csv_rejects_missing_name_column(self):
         text = "title,text\nfoo,bar\n"
-        _, _, errors = self.mod._import_csv(text)
+        _, _, _, errors = self.mod._import_csv(text)
         self.assertTrue(any("name" in e for e in errors))
 
     def test_import_csv_route(self):
@@ -862,6 +880,7 @@ class PromptLibraryTests(unittest.TestCase):
             items = self.mod._load()
         zip_bytes = self.mod._build_export_zip(items, "test")
         self.mod._save([])
+        # add_only is fine here — the library is empty after _save([])
         self.mod._import_zip(zip_bytes)
         with self.mod._lock:
             restored = self.mod._load()
@@ -1158,9 +1177,10 @@ class PromptLibraryTests(unittest.TestCase):
         # Wipe and re-import
         self.mod._save([])
         self.mod._delete_image_files(knight_id)
-        added, updated, errors = self.mod._import_zip(zip_bytes)
+        added, updated, skipped, errors = self.mod._import_zip(zip_bytes)
         self.assertEqual(added, 2)
         self.assertEqual(updated, 0)
+        self.assertEqual(skipped, 0)
         self.assertEqual(errors, [])
         items = self.mod._load()
         self.assertEqual(len(items), 2)
@@ -1193,40 +1213,84 @@ class PromptLibraryTests(unittest.TestCase):
         # Build a zip describing the same id but different text
         items = [{"id": pid, "name": "X", "text": "v2 from zip", "tags": []}]
         zip_bytes = self.mod._build_export_zip(items, "test")
-        added, updated, errors = self.mod._import_zip(zip_bytes)
+        # Must opt into mode=update — default is add_only.
+        added, updated, skipped, errors = self.mod._import_zip(zip_bytes, mode="update")
         self.assertEqual(added, 0)
         self.assertEqual(updated, 1)
+        self.assertEqual(skipped, 0)
         entry = next(i for i in self.mod._load() if i["id"] == pid)
         self.assertEqual(entry["text"], "v2 from zip")
         self.assertEqual(len(entry["history"]), 1)
         self.assertEqual(entry["history"][0]["text"], "v1")
 
+    def test_import_zip_add_only_skips_existing(self):
+        # Default add_only mode: existing entries are preserved verbatim.
+        req = FakeRequest(post_data={"name": "X", "text": "original", "tags": "keep"})
+        pid = json.loads(asyncio.run(self.mod.upsert_prompt(req)).body)["id"]
+        items = [{"id": pid, "name": "X", "text": "clobbered", "tags": ["wrong"]}]
+        zip_bytes = self.mod._build_export_zip(items, "test")
+        added, updated, skipped, errors = self.mod._import_zip(zip_bytes)  # default add_only
+        self.assertEqual(added, 0)
+        self.assertEqual(updated, 0)
+        self.assertEqual(skipped, 1)
+        entry = next(i for i in self.mod._load() if i["id"] == pid)
+        self.assertEqual(entry["text"], "original")
+        self.assertEqual(entry["tags"], ["keep"])
+
     def test_import_zip_rejects_bad_zip(self):
-        added, updated, errors = self.mod._import_zip(b"not a zip")
-        self.assertEqual((added, updated), (0, 0))
+        added, updated, skipped, errors = self.mod._import_zip(b"not a zip")
+        self.assertEqual((added, updated, skipped), (0, 0, 0))
         self.assertTrue(errors)
 
     def test_import_zip_rejects_missing_manifest(self):
         buf = io.BytesIO()
         with __import__("zipfile").ZipFile(buf, "w") as zf:
             zf.writestr("readme.txt", "hello")
-        added, updated, errors = self.mod._import_zip(buf.getvalue())
-        self.assertEqual((added, updated), (0, 0))
+        added, updated, skipped, errors = self.mod._import_zip(buf.getvalue())
+        self.assertEqual((added, updated, skipped), (0, 0, 0))
         self.assertTrue(any("prompts.json" in e for e in errors))
 
     def test_import_zip_skips_invalid_id(self):
         items = [{"id": "../bad", "name": "X", "text": "t"}]
         zip_bytes = self.mod._build_export_zip(items, "test")
-        added, updated, errors = self.mod._import_zip(zip_bytes)
+        added, updated, skipped, errors = self.mod._import_zip(zip_bytes)
         self.assertEqual(added, 0)
         self.assertTrue(any("invalid id" in e for e in errors))
 
     def test_import_zip_skips_empty_name(self):
         items = [{"id": "abc", "name": "", "text": "t"}]
         zip_bytes = self.mod._build_export_zip(items, "test")
-        added, updated, errors = self.mod._import_zip(zip_bytes)
+        added, updated, skipped, errors = self.mod._import_zip(zip_bytes)
         self.assertEqual(added, 0)
         self.assertTrue(any("empty name" in e for e in errors))
+
+    # ---- snapshot / undo ----------------------------------------------
+
+    def test_snapshot_and_restore(self):
+        # Seed two entries, snapshot, mutate, restore — should bring back
+        # the snapshotted state.
+        self.mod._save([{"id": "a", "name": "A", "text": "v1"},
+                          {"id": "b", "name": "B", "text": "v1"}])
+        snap_name = self.mod._snapshot_prompts("test_pre")
+        self.assertTrue(snap_name)
+        # Mutate
+        self.mod._save([{"id": "a", "name": "A", "text": "MUTATED"}])
+        result = self.mod._restore_snapshot(snap_name)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["entries"], 2)
+        items = self.mod._load()
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]["text"], "v1")
+
+    def test_restore_snapshot_rejects_path_traversal(self):
+        result = self.mod._restore_snapshot("../prompts.json")
+        self.assertFalse(result["ok"])
+        self.assertIn("invalid", result["error"].lower())
+
+    def test_restore_snapshot_handles_missing(self):
+        result = self.mod._restore_snapshot("nonexistent.json")
+        self.assertFalse(result["ok"])
+        self.assertIn("not found", result["error"])
 
     # ---- auto-backup --------------------------------------------------
 
