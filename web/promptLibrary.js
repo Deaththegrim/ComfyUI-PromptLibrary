@@ -2050,45 +2050,46 @@ function installWebsocketBridge() {
   });
 }
 
-// Per-node-group color theming: bright coloured title bar (with black title
-// text) + uniform dark-grey body across the whole suite. Wraps
-// onNodeCreated AND onConfigure — the latter is needed because LiteGraph's
+// Per-node-group color theming: deep saturated title bar with bold black
+// title text + white drop shadow + uniform dark-grey body across the suite.
+// Wraps onNodeCreated AND onConfigure — the latter is needed because
 // LGraphNode.configure() restores `color`/`bgcolor` from the saved workflow
-// JSON after onNodeCreated runs, undoing our theme. Re-applying in
-// onConfigure makes the theme stick on reload.
+// JSON after onNodeCreated runs, undoing our theme.
 const NODE_BODY_COLOR = "#1e1e1e";
 const NODE_TITLE_TEXT_COLOR = "#0a0a0a";
 const NODE_COLORS = {
-  // Library / data nodes — light lavender title bar
-  "PromptLibrary":         "#c8a8e8",
-  "PromptLibraryMulti":    "#c8a8e8",
-  "PromptLibrarySave":     "#c8a8e8",
-  "PromptLibraryRandom":   "#c8a8e8",
-  "PromptLibraryWildcard": "#c8a8e8",
-  // Comic authoring — peachy amber title bar
-  "PromptLibraryScene":      "#e8b878",
-  "PromptLibraryBackground": "#e8b878",
-  "PromptLibraryComicFrame": "#e8b878",
-  // Sampling — light teal title bar
-  "GrimmRibbitySamplerSDXL":    "#8cc8d8",
-  "GrimmRibbityHiResFixScript": "#8cc8d8",
-  "GrimmRibbityPackSDXLTuple":  "#8cc8d8",
-  // Output / save — soft mint green title bar
-  "GrimmRibbityCivitaiSave": "#a8d8b8",
+  // Library / data nodes — saturated purple
+  "PromptLibrary":         "#a060e0",
+  "PromptLibraryMulti":    "#a060e0",
+  "PromptLibrarySave":     "#a060e0",
+  "PromptLibraryRandom":   "#a060e0",
+  "PromptLibraryWildcard": "#a060e0",
+  // Comic authoring — burnt orange
+  "PromptLibraryScene":      "#e8852f",
+  "PromptLibraryBackground": "#e8852f",
+  "PromptLibraryComicFrame": "#e8852f",
+  // Sampling — deep teal
+  "GrimmRibbitySamplerSDXL":    "#34a4c8",
+  "GrimmRibbityHiResFixScript": "#34a4c8",
+  "GrimmRibbityPackSDXLTuple":  "#34a4c8",
+  // Output / save — saturated emerald
+  "GrimmRibbityCivitaiSave": "#3eba6c",
 };
 // Colors used by previous theme revisions. When a saved workflow loads with
 // one of these stuck on a node, we treat it as stale and replace with the
 // current theme. Manual user colours (anything not in this list) are
 // preserved on reload.
 const STALE_THEME_COLORS = new Set([
-  // v0.22.1 dark theme bodies + bars
+  // v0.22.1 (dark theme)
   "#6b4a8c", "#3d2752",
   "#b07a3a", "#5d3e1c",
   "#3a7c8c", "#1f3d52",
   "#3a8c5b", "#1f4d34",
-  // historical / future-proof: any value already in the current theme is
-  // also fine to overwrite (no-op if equal, refresh if subtly off).
+  // v0.22.2 (pastel bars)
   "#c8a8e8", "#e8b878", "#8cc8d8", "#a8d8b8",
+  // current bars (auto-refresh on reload if values changed)
+  "#a060e0", "#e8852f", "#34a4c8", "#3eba6c",
+  // shared body
   "#1e1e1e",
 ]);
 function _isReplaceable(value, defaultValue) {
@@ -2097,6 +2098,38 @@ function _isReplaceable(value, defaultValue) {
   if (typeof value === "string" && STALE_THEME_COLORS.has(value.toLowerCase())) return true;
   return false;
 }
+// Custom title-text painter: bold + white drop-shadow halo around black
+// text. ComfyUI's bundled LiteGraph calls this in place of its default
+// title rendering when defined on a node. Signature comes from the
+// frontend bundle: (ctx, titleHeight, size, scale, titleFontStyle, selected).
+function _drawTitleText(ctx, titleHeight, size, scale, titleFontStyle, selected) {
+  let title = (this.getTitle ? this.getTitle() : (this.title || this.type)) || "";
+  if (this.pinned) title = String(title) + " 📌";
+  if (!title) return;
+
+  const padding = titleHeight;
+  const baseFont = titleFontStyle || "14px Arial";
+  ctx.font = baseFont.startsWith("bold ") ? baseFont : "bold " + baseFont;
+
+  // White drop-shadow halo so black text reads on any saturated bar at any
+  // zoom level. Reset before returning so widget/socket text isn't tinted.
+  ctx.shadowColor = "rgba(255, 255, 255, 0.9)";
+  ctx.shadowBlur = 5;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+
+  ctx.fillStyle = selected
+    ? (LiteGraph?.NODE_SELECTED_TITLE_COLOR || "#ffffff")
+    : (this.constructor.title_text_color || NODE_TITLE_TEXT_COLOR);
+  ctx.textAlign = "left";
+
+  const textY = (LiteGraph?.NODE_TITLE_TEXT_Y || 18) - padding;
+  ctx.fillText(String(title), padding, textY);
+
+  ctx.shadowColor = "transparent";
+  ctx.shadowBlur = 0;
+}
+
 function applyNodeColors(nodeType, nodeData) {
   const titleColor = NODE_COLORS[nodeData.name];
   if (!titleColor) return;
@@ -2127,9 +2160,14 @@ function applyNodeColors(nodeType, nodeData) {
     return r;
   };
 
-  // Class-level fallback so LiteGraph picks it up even if onNodeCreated
-  // isn't run for some reason (e.g. very early manifest builds).
+  // Class-level fallback for the title text color.
   nodeType.title_text_color = NODE_TITLE_TEXT_COLOR;
+  // Per-prototype custom title painter — wired once at registration so
+  // every instance picks it up without per-node bookkeeping. Don't clobber
+  // an onDrawTitleText that another extension already installed.
+  if (!nodeType.prototype.onDrawTitleText) {
+    nodeType.prototype.onDrawTitleText = _drawTitleText;
+  }
 }
 
 app.registerExtension({
