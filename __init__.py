@@ -1751,7 +1751,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.20.3"
+__version__ = "0.21.0"
 
 
 def _autobackup_on_version_change() -> None:
@@ -1794,6 +1794,23 @@ except Exception as _e:
     print(f"[PromptLibrary] Civitai save node unavailable: {_e}")
     _civitai_node, _civitai_label = {}, {}
 
+# SDXL sampler depends on Comfy's runtime imports (comfy.sd, comfy.samplers).
+# Skipped gracefully under unittest / standalone tooling so the rest of the
+# package keeps working when ComfyUI isn't on the path.
+try:
+    from .sampler_sdxl import GrimmRibbitySamplerSDXL, GrimmRibbityHiResFixScript
+    _sampler_node = {
+        "GrimmRibbitySamplerSDXL": GrimmRibbitySamplerSDXL,
+        "GrimmRibbityHiResFixScript": GrimmRibbityHiResFixScript,
+    }
+    _sampler_label = {
+        "GrimmRibbitySamplerSDXL": "GrimmRibbity — SDXL Sampler",
+        "GrimmRibbityHiResFixScript": "GrimmRibbity — HiResFix Script",
+    }
+except Exception as _e:
+    print(f"[PromptLibrary] SDXL sampler unavailable: {_e}")
+    _sampler_node, _sampler_label = {}, {}
+
 NODE_CLASS_MAPPINGS = {
     "PromptLibrary": PromptLibrary,
     "PromptLibraryMulti": PromptLibraryMulti,
@@ -1804,6 +1821,7 @@ NODE_CLASS_MAPPINGS = {
     "PromptLibraryBackground": PromptLibraryBackground,
     "PromptLibraryComicFrame": PromptLibraryComicFrame,
     **_civitai_node,
+    **_sampler_node,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptLibrary": "GrimmRibbity — Library",
@@ -1815,6 +1833,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptLibraryBackground": "GrimmRibbity — Background (locked)",
     "PromptLibraryComicFrame": "GrimmRibbity — Comic Frame",
     **_civitai_label,
+    **_sampler_label,
 }
 WEB_DIRECTORY = "./web"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
