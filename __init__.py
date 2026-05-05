@@ -723,31 +723,76 @@ class PromptLibraryWildcard:
 
 
 _SCENE_NONE = "(none)"
-# Curated dropdown vocabularies for the Scene node. First entry of each list
-# is the "skip" sentinel and gets filtered out when joining the prompt.
+# Curated dropdown vocabularies for the Scene node. First entry of each
+# list is the "skip" sentinel and gets filtered out when joining the
+# prompt. The time_of_day / weather / lighting / camera_angle lists are
+# aligned with Danbooru's tag groups (see
+# https://danbooru.donmai.us/wiki_pages/tag_groups) so SDXL anime
+# checkpoints — which are typically Danbooru-tag-trained — recognise the
+# values and respond well. mood / framing are photography concepts that
+# Danbooru doesn't index, kept as our own curated list.
+#
+# Tag-group sources used:
+#   - tag_group:lighting (lighting + time of day lighting)
+#   - tag_group:image_composition (view angles + framing the body)
 _SCENE_TIME_OF_DAY = [_SCENE_NONE,
-    "dawn", "early morning", "morning", "golden hour morning",
-    "midday", "afternoon", "late afternoon",
-    "golden hour evening", "dusk", "twilight",
-    "night", "midnight", "blue hour"]
+    # Danbooru-canonical time-of-day tags
+    "dawn", "sunrise", "morning", "day", "afternoon",
+    "evening", "sunset", "dusk", "twilight", "night",
+    # Photography-canonical complements
+    "early morning", "midday", "late afternoon",
+    "golden hour", "blue hour", "midnight"]
 _SCENE_WEATHER = [_SCENE_NONE,
-    "clear sky", "sunny", "partly cloudy", "overcast", "stormy clouds",
-    "light fog", "heavy fog", "mist", "light rain", "heavy rain", "thunderstorm",
-    "drizzle", "snow", "heavy snowfall", "blizzard", "windy", "dust storm"]
+    # Sky conditions
+    "clear sky", "blue sky", "partly cloudy", "cloudy", "overcast",
+    "stormy clouds",
+    # Precipitation (Danbooru: rain, raining, snow, snowing)
+    "light rain", "rain", "raining", "heavy rain", "drizzle",
+    "thunderstorm", "lightning", "sun shower",
+    "light snow", "snow", "snowing", "heavy snow", "blizzard",
+    # Air conditions
+    "fog", "mist", "haze",
+    # Wind / dust
+    "windy", "sandstorm", "dust storm",
+    # Optical
+    "rainbow", "aurora"]
 _SCENE_LIGHTING = [_SCENE_NONE,
-    "soft natural light", "warm sunlight", "cool sunlight", "harsh midday sun",
-    "soft window light", "hard shadows", "soft shadows",
-    "golden hour glow", "blue hour", "moonlight", "starlight",
-    "candlelight", "firelight", "lantern light",
-    "neon glow", "fluorescent", "tungsten", "stage lighting",
-    "rim lighting", "backlit", "silhouette",
-    "volumetric god rays", "dappled light"]
+    # Direction (Danbooru tag_group:lighting → Directional)
+    "backlighting", "sidelighting", "overlighting", "underlighting",
+    "rim lighting",
+    # Types (Danbooru → Types)
+    "bloom", "spotlight", "light rays", "sunbeam", "moonbeam",
+    "sunlight", "moonlight", "dim lighting",
+    # Through gaps (Danbooru → Light Through Gaps)
+    "dappled sunlight", "dappled moonlight", "crack of light",
+    "window shadow",
+    # Sources (Danbooru → Light Sources)
+    "candlelight", "firelight", "lantern light", "lamplight",
+    "torchlight", "neon lighting", "fluorescent lighting",
+    "stage lighting", "headlight", "floodlights",
+    # Atmosphere / volumetrics
+    "volumetric lighting", "god rays", "soft lighting",
+    # Shadow / contrast (Danbooru → Absence of Light)
+    "harsh shadows", "soft shadows", "silhouette", "chiaroscuro",
+    "shade"]
 _SCENE_CAMERA_ANGLE = [_SCENE_NONE,
-    "extreme close-up", "close-up", "medium close-up",
-    "medium shot", "medium wide shot", "wide shot", "extreme wide shot",
-    "eye level", "low angle", "high angle", "bird's-eye view", "worm's-eye view",
-    "Dutch angle", "over-the-shoulder", "point of view"]
+    # View angle (Danbooru tag_group:image_composition → View Angle)
+    "from above", "from behind", "from below", "from side",
+    "three-quarter view", "straight-on", "dutch angle", "upside-down",
+    # Perspective / depth
+    "fisheye", "panorama", "perspective", "isometric",
+    # Framing the body (Danbooru → Framing the Body)
+    "extreme close-up", "close-up", "portrait", "upper body",
+    "cowboy shot", "full body", "wide shot", "very wide shot",
+    "lower body", "profile",
+    # Composition / POV
+    "pov", "over-the-shoulder", "from outside",
+    # Eye-line cues (photography)
+    "eye level", "low angle", "high angle",
+    "bird's-eye view", "worm's-eye view"]
 _SCENE_MOOD = [_SCENE_NONE,
+    # Mood is a photography/illustration concept Danbooru doesn't index
+    # as its own tag group; keep our hand-curated list.
     "tense", "ominous", "anxious", "dramatic",
     "melancholic", "nostalgic", "solemn", "lonely",
     "peaceful", "serene", "contemplative",
@@ -755,9 +800,13 @@ _SCENE_MOOD = [_SCENE_NONE,
     "heroic", "triumphant", "epic",
     "romantic", "intimate", "mysterious", "dreamy", "surreal"]
 _SCENE_FRAMING = [_SCENE_NONE,
+    # Framing concepts from photography composition; the few in Danbooru's
+    # composition tag group (negative space, symmetry, letterboxed) are
+    # included but most of these stay as photography vocabulary.
     "centered", "rule of thirds", "leading lines",
     "symmetrical", "asymmetrical",
     "frame within a frame", "negative space",
+    "letterboxed", "pillarboxed", "out of frame",
     "dynamic diagonal", "low horizon", "high horizon",
     "shallow depth of field", "deep depth of field"]
 
@@ -1751,7 +1800,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.22.4"
+__version__ = "0.23.0"
 
 
 def _autobackup_on_version_change() -> None:
