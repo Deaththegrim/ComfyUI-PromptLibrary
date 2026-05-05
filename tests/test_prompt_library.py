@@ -365,6 +365,13 @@ class PromptLibraryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             node.save(name="  ", text="x")
 
+    def test_save_node_requires_prompt_text(self):
+        node = self.mod.PromptLibrarySave()
+        with self.assertRaises(ValueError):
+            node.save(name="Has Name", text="")
+        with self.assertRaises(ValueError):
+            node.save(name="Has Name", text="   \n  ")
+
     def test_save_node_with_thumbnail_writes_jpg(self):
         try:
             import numpy  # noqa: F401

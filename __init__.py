@@ -419,6 +419,8 @@ class PromptLibrarySave:
         name = (name or "").strip()
         if not name:
             raise ValueError("PromptLibrarySave: name is required")
+        if not (text or "").strip():
+            raise ValueError("PromptLibrarySave: prompt text is empty — connect a STRING source or type something into the text field")
         prompt_id = (prompt_id or "").strip()
         if prompt_id and not _safe_id(prompt_id):
             raise ValueError(f"PromptLibrarySave: invalid prompt_id {prompt_id!r}")
@@ -1126,7 +1128,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.12.3"
+__version__ = "0.12.4"
 
 
 def _autobackup_on_version_change() -> None:
