@@ -1293,25 +1293,27 @@ function buildGallery(node, idWidget) {
   // Stop key events from propagating to LiteGraph when interacting with the gallery.
   container.addEventListener("keydown", (e) => e.stopPropagation());
   // Let the wheel scroll the grid (and other inner scrollers) instead of
-  // zooming the LiteGraph canvas. Walk up to find a scrollable ancestor; if
-  // we have room to scroll in that direction, consume the event.
+  // zooming the LiteGraph canvas. Capture phase + manual scroll so we beat
+  // LiteGraph's wheel handler, which otherwise eats the event for canvas
+  // zoom even though the cursor is over our DOM widget.
   container.addEventListener("wheel", (e) => {
-    const dy = e.deltaY;
+    let dy = e.deltaY;
+    if (e.deltaMode === 1) dy *= 16;          // lines → px
+    else if (e.deltaMode === 2) dy *= e.target?.clientHeight || 400;  // pages → px
     for (let el = e.target; el && el !== container.parentNode; el = el.parentNode) {
       if (!(el instanceof HTMLElement)) continue;
       const style = getComputedStyle(el);
-      const scrolls = /(auto|scroll)/.test(style.overflowY);
-      if (!scrolls) continue;
-      const canScroll = el.scrollHeight > el.clientHeight;
-      if (!canScroll) continue;
+      if (!/(auto|scroll)/.test(style.overflowY)) continue;
+      if (el.scrollHeight <= el.clientHeight) continue;
       const atTop = el.scrollTop <= 0;
       const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
-      if ((dy < 0 && !atTop) || (dy > 0 && !atBottom)) {
-        e.stopPropagation();
-        return;
-      }
+      if ((dy < 0 && atTop) || (dy > 0 && atBottom)) return;  // let canvas zoom at edges
+      el.scrollTop += dy;
+      e.preventDefault();
+      e.stopPropagation();
+      return;
     }
-  }, { passive: true });
+  }, { passive: false, capture: true });
 
   container._promptLibraryCleanup = () => {
     window.removeEventListener("prompt-library-updated", onExternal);
