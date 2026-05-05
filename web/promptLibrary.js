@@ -108,6 +108,7 @@ const CSS = `
 .pl-tag-chip:hover { background: var(--pl-bg-hover); }
 .pl-tag-chip.active { background: var(--pl-bg-selected-strong); color: var(--pl-fg-strong); border-color: var(--pl-accent); }
 .pl-tag-chip.all { font-weight: bold; }
+.pl-tag-chip.pl-tag-mode { font-family: monospace; font-weight: bold; min-width: 36px; text-align: center; }
 .pl-tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .pl-tile .pl-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
   font-size: 22px; color: var(--pl-fg-placeholder); }
@@ -163,6 +164,19 @@ const CSS = `
 .pl-toast.error { border-left: 4px solid var(--pl-danger, #f88); }
 .pl-toast.success { border-left: 4px solid var(--pl-accent, #6cf); }
 @keyframes pl-toast-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+.pl-rating-input { display: flex; gap: 2px; }
+.pl-star { background: transparent; border: none; color: var(--pl-fg-muted); padding: 0 2px;
+  font-size: 18px; line-height: 1; cursor: pointer; }
+.pl-star.on { color: #f5b94a; }
+.pl-star:hover { color: #f5b94a; }
+.pl-rating-badge { position: absolute; bottom: 4px; right: 4px;
+  background: rgba(0, 0, 0, 0.7); color: #f5b94a; font-size: 10px;
+  padding: 1px 4px; border-radius: 3px; letter-spacing: 1px;
+  pointer-events: none; z-index: 1; }
+.pl-grid.list-view .pl-rating-badge { position: static; flex: 0 0 auto; align-self: center;
+  margin-right: 6px; }
+.pl-notes { min-height: 40px !important; max-height: 100px; }
+.pl-count-badge { font-size: 11px; color: var(--pl-fg-muted); padding: 0 4px; white-space: nowrap; }
 .pl-history-row { display: grid; grid-template-columns: auto 1fr auto; gap: 6px;
   align-items: start; padding: 6px; background: #2a2a2a; border-radius: 3px;
   font-size: 11px; }
@@ -268,12 +282,14 @@ function slugify(name) {
     .slice(0, 64);
 }
 
-async function upsert({ id, name, text, tags, imageFile, clearImage }) {
+async function upsert({ id, name, text, tags, rating, notes, imageFile, clearImage }) {
   const body = new FormData();
   if (id) body.append("id", id);
   body.append("name", name);
   body.append("text", text);
   if (tags !== undefined) body.append("tags", tags);
+  if (rating !== undefined && rating !== null) body.append("rating", String(rating));
+  if (notes !== undefined) body.append("notes", notes);
   if (clearImage) body.append("clear_image", "1");
   if (imageFile) body.append("image", imageFile, imageFile.name);
   const res = await api.fetchApi("/prompt_library/upsert", { method: "POST", body });
@@ -440,12 +456,13 @@ function relativeTime(ts) {
 }
 
 const SORT_MODES = {
-  manual:      { label: "Manual",     cmp: (a, b) => (a.order||0) - (b.order||0) },
-  name_asc:    { label: "Name A-Z",   cmp: (a, b) => a.name.localeCompare(b.name) },
-  name_desc:   { label: "Name Z-A",   cmp: (a, b) => b.name.localeCompare(a.name) },
-  newest:      { label: "Newest",     cmp: (a, b) => (b.created_at||0) - (a.created_at||0) },
-  oldest:      { label: "Oldest",     cmp: (a, b) => (a.created_at||0) - (b.created_at||0) },
-  recent_edit: { label: "Recent edit",cmp: (a, b) => (b.updated_at||0) - (a.updated_at||0) },
+  manual:      { label: "Manual",      cmp: (a, b) => (a.order||0) - (b.order||0) },
+  name_asc:    { label: "Name A-Z",    cmp: (a, b) => a.name.localeCompare(b.name) },
+  name_desc:   { label: "Name Z-A",    cmp: (a, b) => b.name.localeCompare(a.name) },
+  newest:      { label: "Newest",      cmp: (a, b) => (b.created_at||0) - (a.created_at||0) },
+  oldest:      { label: "Oldest",      cmp: (a, b) => (a.created_at||0) - (b.created_at||0) },
+  recent_edit: { label: "Recent edit", cmp: (a, b) => (b.updated_at||0) - (a.updated_at||0) },
+  rating_desc: { label: "Top rated",   cmp: (a, b) => (b.rating||0) - (a.rating||0) || a.name.localeCompare(b.name) },
 };
 const SORT_KEY = "comfy.PromptLibrary.sort";
 
@@ -518,6 +535,44 @@ function openPromptModal({ existing, onSave, onDelete }) {
   const textArea = document.createElement("textarea");
   textArea.value = existing?.text || "";
   textLabel.appendChild(textArea);
+
+  // Rating: 5 toggle stars. Clicking the active rating clears it (rating = 0).
+  const ratingLabel = document.createElement("label");
+  ratingLabel.textContent = "Rating";
+  const ratingWrap = document.createElement("div");
+  ratingWrap.className = "pl-rating-input";
+  ratingWrap.setAttribute("role", "radiogroup");
+  ratingWrap.setAttribute("aria-label", "Rating, 0 to 5 stars");
+  let ratingValue = Math.max(0, Math.min(5, Number(existing?.rating || 0)));
+  const stars = [];
+  const paintStars = () => {
+    for (let i = 1; i <= 5; i++) {
+      stars[i - 1].textContent = i <= ratingValue ? "★" : "☆";
+      stars[i - 1].classList.toggle("on", i <= ratingValue);
+      stars[i - 1].setAttribute("aria-checked", i === ratingValue ? "true" : "false");
+    }
+  };
+  for (let i = 1; i <= 5; i++) {
+    const star = document.createElement("button");
+    star.type = "button";
+    star.className = "pl-star";
+    star.setAttribute("role", "radio");
+    star.setAttribute("aria-label", `${i} star${i === 1 ? "" : "s"}`);
+    star.title = `${i} star${i === 1 ? "" : "s"}`;
+    star.onclick = () => { ratingValue = ratingValue === i ? 0 : i; paintStars(); };
+    stars.push(star);
+    ratingWrap.appendChild(star);
+  }
+  paintStars();
+  ratingLabel.appendChild(ratingWrap);
+
+  const notesLabel = document.createElement("label");
+  notesLabel.textContent = "Notes (private — not used in generation)";
+  const notesArea = document.createElement("textarea");
+  notesArea.className = "pl-notes";
+  notesArea.value = existing?.notes || "";
+  notesArea.placeholder = "context, intended use, what works well...";
+  notesLabel.appendChild(notesArea);
 
   const imgLabel = document.createElement("label");
   imgLabel.textContent = "Reference image (optional)";
@@ -697,6 +752,8 @@ function openPromptModal({ existing, onSave, onDelete }) {
         name,
         text: textArea.value,
         tags: tagsInput.value,
+        rating: ratingValue,
+        notes: notesArea.value,
         imageFile: imgInput.files[0] || null,
         clearImage,
       });
@@ -726,7 +783,7 @@ function openPromptModal({ existing, onSave, onDelete }) {
   actions.appendChild(cancelBtn);
   actions.appendChild(saveBtn);
 
-  const children = [header, nameLabel, idLabel, tagsLabel, textLabel, imgLabel];
+  const children = [header, nameLabel, idLabel, tagsLabel, textLabel, ratingLabel, notesLabel, imgLabel];
   if (historyDetails) children.push(historyDetails);
   children.push(status, actions);
   modal.append(...children);
@@ -798,6 +855,7 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
     node.properties[propsKey] = {
       filter: filter.value || "",
       activeTags: [...activeTags],
+      tagFilterMode,
       sort: sortSelect.value,
       tileSize: sizeInput.value,
       view: viewMode,
@@ -903,7 +961,10 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   gridViewBtn.onclick = () => { viewMode = "grid"; localStorage.setItem(VIEW_KEY, viewMode); applyView(); writeState(); };
   listViewBtn.onclick = () => { viewMode = "list"; localStorage.setItem(VIEW_KEY, viewMode); applyView(); writeState(); };
 
-  toolbar.append(searchWrap, modelSelect, sortSelect, sizeWrap, viewWrap, importBtn, exportBtn, refreshBtn, fileInput);
+  const countBadge = document.createElement("span");
+  countBadge.className = "pl-count-badge";
+  countBadge.title = "Visible / total prompts";
+  toolbar.append(searchWrap, modelSelect, sortSelect, sizeWrap, viewWrap, countBadge, importBtn, exportBtn, refreshBtn, fileInput);
 
   const tagsRow = document.createElement("div");
   tagsRow.className = "pl-tags-row";
@@ -918,6 +979,7 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   let lastVisible = [];
   let focusedIndex = -1;        // for keyboard nav
   const activeTags = new Set(Array.isArray(initialState.activeTags) ? initialState.activeTags : []);
+  let tagFilterMode = initialState.tagFilterMode === "all" ? "all" : "any";
   if (initialState.filter) filter.value = initialState.filter;
   // Unified selection: drives both the prompt output (joined into idWidget.value)
   // and bulk actions (Tag/Export/Delete bar).
@@ -1078,6 +1140,19 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
     allChip.textContent = "All";
     allChip.onclick = () => { activeTags.clear(); render(); };
     topGroup.appendChild(allChip);
+    // ANY / ALL toggle. Only meaningful when 2+ tags are active, but we always
+    // show it so the user can pre-set the mode before clicking chips.
+    const modeChip = document.createElement("div");
+    modeChip.className = "pl-tag-chip pl-tag-mode";
+    modeChip.title = tagFilterMode === "all"
+      ? "Match prompts that have ALL active tags. Click to switch to ANY."
+      : "Match prompts that have ANY active tag. Click to switch to ALL.";
+    modeChip.textContent = tagFilterMode === "all" ? "ALL" : "ANY";
+    modeChip.onclick = () => {
+      tagFilterMode = tagFilterMode === "all" ? "any" : "all";
+      render();
+    };
+    topGroup.appendChild(modeChip);
     if (groups.size === 0) {
       const hint = document.createElement("span");
       hint.className = "pl-tag-group-label";
@@ -1118,7 +1193,10 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
     updateModelSelect();
     renderTags();
     grid.replaceChildren();
-    const q = filter.value.trim().toLowerCase();
+    // Multi-term search: each whitespace-separated term must match somewhere
+    // in name/text/tags/id (AND across terms, OR within sources). Quotes are
+    // not parsed — search is plain substring per term.
+    const terms = filter.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
     let visible = prompts;
     const model = modelSelect.value;
     if (model) {
@@ -1126,15 +1204,20 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       visible = visible.filter(p => (p.tags || []).includes(want));
     }
     if (activeTags.size) {
-      visible = visible.filter(p => (p.tags || []).some(t => activeTags.has(t)));
+      const tagPredicate = tagFilterMode === "all"
+        ? (p) => [...activeTags].every(t => (p.tags || []).includes(t))
+        : (p) => (p.tags || []).some(t => activeTags.has(t));
+      visible = visible.filter(tagPredicate);
     }
-    if (q) {
+    if (terms.length) {
       visible = visible.filter(p => {
-        if (p.name.toLowerCase().includes(q)) return true;
-        if ((p.text || "").toLowerCase().includes(q)) return true;
-        if ((p.tags || []).some(t => t.toLowerCase().includes(q))) return true;
-        if ((p.id || "").toLowerCase().includes(q)) return true;
-        return false;
+        const haystacks = [
+          p.name.toLowerCase(),
+          (p.text || "").toLowerCase(),
+          (p.tags || []).join(" ").toLowerCase(),
+          (p.id || "").toLowerCase(),
+        ];
+        return terms.every(term => haystacks.some(h => h.includes(term)));
       });
     }
     const mode = SORT_MODES[sortSelect.value] || SORT_MODES.name_asc;
@@ -1153,6 +1236,9 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       if (!prompts.some(p => p.id === id)) checkedIds.delete(id);
     }
     updateBulkBar();
+    countBadge.textContent = visible.length === prompts.length
+      ? `${prompts.length}`
+      : `${visible.length}/${prompts.length}`;
     if (focusedIndex >= visible.length) focusedIndex = visible.length - 1;
 
     if (prompts.length === 0) {
@@ -1223,6 +1309,14 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
         render();
       };
       tileImg.appendChild(checkbox);
+      if (p.rating) {
+        const ratingBadge = document.createElement("div");
+        ratingBadge.className = "pl-rating-badge";
+        ratingBadge.textContent = `${"★".repeat(p.rating)}`;
+        ratingBadge.title = `${p.rating}/5`;
+        ratingBadge.setAttribute("aria-label", `${p.rating} of 5 stars`);
+        tileImg.appendChild(ratingBadge);
+      }
       tile.appendChild(tileImg);
 
       const nm = document.createElement("div");

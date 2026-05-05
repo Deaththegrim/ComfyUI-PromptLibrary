@@ -797,6 +797,77 @@ class PromptLibraryTests(unittest.TestCase):
         out = self.mod._expand_wildcards("{__wizard__|knight}", self.mod._load(), rng)
         self.assertIn(out, {"wizard", "knight"})
 
+    # ---- Rating + notes ------------------------------------------------
+
+    def test_upsert_stores_rating_and_notes(self):
+        req = FakeRequest(post_data={
+            "name": "Test", "text": "hello", "tags": "",
+            "rating": "4", "notes": "good for night scenes",
+        })
+        body = json.loads(asyncio.run(self.mod.upsert_prompt(req)).body)
+        self.assertEqual(body["rating"], 4)
+        self.assertEqual(body["notes"], "good for night scenes")
+        with self.mod._lock:
+            stored = self.mod._load()
+        self.assertEqual(stored[0]["rating"], 4)
+        self.assertEqual(stored[0]["notes"], "good for night scenes")
+
+    def test_upsert_rating_clamped_to_0_5(self):
+        for raw, want in (("0", 0), ("5", 5), ("9", 5), ("-3", 0)):
+            req = FakeRequest(post_data={"name": f"P-{raw}", "text": "x", "rating": raw})
+            body = json.loads(asyncio.run(self.mod.upsert_prompt(req)).body)
+            self.assertEqual(body["rating"], want, f"input {raw!r} should clamp to {want}")
+
+    def test_upsert_invalid_rating_returns_400(self):
+        req = FakeRequest(post_data={"name": "P", "text": "x", "rating": "abc"})
+        resp = asyncio.run(self.mod.upsert_prompt(req))
+        self.assertEqual(resp.status, 400)
+
+    def test_upsert_thumbnail_failure_rolls_back_new_entry(self):
+        # A bogus image (decodable as bytes but not a valid image) should
+        # fail thumbnail processing AND not leave a half-written entry.
+        req = FakeRequest(post_data={
+            "name": "BadImg", "text": "x",
+            "image": FakeFileField("x.png", b"not actually an image"),
+        })
+        resp = asyncio.run(self.mod.upsert_prompt(req))
+        self.assertEqual(resp.status, 400)
+        with self.mod._lock:
+            self.assertEqual(self.mod._load(), [],
+                             "failed thumbnail upload should not persist a new entry")
+
+    def test_upsert_thumbnail_failure_rolls_back_existing_entry(self):
+        # Create an entry, then try to update it with a corrupt image.
+        first = FakeRequest(post_data={"name": "Good", "text": "v1", "tags": "fantasy"})
+        body = json.loads(asyncio.run(self.mod.upsert_prompt(first)).body)
+        pid = body["id"]
+        bad = FakeRequest(post_data={
+            "id": pid, "name": "ChangedName", "text": "v2", "tags": "scifi",
+            "image": FakeFileField("x.png", b"not actually an image"),
+        })
+        resp = asyncio.run(self.mod.upsert_prompt(bad))
+        self.assertEqual(resp.status, 400)
+        with self.mod._lock:
+            stored = self.mod._load()
+        self.assertEqual(stored[0]["name"], "Good", "name should be rolled back")
+        self.assertEqual(stored[0]["text"], "v1", "text should be rolled back")
+        self.assertEqual(stored[0]["tags"], ["fantasy"], "tags should be rolled back")
+
+    def test_export_import_round_trips_rating_and_notes(self):
+        req = FakeRequest(post_data={
+            "name": "RatedEntry", "text": "x", "rating": "3", "notes": "hi",
+        })
+        asyncio.run(self.mod.upsert_prompt(req))
+        with self.mod._lock:
+            items = self.mod._load()
+        zip_bytes = self.mod._build_export_zip(items, "test")
+        self.mod._save([])
+        self.mod._import_zip(zip_bytes)
+        with self.mod._lock:
+            restored = self.mod._load()
+        self.assertEqual(restored[0]["rating"], 3)
+        self.assertEqual(restored[0]["notes"], "hi")
+
     # ---- PromptLibraryMulti node ---------------------------------------
 
     def test_multi_node_three_outputs(self):

@@ -29,13 +29,25 @@ STORE_PATH = DATA_DIR / "prompts.json"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
+# =============================================================================
+# Configuration — adjust these if your library outgrows the defaults.
+# Wildcard-engine regexes + depth live near the engine itself further down
+# (see _NAMED_REF_RE / _CHOICE_RE / _WILDCARD_MAX_DEPTH).
+# =============================================================================
 _lock = threading.Lock()
+# Thumbnail / image storage
 _ALLOWED_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
-_MAX_IMAGE_BYTES = 16 * 1024 * 1024
+_MAX_IMAGE_BYTES = 16 * 1024 * 1024            # per-thumbnail upload cap
 # Thumbnails are gallery icons, not source art — cap the longest edge so the
 # library + zip exports stay small. Full-res images blow up to >1 MB each.
 _THUMBNAIL_MAX_EDGE = 512
 _THUMBNAIL_JPEG_QUALITY = 85
+# Import / export
+_MAX_IMPORT_ZIP_BYTES = 500 * 1024 * 1024      # protects against zip-bomb-y uploads
+# Per-entry history (revert disclosure in the modal)
+_HISTORY_CAP = 20
+# IDs: short URL-safe slug, used as a filename component for thumbnails so
+# anything outside this charset is rejected to prevent path traversal.
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
@@ -218,9 +230,6 @@ def _touch(item: dict, *, created: bool) -> None:
     if created or "created_at" not in item:
         item.setdefault("created_at", now)
     item["updated_at"] = now
-
-
-_HISTORY_CAP = 20
 
 
 def _push_history(item: dict) -> None:
@@ -651,6 +660,8 @@ async def list_prompts(_request):
             "name": item.get("name", ""),
             "text": item.get("text", ""),
             "tags": item.get("tags", []),
+            "rating": int(item.get("rating", 0) or 0),
+            "notes": item.get("notes", ""),
             "created_at": item.get("created_at", 0),
             "updated_at": item.get("updated_at", 0),
             "order": item.get("order", idx),
@@ -688,6 +699,14 @@ async def upsert_prompt(request):
     name = (reader.get("name") or "").strip()
     text = reader.get("text") or ""
     tags = _parse_tags(reader.get("tags"))
+    notes = (reader.get("notes") or "").strip()
+    rating_raw = reader.get("rating")
+    rating: int | None = None
+    if rating_raw not in (None, ""):
+        try:
+            rating = max(0, min(5, int(rating_raw)))
+        except (ValueError, TypeError):
+            return web.json_response({"error": "rating must be an integer 0-5"}, status=400)
     clear_image = (reader.get("clear_image") or "") == "1"
     image_field = reader.get("image")
 
@@ -696,12 +715,26 @@ async def upsert_prompt(request):
     if pid and not _safe_id(pid):
         return web.json_response({"error": "invalid id"}, status=400)
 
+    # Read + validate image bytes outside the lock so a corrupt upload doesn't
+    # leave the entry partially mutated. If validation passes, we hold the
+    # decoded bytes and write the thumbnail under the lock; on thumbnail-write
+    # failure we roll the entry back to its pre-upsert snapshot.
+    pending_image_bytes: bytes | None = None
+    if image_field is not None and hasattr(image_field, "file") and image_field.filename:
+        ext = os.path.splitext(image_field.filename)[1].lower()
+        if ext not in _ALLOWED_IMAGE_EXT:
+            return web.json_response({"error": f"unsupported image type {ext}"}, status=400)
+        pending_image_bytes = image_field.file.read()
+        if len(pending_image_bytes) > _MAX_IMAGE_BYTES:
+            return web.json_response({"error": "image too large"}, status=400)
+
     with _lock:
         items = _load()
         if not pid:
             pid = _unique_id(_slugify(name), {i.get("id") for i in items})
         existing = next((i for i in items if i.get("id") == pid), None)
         created = existing is None
+        snapshot = None if created else dict(existing)
         if created:
             existing = {"id": pid}
             items.append(existing)
@@ -710,19 +743,25 @@ async def upsert_prompt(request):
         existing["name"] = name
         existing["text"] = text
         existing["tags"] = tags
+        if notes:
+            existing["notes"] = notes
+        elif "notes" in existing:
+            existing["notes"] = ""
+        if rating is not None:
+            existing["rating"] = rating
         _touch(existing, created=created)
 
         if clear_image:
             _delete_image_files(pid)
 
-        if image_field is not None and hasattr(image_field, "file") and image_field.filename:
-            ext = os.path.splitext(image_field.filename)[1].lower()
-            if ext not in _ALLOWED_IMAGE_EXT:
-                return web.json_response({"error": f"unsupported image type {ext}"}, status=400)
-            data = image_field.file.read()
-            if len(data) > _MAX_IMAGE_BYTES:
-                return web.json_response({"error": "image too large"}, status=400)
-            if _save_thumbnail_bytes(pid, data) is None:
+        if pending_image_bytes is not None:
+            if _save_thumbnail_bytes(pid, pending_image_bytes) is None:
+                # Roll back the entry mutation so we don't half-commit.
+                if created:
+                    items.remove(existing)
+                else:
+                    existing.clear()
+                    existing.update(snapshot)
                 return web.json_response({"error": "failed to process image"}, status=400)
 
         _save(items)
@@ -733,6 +772,8 @@ async def upsert_prompt(request):
         "name": name,
         "text": text,
         "tags": tags,
+        "rating": existing.get("rating", 0),
+        "notes": existing.get("notes", ""),
         "has_image": _image_path_for(pid) is not None,
     })
 
@@ -845,9 +886,6 @@ async def revert_prompt(request):
         "text": item["text"],
         "tags": item["tags"],
     })
-
-
-_MAX_IMPORT_ZIP_BYTES = 500 * 1024 * 1024
 
 
 def _raise_aiohttp_client_max_size():
@@ -973,6 +1011,16 @@ def _import_zip(zip_bytes: bytes) -> tuple[int, int, list[str]]:
                 existing["name"] = name
                 existing["text"] = text_val
                 existing["tags"] = tags
+                # Optional editorial fields — only copy if present in the zip,
+                # so re-importing a v1 export (no rating/notes) doesn't wipe
+                # newer values on an existing entry.
+                if "rating" in raw:
+                    try:
+                        existing["rating"] = max(0, min(5, int(raw.get("rating") or 0)))
+                    except (ValueError, TypeError):
+                        pass
+                if "notes" in raw:
+                    existing["notes"] = str(raw.get("notes") or "")
                 if history is not None and not created:
                     # Merge histories (incoming first, then existing); cap.
                     merged = list(history) + list(existing.get("history") or [])
@@ -1210,7 +1258,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.15.0"
+__version__ = "0.16.0"
 
 
 def _autobackup_on_version_change() -> None:
