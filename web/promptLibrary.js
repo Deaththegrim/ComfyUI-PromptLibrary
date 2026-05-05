@@ -2050,12 +2050,57 @@ function installWebsocketBridge() {
   });
 }
 
+// Per-node-group color theming. Wraps onNodeCreated so the node gets its
+// title-bar (color) + body (bgcolor) tinted on first creation. Works
+// alongside the existing DOM-widget wrappers — when both wrap onNodeCreated,
+// each wrapper calls the inner one and chains cleanly.
+const NODE_COLORS = {
+  // Library / data nodes — deep purple
+  "PromptLibrary":         { color: "#6b4a8c", bgcolor: "#3d2752" },
+  "PromptLibraryMulti":    { color: "#6b4a8c", bgcolor: "#3d2752" },
+  "PromptLibrarySave":     { color: "#6b4a8c", bgcolor: "#3d2752" },
+  "PromptLibraryRandom":   { color: "#6b4a8c", bgcolor: "#3d2752" },
+  "PromptLibraryWildcard": { color: "#6b4a8c", bgcolor: "#3d2752" },
+  // Comic authoring — warm amber / burnt orange
+  "PromptLibraryScene":      { color: "#b07a3a", bgcolor: "#5d3e1c" },
+  "PromptLibraryBackground": { color: "#b07a3a", bgcolor: "#5d3e1c" },
+  "PromptLibraryComicFrame": { color: "#b07a3a", bgcolor: "#5d3e1c" },
+  // Sampling — teal / steel blue
+  "GrimmRibbitySamplerSDXL":    { color: "#3a7c8c", bgcolor: "#1f3d52" },
+  "GrimmRibbityHiResFixScript": { color: "#3a7c8c", bgcolor: "#1f3d52" },
+  "GrimmRibbityPackSDXLTuple":  { color: "#3a7c8c", bgcolor: "#1f3d52" },
+  // Output / save — forest green
+  "GrimmRibbityCivitaiSave": { color: "#3a8c5b", bgcolor: "#1f4d34" },
+};
+function applyNodeColors(nodeType, nodeData) {
+  const colors = NODE_COLORS[nodeData.name];
+  if (!colors) return;
+  const orig = nodeType.prototype.onNodeCreated;
+  nodeType.prototype.onNodeCreated = function () {
+    const r = orig?.apply(this, arguments);
+    // Don't overwrite a color the user explicitly set — respect their override
+    // when reopening a workflow they recoloured manually via right-click.
+    if (!this.color || this.color === LiteGraph?.NODE_DEFAULT_COLOR) {
+      this.color = colors.color;
+    }
+    if (!this.bgcolor || this.bgcolor === LiteGraph?.NODE_DEFAULT_BGCOLOR) {
+      this.bgcolor = colors.bgcolor;
+    }
+    return r;
+  };
+}
+
 app.registerExtension({
   name: "comfy.PromptLibrary",
   async setup() {
     installWebsocketBridge();
   },
   async beforeRegisterNodeDef(nodeType, nodeData) {
+    // Apply colors to every node we own, regardless of which branch below
+    // handles its widget setup. Safe to call before the dispatch — the
+    // wrapped onNodeCreated chains correctly with the JS-side widget builders.
+    applyNodeColors(nodeType, nodeData);
+
     if (nodeData.name === MULTI_NODE_NAME) {
       injectStyle();
       registerMultiNode(nodeType);

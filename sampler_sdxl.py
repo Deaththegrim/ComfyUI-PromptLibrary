@@ -562,7 +562,19 @@ class GrimmRibbitySamplerSDXL:
 
     def sample(self, sdxl_tuple, noise_seed, steps, cfg, sampler_name, scheduler,
                latent_image, start_at_step, end_at_step, vae_decode,
-               script=None, optional_vae=None):
+               script=None, optional_vae=None, **legacy_kwargs):
+        # Backward-compat shim: workflows saved against v0.21.0 wire ports
+        # named differently (e.g. vae_override). Drain them here so the
+        # workflow keeps loading instead of crashing on an unexpected kwarg.
+        if optional_vae is None and legacy_kwargs.get("vae_override") is not None:
+            optional_vae = legacy_kwargs.pop("vae_override")
+        for stale in ("ckpt_name", "positive_g", "positive_l", "negative",
+                       "width", "height", "denoise", "batch_size", "vae_override"):
+            legacy_kwargs.pop(stale, None)
+        if legacy_kwargs:
+            print(f"[GrimmRibbitySamplerSDXL] ignoring unknown legacy inputs: "
+                  f"{list(legacy_kwargs.keys())}")
+
         if not isinstance(sdxl_tuple, tuple) or len(sdxl_tuple) < 4:
             raise ValueError("SDXL Sampler: sdxl_tuple must be an 8-tuple from Pack SDXL Tuple "
                              "or efficiency-nodes' SDXL_TUPLE.")
