@@ -976,6 +976,13 @@ function buildGallery(node, idWidget) {
     }
     const mode = SORT_MODES[sortSelect.value] || SORT_MODES.name_asc;
     visible = [...visible].sort(mode.cmp);
+    // Lift selected tiles to the top so the user can see what's currently
+    // checked without scrolling. Stable within each group so the sort order
+    // is preserved; deselecting drops the tile back to its natural spot.
+    // Skipped in Manual mode because drag-reorder relies on the natural order.
+    if (sortSelect.value !== "manual" && checkedIds.size) {
+      visible.sort((a, b) => Number(checkedIds.has(b.id)) - Number(checkedIds.has(a.id)));
+    }
     lastVisible = visible;
     // Drop checked ids that no longer exist in the library; keep ones that
     // are merely filtered out so multi-select persists across filter changes.
