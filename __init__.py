@@ -1751,7 +1751,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.21.0"
+__version__ = "0.22.0"
 
 
 def _autobackup_on_version_change() -> None:
@@ -1798,14 +1798,20 @@ except Exception as _e:
 # Skipped gracefully under unittest / standalone tooling so the rest of the
 # package keeps working when ComfyUI isn't on the path.
 try:
-    from .sampler_sdxl import GrimmRibbitySamplerSDXL, GrimmRibbityHiResFixScript
+    from .sampler_sdxl import (
+        GrimmRibbitySamplerSDXL,
+        GrimmRibbityHiResFixScript,
+        GrimmRibbityPackSDXLTuple,
+    )
     _sampler_node = {
         "GrimmRibbitySamplerSDXL": GrimmRibbitySamplerSDXL,
         "GrimmRibbityHiResFixScript": GrimmRibbityHiResFixScript,
+        "GrimmRibbityPackSDXLTuple": GrimmRibbityPackSDXLTuple,
     }
     _sampler_label = {
         "GrimmRibbitySamplerSDXL": "GrimmRibbity — SDXL Sampler",
         "GrimmRibbityHiResFixScript": "GrimmRibbity — HiResFix Script",
+        "GrimmRibbityPackSDXLTuple": "GrimmRibbity — Pack SDXL Tuple",
     }
 except Exception as _e:
     print(f"[PromptLibrary] SDXL sampler unavailable: {_e}")
