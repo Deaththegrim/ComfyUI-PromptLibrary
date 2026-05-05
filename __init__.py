@@ -825,67 +825,172 @@ class PromptLibraryScene:
 
 
 _BG_NONE = "(none)"
-# Curated background presets, grouped by setting and prefixed with the
-# group name so the dropdown stays scannable when expanded. Each value
-# becomes the literal prompt text written into the background.
+# Visual divider character. Entries that start with this are treated as
+# group headers in the dropdown — selecting one resolves to "(none)" so
+# the prompt stays clean even if the user clicks a header by accident.
+_BG_DIVIDER_CHAR = "─"
+def _bg_divider(label: str) -> str:
+    return f"───── {label} ─────"
+
+# Curated background presets, grouped by setting with visual divider rows
+# between groups so the dropdown is scannable. Each prompt entry is
+# prefixed with the group name so type-to-filter in the COMBO popup
+# narrows nicely. Add new entries inside the matching group block.
 _BG_PRESETS = [_BG_NONE,
-    # Urban
-    "city: rainy Tokyo street at night, neon reflections on wet asphalt",
-    "city: New York intersection at dusk, yellow taxis, steam vents",
-    "city: quiet European cobblestone alley with cafe tables",
-    "city: rooftop overlooking skyscrapers at golden hour",
-    "city: subway platform, fluorescent lights, empty",
-    "city: parking garage, harsh overhead lights, concrete pillars",
-    "city: street market, fabric awnings, bustling crowd",
-    "city: abandoned alleyway, dumpsters, graffiti on brick walls",
-    "city: fire escape, industrial metal grating, brick wall",
-    # Indoor / domestic
-    "home: cozy bedroom with string lights and an unmade bed",
-    "home: modern kitchen, marble counter, morning sunlight",
-    "home: suburban living room, beige couch, family photos",
-    "home: messy bathroom, bottles on the counter, fogged mirror",
-    "home: cluttered attic, dust motes, single hanging bulb",
-    "home: dim basement, exposed pipes, washing machine",
-    # Workspaces
-    "office: cubicle with monitors, papers stacked, ergonomic chair",
-    "office: open-plan workspace, hot-desk, whiteboards",
-    "office: corner office with floor-to-ceiling windows, city view",
-    "office: server room, blue-tinted lights, cabling overhead",
-    # School / institutional
-    "school: empty classroom, rows of desks, late afternoon",
-    "school: high school hallway, lockers, fluorescent lights",
-    "school: gymnasium, wood floor, basketball hoops",
-    "school: library, tall shelves, reading nooks, warm lamps",
-    "hospital: corridor with gurneys, sterile blue-white lighting",
-    "hospital: private room, IV stand, window with daylight",
-    "courtroom: dark wood paneling, judge's bench, gallery seats",
-    # Nature / outdoor
-    "nature: forest clearing with shafts of sunlight",
-    "nature: mountain peak above the clouds, snow patches",
-    "nature: ocean cliff at sunset, waves below",
-    "nature: riverbank with reeds and skipping stones",
-    "nature: autumn forest, orange leaves carpeting the ground",
-    "nature: snowy field at dusk, single set of footprints",
-    "nature: beach at sunset, low tide, footprints in sand",
-    "nature: desert dunes at golden hour, ripples in sand",
-    "nature: dense jungle, vines, dappled green light",
-    "nature: cave entrance, mossy rocks, light from outside",
-    # Industrial / decay
-    "industrial: abandoned warehouse, broken windows, crates",
-    "industrial: factory floor, machinery, sodium vapor lamps",
-    "industrial: shipping yard, stacked containers, cranes",
-    "industrial: derelict subway tunnel, rusted tracks, dripping water",
-    "industrial: construction site, scaffolding, exposed rebar",
-    # Fantasy / sci-fi
-    "fantasy: medieval castle hall, banners, torches in sconces",
-    "fantasy: wizard's tower study, scrolls, alchemical glassware",
-    "fantasy: tavern interior, fireplace, wooden tables, mugs",
-    "fantasy: enchanted forest, glowing mushrooms, hanging lanterns",
-    "scifi: spaceship bridge, holographic displays, viewport stars",
-    "scifi: alien planet surface, twin suns, purple sand",
-    "scifi: cyberpunk neon street, holographic billboards, rain",
-    "scifi: post-apocalyptic ruins, overgrown skyscrapers, ash sky",
-    "scifi: clean white laboratory, glass partitions, machinery"]
+    # NOTE on writing presets: each entry should pin down the LOCATION'S
+    # PERSISTENT IDENTITY — wall material/color, floor, ceiling, fixed
+    # furniture, fixtures, signage, decor — not time-of-day, weather, or
+    # mood (the Scene node handles those). The more specific the anchor,
+    # the more consistent the renders across panels of the same comic.
+    # ── city / urban ──
+    _bg_divider("city / urban"),
+    "city: Tokyo street, narrow road wet with rain, neon kanji signs in pink and blue stacked vertically on buildings, vending machines along the sidewalk, tangled overhead power lines, asphalt reflecting the signs",
+    "city: New York intersection, wide crosswalks, yellow taxi cabs, steam rising from manhole covers, brownstone facades on the corners, traffic lights on cantilever arms, pedestrian don't-walk hand glowing red",
+    "city: European cobblestone alley, narrow stone-paved street between three-story plaster buildings with wooden shutters, wrought-iron balconies, small cafe tables and wicker chairs along one wall, hanging plants",
+    "city: rooftop, gravel-covered flat roof, low brick parapet wall, HVAC units and satellite dishes, surrounded by taller skyscrapers with glass curtain walls",
+    "city: subway platform, white-tiled walls with a colored line stripe, yellow safety strip along the edge, steel I-beam pillars, hanging fluorescent fixtures, illuminated route sign",
+    "city: multi-level parking garage, low concrete ceiling with exposed sprinkler pipes, painted yellow line markings on the floor, square concrete support pillars, ramps with chevron arrows",
+    "city: outdoor street market, fabric awnings in bright colors stretched between metal poles, wooden produce crates piled with goods, hand-painted price signs, brick storefronts behind",
+    "city: abandoned alleyway, narrow gap between two brick buildings, dumpsters with lids askew, fire escape ladders bolted to the walls, graffiti tags layered on the bricks, trash and broken pallets on the ground",
+    "city: fire escape, black-painted steel grating platform bolted to a red-brick tenement, vertical ladder leading up, sash windows with peeling paint, drying laundry on a line",
+    "city: gas station forecourt, flat canopy with fluorescent strip lighting, four fuel pumps with dangling hoses, painted lane lines on the concrete, illuminated brand sign on a tall pylon",
+    "city: 24-hour convenience store interior, six aisles of shelving stocked with snacks, glass-doored coolers along the back wall, magazine rack near the entrance, fluorescent ceiling tiles, vinyl floor",
+    "city: empty bus stop, glass-walled shelter with a metal frame, single steel-and-wood bench inside, route map poster in a backlit frame, painted curb extension",
+    "city: parking lot, asphalt with painted white parking lines, scattered cars between the lines, tall sodium vapor lamp on a pole, low concrete bumper blocks, chain-link fence at the back",
+    "city: pharmacy aisle, white linoleum floor, tall metal shelving on both sides stocked with boxed medicines, overhead fluorescent panels, category signs hanging from the ceiling, end-cap displays",
+    # ── home / interior ──
+    _bg_divider("home / interior"),
+    "home: cozy bedroom, queen bed with rumpled white duvet and patterned pillows, warm string lights draped along the headboard, hardwood floor with a sheepskin rug, IKEA-style nightstand with a stack of paperbacks, framed art prints on the wall",
+    "home: master bedroom, four-poster wood bed with cream linens, plush wool rug centered on the floor, two nightstands flanking the bed, tall window with sheer curtains, dresser with a tilting mirror",
+    "home: kid's bedroom, twin bed with cartoon-print bedspread, plastic toy bins stacked in the corner, glow-in-the-dark star stickers on the ceiling, small desk with crayons, posters on the walls",
+    "home: teen's bedroom, unmade bed against one wall, band posters and movie posters covering the walls, a desk with a gaming monitor and RGB keyboard, scattered clothes on the floor, fairy lights",
+    "home: modern kitchen, white shaker cabinets, white marble countertop with grey veining, stainless steel appliances, herringbone tile backsplash, central island with three stools, pendant lights overhead",
+    "home: rustic farmhouse kitchen, exposed wood ceiling beams, butcher-block counters, copper pots hanging from a ceiling rack, white apron-front sink under a window, patterned ceramic tile floor",
+    "home: suburban living room, beige microfiber couch and matching loveseat, glass coffee table on a neutral rug, beige walls with framed family photos, large flat-screen TV on a console, ceiling fan",
+    "home: minimalist living room, low-profile grey couch, single tall houseplant in a ceramic pot, blank white walls, light oak floor, low matte-black coffee table, no clutter",
+    "home: dining room, polished walnut dining table with eight upholstered chairs, brass chandelier with candle-shaped bulbs, sideboard with china displayed, wainscoted walls, oriental area rug",
+    "home: study, two leather wingback chairs facing a small fireplace with a wood mantel, built-in dark-wood bookshelves filled with hardcovers, oriental rug, brass desk lamp",
+    "home: home library, floor-to-ceiling dark wood bookshelves filled with hardcovers, rolling library ladder on a brass rail, leather armchair with a side table and a green banker's lamp, parquet floor",
+    "home: foyer, dark wood floor with a small entry rug, coat rack with hooks, umbrella stand by the door, console table with a mirror above it, framed art on the wall",
+    "home: walk-in closet, two facing walls of cedar shelves and hanging rods filled with clothing, central island with drawers, full-length mirror at one end, soft recessed lights",
+    "home: laundry room, white front-loading washer and dryer side by side under a counter, open shelving above with detergent and folded towels, sink basin, vinyl tile floor",
+    "home: pantry, narrow walk-in space with white shelves on three walls, glass jars of bulk goods labeled by hand, rows of canned goods, single bare bulb",
+    "home: messy bathroom, white subway tile walls, beige tile floor, plastic shower curtain partly drawn, vanity counter cluttered with toothbrushes and lotion bottles, fogged-up mirror",
+    "home: modern bathroom, freestanding white soaking tub, large-format marble tiles on floor and walls, glass-walled walk-in shower, floating vanity with vessel sink, brushed nickel fixtures",
+    "home: cluttered attic, exposed wood rafters and pink fiberglass insulation, dusty cardboard boxes stacked unevenly, an old wardrobe and rocking chair under a single hanging bulb, wood plank floor",
+    "home: dim basement, exposed concrete walls, copper and PVC pipes running across the ceiling, washing machine and dryer along one wall, single utility sink, painted concrete floor",
+    "home: garage interior, polished concrete floor with oil stains, pegboard wall with hand tools hanging in outlines, metal workbench, rolling toolbox, single-bay sectional door",
+    "home: basement workshop, plywood-topped workbench against a wall, table saw in the center, pegboard with hand tools, sawdust drifted in the corners, fluorescent shop light overhead",
+    "home: backyard patio, weathered cedar deck with a string of bulb lights overhead, weathered teak outdoor furniture with cream cushions, potted plants along the railing, lawn beyond",
+    "home: front porch, painted-wood porch with white railing, two wood rocking chairs, hanging fern, screen door with a wood frame, mailbox by the door",
+    "home: small balcony, narrow tile-floored balcony with a wrought-iron railing, two potted plants and a folding bistro table, view of city rooftops beyond",
+    "home: greenhouse, glass walls and pitched glass roof, condensation streaking the panes, wooden potting bench, rows of seedling trays under grow lights, hose coiled on the floor",
+    "home: sunroom, wall of tall windows on two sides, white wicker chairs with cream cushions, ceramic-tile floor, several large potted palms, ceiling fan",
+    "home: spiral staircase, wrought-iron staircase coiling down, hardwood treads, banister with twisted spindles, wall-mounted sconce light",
+    # ── hallways / corridors ──
+    _bg_divider("hallways / corridors"),
+    "hallway: residential hallway, cream walls with chair-rail trim, dark wood baseboards, three white panel doors on each side with brass knobs, beige patterned runner rug down the center, framed family photos in a row, single ceiling sconce",
+    "hallway: hotel corridor, identical numbered doors of dark wood every few feet, patterned red-and-gold carpet, wall sconces between doors, recessed ceiling lights, exit sign at the end",
+    "hallway: mansion hallway, dark wood paneling waist-high with patterned wallpaper above, marble-tile floor with a long oriental runner, gilt-framed oil portraits on the walls, brass wall sconces, coffered ceiling",
+    "hallway: modern apartment hallway, white painted walls, light grey carpet, recessed LED ceiling lights every few feet, identical white doors with chrome lever handles, no decoration",
+    "hallway: victorian hallway, busy floral wallpaper, dark stained-wood floorboards with a runner rug, gas-style sconces converted to electric, a stained-glass window at the far end, dado rail",
+    "hallway: school hallway, light-blue lockers in continuous rows along both walls, beige speckled linoleum tile floor, fluorescent ceiling fixtures, motivational posters taped to lockers, water fountain",
+    "hallway: hospital corridor, white tiled floor with a colored guideline stripe, pale-blue painted walls, steel handrails along both sides, recessed fluorescent lighting, gurneys parked against one wall, signage above doorways",
+    "hallway: office building corridor, beige low-pile carpet, beige walls with rubber baseboards, white drop-ceiling tiles with recessed fluorescent panels, wood-veneer doors with placards, water cooler",
+    "hallway: prison corridor, barred cell doors on both sides, painted concrete floor with a yellow safety stripe, harsh fluorescent strip lights, painted cinder-block walls, surveillance cameras at intervals",
+    "hallway: dungeon stone corridor, mortared stone-block walls and arched ceiling, uneven flagstone floor, iron-banded wood doors set in alcoves, lit torches in iron sconces, damp puddles",
+    "hallway: spaceship corridor, white-and-grey wall paneling with riveted seams, blue LED accent strips along the floor, oval bulkhead doors, ribbed ceiling with embedded utility lines",
+    "hallway: arcade corridor, dark carpet with neon-pattern, walls of game cabinet marquees glowing in pink and cyan, blacklight strips along the ceiling, hanging neon signage",
+    # ── workspaces / studios ──
+    _bg_divider("workspaces / studios"),
+    "office: corporate cubicle, beige half-height fabric partitions, L-shaped desk with two computer monitors, ergonomic mesh chair, papers and sticky notes pinned to the partition, photo and small plant on the desk",
+    "office: open-plan workspace, long shared bench-style desks with monitors, mesh task chairs, glass-walled meeting rooms in the background, whiteboards on wheels, polished concrete floor, exposed ceiling ducts",
+    "office: corner office, floor-to-ceiling windows on two walls overlooking a city skyline, executive desk in dark wood, two visitor chairs, area rug, leather couch against the inner wall",
+    "office: server room, two rows of black server racks with green and red status LEDs, raised perforated floor tiles, dropped ceiling with cable trays, blue accent lighting, glass entry door",
+    "studio: photo studio, white seamless paper backdrop curving down to the floor, two softboxes on stands flanking the set, polished concrete floor with cable-management tape, c-stands and reflectors",
+    "studio: recording studio, large mixing console with hundreds of faders, three large studio monitors at the front, acoustic foam panels covering the walls in geometric pattern, glass window into the live room",
+    "studio: dance studio, full-wall mirrors on one side, ballet barre running along the mirror, sprung wood floor, exposed ductwork ceiling, large casement windows on the opposite wall",
+    "studio: art studio, two wooden easels with canvases in progress, paint-splattered concrete floor, jars of brushes and tubes of oil paint on a table, north-facing windows, drop cloths",
+    "studio: pottery studio, two electric pottery wheels with metal splash pans, shelves of unfinished bowls in greenware, kiln in the back corner, bags of clay, clay-dusted concrete floor",
+    "workshop: machinist's shop, metal lathe and mill in the foreground, steel chips piled around the bases, tool chests with many small drawers, fluorescent strip lights, oil-stained concrete floor",
+    "workshop: woodworking shop, large workbench with a vise, table saw in the center, pegboard wall with chisels and hand planes hanging in outlines, sawdust on the floor, fluorescent shop lights",
+    # ── public / commercial ──
+    _bg_divider("public / commercial"),
+    "cafe: cozy coffee shop interior, exposed brick wall on one side, mismatched wooden tables and chairs, hanging Edison-bulb pendant lights, chalkboard menu behind the counter, espresso machine on the bar",
+    "cafe: bustling chain cafe, beige tile floor, light-wood communal tables, glass display case of pastries on the counter, espresso machine with steam rising, baristas in green aprons",
+    "restaurant: dim romantic restaurant, dark wood paneling, white linen tablecloths, single tea-light candle on each table, framed art on the walls, dim pendant lights overhead, wine rack along the wall",
+    "restaurant: fast-food joint, fluorescent panel ceiling lights, plastic-laminate tables and bolted-down stools, illuminated menu board behind the counter, tile floor, branded signage in red and yellow",
+    "bar: dive bar, neon beer signs glowing on the wall, dark wood bar with vinyl-cushioned stools, pool table in the back room with a hanging billiard light, jukebox by the door, sticky linoleum floor",
+    "bar: speakeasy, brass-and-leather barstools, marble bar top, backlit shelves of amber-bottled liquor, tufted leather booths along the walls, art-deco geometric carpet, vintage sconces",
+    "nightclub: dance floor, illuminated multi-color floor panels, fog machine haze, laser strobes overhead, raised DJ booth with mixers, packed crowd silhouettes, mirrored bar in the background",
+    "bookstore: tall floor-to-ceiling dark-wood shelves stuffed with books, narrow aisle, rolling library ladder, reading nook with a worn leather armchair and floor lamp, woven rug",
+    "boutique: high-end clothing store, polished concrete floor, individual garments hung on chrome rails with space between, large round mirrors, single-bulb pendant lights, white walls, marble counter",
+    "museum: marble exhibition hall, polished marble floor with inlaid pattern, classical sculptures on plinths, vaulted ceiling with skylights, info plaques on the walls, columned doorway",
+    "gallery: minimalist white art gallery, white walls and polished concrete floor, large framed canvases at eye level with track-lit spotlights, single white pedestal with a sculpture, no other furniture",
+    "theater: empty theater interior, rows of red-velvet folding seats descending toward a stage, heavy red-velvet curtain drawn closed across the proscenium, gilt molding around the stage, low ambient lighting",
+    "arcade: arcade hall, rows of game cabinets with glowing marquees, dark patterned carpet, blacklight strips along the ceiling, change machine on the wall, prize counter at the back",
+    "salon: hair salon, four styling chairs facing wall-mounted mirrors with light bars, washing station with reclining chair and bowl in the back, white tile floor, product shelves, hairdryers in holders",
+    "barbershop: vintage barbershop, two leather-and-chrome barber chairs facing wall mirrors, black-and-white checkered tile floor, rotating barber pole visible through the front window, framed photos",
+    "supermarket: long fluorescent-lit aisles, polished beige tile floor, metal shelving stocked floor-to-ceiling, suspended aisle-number signs, end-cap promotional displays, drop-ceiling tiles",
+    # ── institutional ──
+    _bg_divider("institutional"),
+    "school: empty classroom, rows of single-pupil wooden desks with attached metal-frame chairs, large green chalkboard along one wall, teacher's desk at the front, pull-down world map, motivational posters, fluorescent ceiling lights, linoleum floor",
+    "school: gymnasium, polished hardwood floor with painted basketball court lines, two retracted basketball hoops on opposite walls, bleachers on one side, exposed steel-truss ceiling, fluorescent shop lights",
+    "school: library, rows of low wooden bookshelves, large rectangular tables with green-shaded reading lamps, card catalog cabinet, librarian's desk with a computer, ceiling fans, beige carpet",
+    "school: cafeteria, long folding tables with attached plastic stools, beige speckled linoleum floor, lunch counter with sneeze guard along one wall, fluorescent ceiling, signs for daily specials",
+    "hospital: corridor, white-tile floor with a colored stripe along one wall, pale-blue painted walls, steel handrails along both sides, gurneys parked against the wall, signage above each doorway, recessed fluorescent lights",
+    "hospital: private patient room, single hospital bed with adjustable rails and IV pole beside it, vinyl-floor, beige walls, vinyl-upholstered visitor chair, wall-mounted television on a swing arm, blinds on the window",
+    "hospital: operating theater, central operating table under a multi-armed surgical light, sterile blue drapes, anesthesia cart and monitors on stands, glass-fronted supply cabinets, polished tile floor",
+    "hospital: emergency room bay, single gurney behind a privacy curtain on a track, monitor cart, IV pole, suction equipment on the wall, biohazard bin, vinyl floor, glass doors at the entry",
+    "courtroom: dark walnut paneling, judge's bench raised on a platform with the seal mounted behind, jury box of twelve seats on one side, two counsel tables facing the bench, gallery seating for spectators, wood gavel on the bench",
+    "police: interrogation room, bare painted-cinder-block walls, single rectangular metal table bolted to the floor with two metal chairs, two-way mirror on one wall, fluorescent fixture overhead, polished concrete floor",
+    "police: precinct bullpen, rows of cluttered detective desks with monitors and stacks of files, corkboards with photos and red-string connections, water cooler, holding cell visible at the back, fluorescent ceiling",
+    "therapist: therapy office, leather chesterfield couch along one wall, leather wingback chair facing it, low coffee table with tissues and a clock, bookshelves filled with hardcover psychology books, oriental rug, soft floor lamp",
+    "prison: cell, painted cinder-block walls, single bunk bolted to the wall with a thin mattress, stainless-steel sink-toilet combo unit, small barred window high on the back wall, polished concrete floor, hinged steel door",
+    "morgue: cold storage room, wall of stainless-steel body-storage drawers, two stainless-steel autopsy tables in the center with overhead lights, tile floor with central drains, hanging surgical lights",
+    # ── nature / outdoor ──
+    _bg_divider("nature / outdoor"),
+    "nature: forest clearing, ring of tall pine trees surrounding a circular grassy clearing, scattered fallen logs, mossy rocks, a stream visible through the trees on one side, ferns at the edge",
+    "nature: mountain peak, rocky summit with patches of snow in the crevices, sweeping view of lower peaks below the cloud line, weathered stone cairn at the top, alpine grasses",
+    "nature: ocean cliff, sheer rock cliff edge with grass at the top, white-capped waves crashing on rocks far below, seabirds wheeling, distant horizon line",
+    "nature: riverbank, slow-moving river bordered by reeds and tall grasses, smooth round skipping stones at the water's edge, gravel bank, willow trees overhanging from the far side",
+    "nature: autumn forest, deciduous trees with orange and red leaves, thick carpet of fallen leaves on the ground, narrow dirt trail winding through, fallen log covered in moss",
+    "nature: snowy field, flat expanse of pristine snow with a single trail of footprints crossing it, low rolling hills in the distance, bare-branched trees against the sky, no other features",
+    "nature: beach, broad expanse of fine sand at low tide showing ripple patterns and shells, tide line of seaweed and driftwood, calm water, low-tide dunes with sea grass",
+    "nature: desert dunes, rolling expanse of pale sand dunes with wind-rippled surfaces, sharp ridge lines, no vegetation in sight, deep blue sky",
+    "nature: dense jungle, thick tropical undergrowth, hanging vines and lianas, broad-leaved palms, dappled green light filtering through the canopy, exposed roots, mossy rocks",
+    "nature: cave entrance, rocky cave mouth seen from inside, daylight streaming in framed by mossy boulders and overgrown ferns, small puddle reflecting the entrance, dripping stalactites near the opening",
+    "nature: alpine meadow, rolling grassy slope dotted with wildflowers in patches of yellow and purple, low scattered rocks, mountain ridge in the distance, single twisted tree",
+    "nature: pine forest, evenly spaced tall pine trunks rising into a dense canopy, pine-needle carpet on the floor, mist hanging between the trunks, narrow shafts of light",
+    # ── industrial / decay ──
+    _bg_divider("industrial / decay"),
+    "industrial: abandoned warehouse, vast open floor space, broken multi-pane factory windows high on the walls letting in shafts of light, scattered wooden crates and pallets, exposed steel-truss ceiling, oil-stained concrete floor, weeds growing in the cracks",
+    "industrial: factory floor, conveyor belts running between heavy stamping machines, exposed industrial ductwork overhead, painted yellow safety lines on the polished concrete floor, sodium-vapor lamps, control panels along one wall",
+    "industrial: shipping yard, stacked rows of color-faded shipping containers, gantry cranes overhead, asphalt service roads between the rows, container numbers stenciled in white",
+    "industrial: derelict subway tunnel, twin rusted steel rails on a debris-strewn track bed, water dripping from cracks in the curved tunnel wall, third rail visible, single working bulb in a wire cage casting weak light",
+    "industrial: construction site, partial steel skeleton of a high-rise visible in the background, scaffolding wrapped in green safety mesh, exposed rebar, stacked construction materials, dirt and gravel ground",
+    "industrial: power plant turbine hall, massive cylindrical turbines along the floor, gantry crane on tracks overhead, control catwalks running along the walls, polished concrete floor, instrument panels",
+    "industrial: junkyard, mountains of stacked car wrecks and crumpled body panels, dirt access roads weaving between, chain-link perimeter fence with barbed wire, single excavator with a magnet attachment",
+    # ── fantasy ──
+    _bg_divider("fantasy"),
+    "fantasy: medieval castle great hall, soaring vaulted stone ceiling with wooden beams, banners hanging from the rafters, two long trestle tables down the length, large stone fireplace at one end with a fire burning, iron sconces with torches",
+    "fantasy: wizard's tower study, circular stone room, wraparound bookshelves filled with leather tomes, a wooden desk strewn with rolled scrolls, alchemical glassware on a side table, narrow arrow-slit windows, an astrolabe in the corner",
+    "fantasy: tavern interior, low-beamed wood ceiling, long rectangular wooden bar along one wall with mugs hanging above, scattered round wooden tables and stools, large stone fireplace with a fire crackling, plank floor with rushes",
+    "fantasy: enchanted forest, ancient gnarled trees with thick trunks, carpet of glowing blue mushrooms at their bases, hanging paper lanterns swinging on cords between branches, mossy rocks, a stream running through",
+    "fantasy: throne room, two rows of stone columns flanking a central aisle, raised stone dais at the far end with an ornate stone throne, banners hanging behind the throne, polished flagstone floor, vaulted ceiling",
+    "fantasy: dungeon cell, small stone-block room, iron rings set in the walls with hanging chains, a single sconce holding a torch, rusted iron-banded wood door with a barred slot, straw scattered on the flagstone floor",
+    "fantasy: blacksmith's forge, central brick forge with glowing coals, cast-iron anvil mounted on a tree-trunk stump beside it, wall-mounted rack of hammers and tongs, water-cooling barrel, bellows on a chain",
+    "fantasy: alchemist's laboratory, long wooden workbench covered with bubbling flasks and beakers connected by glass tubes, dried herbs hanging in bunches from the ceiling, mortar and pestle, leather-bound book open on a stand",
+    # ── sci-fi ──
+    _bg_divider("sci-fi"),
+    "scifi: spaceship bridge, captain's chair on a raised platform in the center, semicircle of crew workstations with curved holographic displays, large viewport at the front showing stars and a planet's edge, blue accent lighting along the floor edges",
+    "scifi: alien planet surface, expanse of purple sand under a violet sky, twin suns low on the horizon, jagged rock formations in unusual angular shapes, scattered crystalline outcroppings",
+    "scifi: cyberpunk neon street, narrow rain-slick city street, towering buildings with multi-story holographic billboards in pink and cyan, hanging power lines, food stalls with backlit signs along one side, puddles reflecting the lights",
+    "scifi: post-apocalyptic ruins, half-collapsed skyscraper skeletons overgrown with vines, vehicles overturned and rusted on a cracked highway, ash-coated ground, dust haze, dead trees",
+    "scifi: clean white laboratory, gleaming white floor and walls, glass partition walls between workstations, chrome equipment racks holding scientific instruments, recessed LED lighting",
+    "scifi: space station observation deck, curved floor-to-ceiling viewport along one wall showing a planet rotating below, low metal benches facing the view, indirect blue lighting, polished metal floor",
+    "scifi: cryo-chamber room, two facing rows of vertical cryo-pods with frosted glass fronts, internal blue glow visible through the frost, corrugated metal floor, control consoles between the pod rows",
+    "scifi: mech bay, towering humanoid mech standing on a service platform, gantry catwalks at multiple heights for technicians, hanging tool arms on cables, pooled hydraulic fluid on the floor, harsh work-light beams"]
 
 
 class PromptLibraryBackground:
@@ -928,8 +1033,11 @@ class PromptLibraryBackground:
 
     def build(self, preset, custom, separator=", "):
         parts: list[str] = []
-        if preset and preset != _BG_NONE:
-            parts.append(str(preset).strip())
+        # Skip the (none) sentinel and any visual divider row the user picked
+        # by accident — divider entries start with the divider character.
+        preset_str = (str(preset) if preset is not None else "").strip()
+        if preset_str and preset_str != _BG_NONE and not preset_str.startswith(_BG_DIVIDER_CHAR):
+            parts.append(preset_str)
         custom = (custom or "").strip()
         if custom:
             parts.append(custom)
@@ -1643,7 +1751,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.20.1"
+__version__ = "0.20.2"
 
 
 def _autobackup_on_version_change() -> None:

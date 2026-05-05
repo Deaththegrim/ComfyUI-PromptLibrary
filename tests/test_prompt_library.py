@@ -936,10 +936,14 @@ class PromptLibraryTests(unittest.TestCase):
         self.assertEqual(out, "morning")
 
     def test_background_node_preset_only(self):
+        # Pick the first non-divider, non-(none) preset so this test stays
+        # robust against future expansions of the preset list.
         node = self.mod.PromptLibraryBackground()
-        out, = node.build(preset="city: subway platform, fluorescent lights, empty",
-                           custom="", separator=", ")
-        self.assertEqual(out, "city: subway platform, fluorescent lights, empty")
+        first_real = next(p for p in self.mod._BG_PRESETS
+                          if p != self.mod._BG_NONE
+                          and not p.startswith(self.mod._BG_DIVIDER_CHAR))
+        out, = node.build(preset=first_real, custom="", separator=", ")
+        self.assertEqual(out, first_real)
 
     def test_background_node_custom_only(self):
         node = self.mod.PromptLibraryBackground()
@@ -949,15 +953,37 @@ class PromptLibraryTests(unittest.TestCase):
 
     def test_background_node_combines_preset_and_custom(self):
         node = self.mod.PromptLibraryBackground()
-        out, = node.build(preset="home: cozy bedroom with string lights and an unmade bed",
+        first_real = next(p for p in self.mod._BG_PRESETS
+                          if p != self.mod._BG_NONE
+                          and not p.startswith(self.mod._BG_DIVIDER_CHAR))
+        out, = node.build(preset=first_real,
                            custom="rain pattering on the window", separator=", ")
-        self.assertEqual(out,
-            "home: cozy bedroom with string lights and an unmade bed, rain pattering on the window")
+        self.assertEqual(out, first_real + ", rain pattering on the window")
 
     def test_background_node_both_empty_returns_empty(self):
         node = self.mod.PromptLibraryBackground()
         out, = node.build(preset=self.mod._BG_NONE, custom="", separator=", ")
         self.assertEqual(out, "")
+
+    def test_background_node_divider_row_treated_as_none(self):
+        # Visual divider rows like "───── home / interior ─────" are visible
+        # in the dropdown but must not pollute the prompt if clicked.
+        node = self.mod.PromptLibraryBackground()
+        divider = self.mod._bg_divider("home / interior")
+        out, = node.build(preset=divider, custom="rainy night", separator=", ")
+        self.assertEqual(out, "rainy night")
+        out2, = node.build(preset=divider, custom="", separator=", ")
+        self.assertEqual(out2, "")
+
+    def test_background_presets_include_hallways_and_rooms(self):
+        # User-requested categories are present.
+        presets = self.mod._BG_PRESETS
+        self.assertTrue(any(p.startswith("hallway:") for p in presets),
+                        "expected hallway: entries in the preset list")
+        self.assertTrue(any("master bedroom" in p for p in presets),
+                        "expected master bedroom in the preset list")
+        self.assertTrue(any("dining room" in p for p in presets),
+                        "expected dining room in the preset list")
 
     def test_scene_node_treats_none_sentinel_as_empty(self):
         node = self.mod.PromptLibraryScene()
