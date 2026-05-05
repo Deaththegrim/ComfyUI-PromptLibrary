@@ -46,9 +46,16 @@ _lock = threading.Lock()
 _ALLOWED_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 _MAX_IMAGE_BYTES = 16 * 1024 * 1024            # per-thumbnail upload cap
 # Thumbnails are gallery icons, not source art — cap the longest edge so the
-# library + zip exports stay small. Full-res images blow up to >1 MB each.
-_THUMBNAIL_MAX_EDGE = 512
-_THUMBNAIL_JPEG_QUALITY = 85
+# library + zip exports stay small. The cap matches the gallery's max tile
+# size (400px), so a thumbnail rendered at the largest tile setting is
+# 1:1 pixel-for-pixel without upscale or wasted resolution.
+_THUMBNAIL_MAX_EDGE = 400
+_THUMBNAIL_JPEG_QUALITY = 80
+# Export ships smaller thumbnails for transport — the on-disk copies stay
+# at the storage settings above, but the export zip recompresses each one
+# below so a shared library doesn't run hundreds of MB.
+_EXPORT_THUMBNAIL_MAX_EDGE = 384
+_EXPORT_THUMBNAIL_JPEG_QUALITY = 75
 # Import / export
 _MAX_IMPORT_ZIP_BYTES = 500 * 1024 * 1024      # protects against zip-bomb-y uploads
 # Per-entry history (revert disclosure in the modal)
@@ -1555,8 +1562,38 @@ def _raise_aiohttp_client_max_size():
 _raise_aiohttp_client_max_size()
 
 
+def _recompress_thumbnail_for_export(img_path: "Path") -> tuple[bytes, str] | None:
+    """Re-encode a stored thumbnail at the export-only smaller settings
+    (_EXPORT_THUMBNAIL_MAX_EDGE / _EXPORT_THUMBNAIL_JPEG_QUALITY).
+    Returns (bytes, ext) or None if PIL can't decode the source.
+
+    This is what shrinks shared library zips from ~250 MB down to ~50 MB
+    for typical 4000-entry libraries: the storage settings keep nice
+    400 px / q80 thumbnails on disk, but the transport zip ships
+    384 px / q75. Re-importing through /import_zip puts them back through
+    _save_thumbnail_bytes, which re-saves at the storage settings —
+    enlargement is skipped, so the recipient ends up with the same
+    smaller thumbnails the export shipped, not a re-bloat back to 400."""
+    try:
+        from PIL import Image
+        pil = Image.open(img_path)
+        if pil.mode != "RGB":
+            pil = pil.convert("RGB")
+        pil.thumbnail((_EXPORT_THUMBNAIL_MAX_EDGE, _EXPORT_THUMBNAIL_MAX_EDGE))
+        buf = io.BytesIO()
+        pil.save(buf, format="JPEG", quality=_EXPORT_THUMBNAIL_JPEG_QUALITY,
+                 optimize=True, progressive=True)
+        return buf.getvalue(), "jpg"
+    except Exception as e:
+        print(f"[PromptLibrary] export recompress failed for {img_path}: {e}")
+        return None
+
+
 def _build_export_zip(items: list[dict], version: str) -> bytes:
-    """Bundle prompts + thumbnail images into a zip. Returns the bytes."""
+    """Bundle prompts + thumbnail images into a zip. Thumbnails are
+    re-encoded at the smaller export settings on the way out — matters
+    a lot for shared libraries (the user's 4061-entry export went from
+    254 MB to 52 MB after this kicked in)."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         manifest = {
@@ -1572,7 +1609,15 @@ def _build_export_zip(items: list[dict], version: str) -> bytes:
             if not pid:
                 continue
             img_path = _image_path_for(pid)
-            if img_path:
+            if not img_path:
+                continue
+            recompressed = _recompress_thumbnail_for_export(img_path)
+            if recompressed is not None:
+                data, ext = recompressed
+                zf.writestr(f"images/{pid}.{ext}", data)
+            else:
+                # PIL couldn't decode — fall back to the on-disk file as-is
+                # so the entry still has SOMETHING shipped with it.
                 zf.write(img_path, arcname=f"images/{img_path.name}")
     return buf.getvalue()
 
@@ -2225,7 +2270,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.27.5"
+__version__ = "0.27.6"
 
 
 def _autobackup_on_version_change() -> None:
