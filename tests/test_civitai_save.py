@@ -243,6 +243,85 @@ class WorkflowExtractionTests(unittest.TestCase):
         self.assertEqual(m["steps"], 25)
         self.assertEqual(m["sampler_name"], "dpmpp_2m_sde")
 
+    def test_seed_wired_from_rgthree_seed_node(self):
+        # Common case: KSampler.seed is wired from a `Seed (rgthree)` node
+        # rather than typed in directly. Previous behaviour was to silently
+        # drop the seed; we now follow the connection back to the literal.
+        from civitai_save import extract_workflow_metadata
+        prompt = {
+            "1": {"class_type": "CheckpointLoaderSimple",
+                   "inputs": {"ckpt_name": "m.safetensors"}},
+            "5": {"class_type": "Seed (rgthree)",
+                   "inputs": {"seed": 7777}},
+            "9": {"class_type": "KSampler",
+                   "inputs": {"seed": ["5", 0], "steps": 25, "cfg": 7.0,
+                              "sampler_name": "euler", "scheduler": "normal",
+                              "model": ["1", 0]}},
+        }
+        meta = extract_workflow_metadata(prompt)
+        self.assertEqual(meta["seed"], 7777)
+
+    def test_seed_wired_from_easy_seed_node(self):
+        from civitai_save import extract_workflow_metadata
+        prompt = {
+            "1": {"class_type": "CheckpointLoaderSimple",
+                   "inputs": {"ckpt_name": "m.safetensors"}},
+            "5": {"class_type": "easy seed", "inputs": {"seed": 9999}},
+            "9": {"class_type": "KSampler",
+                   "inputs": {"seed": ["5", 0], "steps": 20, "cfg": 6.0,
+                              "sampler_name": "dpm++_2m", "scheduler": "karras",
+                              "model": ["1", 0]}},
+        }
+        meta = extract_workflow_metadata(prompt)
+        self.assertEqual(meta["seed"], 9999)
+
+    def test_advanced_sampler_noise_seed_wired(self):
+        # KSamplerAdvanced uses noise_seed; if wired, follow the link.
+        from civitai_save import extract_workflow_metadata
+        prompt = {
+            "1": {"class_type": "CheckpointLoaderSimple",
+                   "inputs": {"ckpt_name": "m.safetensors"}},
+            "5": {"class_type": "Seed (rgthree)", "inputs": {"seed": 4242}},
+            "9": {"class_type": "KSamplerAdvanced",
+                   "inputs": {"noise_seed": ["5", 0], "steps": 30, "cfg": 5.0,
+                              "sampler_name": "euler", "scheduler": "normal",
+                              "model": ["1", 0]}},
+        }
+        meta = extract_workflow_metadata(prompt)
+        self.assertEqual(meta["seed"], 4242)
+
+    def test_seed_via_two_hops(self):
+        # Seed node -> primitive passthrough -> KSampler. Two hops.
+        from civitai_save import extract_workflow_metadata
+        prompt = {
+            "1": {"class_type": "CheckpointLoaderSimple",
+                   "inputs": {"ckpt_name": "m.safetensors"}},
+            "3": {"class_type": "Seed (rgthree)", "inputs": {"seed": 1234567}},
+            "4": {"class_type": "Reroute", "inputs": {"value": ["3", 0]}},
+            "9": {"class_type": "KSampler",
+                   "inputs": {"seed": ["4", 0], "steps": 20, "cfg": 6.0,
+                              "sampler_name": "euler", "scheduler": "normal",
+                              "model": ["1", 0]}},
+        }
+        meta = extract_workflow_metadata(prompt)
+        self.assertEqual(meta["seed"], 1234567)
+
+    def test_seed_unresolvable_chain_returns_no_seed(self):
+        # If the chain doesn't terminate in a literal, we should drop the
+        # seed gracefully — not crash, not invent a value.
+        from civitai_save import extract_workflow_metadata
+        prompt = {
+            "1": {"class_type": "CheckpointLoaderSimple",
+                   "inputs": {"ckpt_name": "m.safetensors"}},
+            "9": {"class_type": "KSampler",
+                   "inputs": {"seed": ["missing", 0], "steps": 20, "cfg": 6.0,
+                              "sampler_name": "euler", "scheduler": "normal",
+                              "model": ["1", 0]}},
+        }
+        meta = extract_workflow_metadata(prompt)
+        self.assertNotIn("seed", meta)
+        self.assertEqual(meta.get("steps"), 20)  # unaffected siblings still work
+
     def test_pysssss_string_function_concatenates(self):
         from civitai_save import extract_workflow_metadata
         prompt = {

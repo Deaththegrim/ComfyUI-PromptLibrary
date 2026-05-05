@@ -526,6 +526,65 @@ def _populate_from_easy_loader(out: dict, prompt: dict, loader: dict) -> None:
             out["negative"] = resolved
 
 
+def _resolve_literal(prompt: dict, value, *, candidate_keys: tuple[str, ...] = (), max_hops: int = 4):
+    """If `value` is a [src_id, idx] connection, walk back through up to
+    `max_hops` source nodes looking for a literal in any of `candidate_keys`
+    (or the source's own inputs if no candidates given). Returns the literal
+    or None. Used for sampler params like seed/cfg/steps that are commonly
+    wired from a primitive Seed / Easy-Use Seed / rgthree Seed node instead
+    of typed in directly.
+    """
+    visited: set[str] = set()
+    cur = value
+    for _ in range(max_hops):
+        if not isinstance(cur, list) or len(cur) != 2:
+            break
+        src_id = str(cur[0])
+        if src_id in visited:
+            return None
+        visited.add(src_id)
+        src = prompt.get(src_id)
+        if not isinstance(src, dict):
+            return None
+        src_in = src.get("inputs") or {}
+        # Try the candidate keys first (e.g., "seed"/"noise_seed"/"value" for
+        # seed nodes), then any non-link input as a last resort.
+        keys = list(candidate_keys) or list(src_in.keys())
+        for k in keys:
+            if k not in src_in:
+                continue
+            v = src_in[k]
+            if not isinstance(v, list):
+                return v
+        # Source had no literal but might itself be a passthrough — pick the
+        # first wired input matching candidate_keys and recurse one hop.
+        next_step = None
+        for k in (candidate_keys or src_in.keys()):
+            v = src_in.get(k)
+            if isinstance(v, list) and len(v) == 2:
+                next_step = v
+                break
+        if next_step is None:
+            return None
+        cur = next_step
+    return None
+
+
+def _coerce_int(v):
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        return int(v) if v == int(v) else None
+    if isinstance(v, str):
+        try:
+            return int(v.strip())
+        except ValueError:
+            return None
+    return None
+
+
 def _find_primary_sampler(prompt: dict) -> tuple[str | None, dict | None]:
     """Pick the KSampler whose output feeds into the SaveImage path. Heuristic:
     last sampler (highest node id) in the graph — works for typical workflows
@@ -560,9 +619,28 @@ def extract_workflow_metadata(prompt: dict | None) -> dict:
     if sampler is not None:
         ctype = sampler.get("class_type")
         s_in = sampler.get("inputs") or {}
+        # Per-key fallback chains for following wired connections back to a
+        # literal. Seeds in particular are frequently driven by a separate
+        # Seed/Primitive node; before we were silently dropping them.
+        _RESOLVE_KEYS: dict[str, tuple[str, ...]] = {
+            "seed": ("seed", "value", "int", "noise_seed"),
+            "noise_seed": ("noise_seed", "seed", "value", "int"),
+            "steps": ("steps", "value", "int"),
+            "cfg": ("cfg", "value", "float", "number"),
+            "sampler_name": ("sampler_name", "value", "string"),
+            "scheduler": ("scheduler", "value", "string"),
+        }
         for key in _SAMPLER_PARAM_KEYS:
-            if key in s_in and not isinstance(s_in[key], list):
-                out[key] = s_in[key]
+            if key not in s_in:
+                continue
+            raw = s_in[key]
+            if isinstance(raw, list):
+                resolved = _resolve_literal(prompt, raw,
+                                             candidate_keys=_RESOLVE_KEYS.get(key, (key,)))
+                if resolved is not None and not isinstance(resolved, list):
+                    out[key] = resolved
+            else:
+                out[key] = raw
 
         if ctype in _EASY_PIPE_SAMPLER_TYPES:
             loader = _trace_pipe_to_loader(prompt, s_in.get("pipe"))
