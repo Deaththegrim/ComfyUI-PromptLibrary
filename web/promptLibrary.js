@@ -2115,6 +2115,9 @@ const NODE_COLORS = {
   "GrimmRibbityCivitaiSave": "#3eba6c",
   // LoRA picker — magenta / hot pink so it's distinct from the data nodes
   "GrimmRibbityLoraPicker": "#d84ba8",
+  // Anima sampler / HiResFix — rose / mauve to set apart from teal SDXL
+  "GrimmRibbityAnimaSampler": "#c84a7a",
+  "GrimmRibbityAnimaHiResFixScript": "#c84a7a",
 };
 // Colors used by previous theme revisions. When a saved workflow loads with
 // one of these stuck on a node, we treat it as stale and replace with the
@@ -2129,7 +2132,7 @@ const STALE_THEME_COLORS = new Set([
   // v0.22.2 (pastel bars)
   "#c8a8e8", "#e8b878", "#8cc8d8", "#a8d8b8",
   // current bars (auto-refresh on reload if values changed)
-  "#a060e0", "#e8852f", "#34a4c8", "#3eba6c", "#d84ba8",
+  "#a060e0", "#e8852f", "#34a4c8", "#3eba6c", "#d84ba8", "#c84a7a",
   // shared body
   "#1e1e1e",
 ]);

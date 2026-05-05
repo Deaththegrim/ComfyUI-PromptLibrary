@@ -2033,7 +2033,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.25.1"
+__version__ = "0.26.0"
 
 
 def _autobackup_on_version_change() -> None:
@@ -2107,6 +2107,20 @@ except Exception as _e:
     print(f"[PromptLibrary] LoRA picker unavailable: {_e}")
     _lora_node, _lora_label = {}, {}
 
+try:
+    from .sampler_anima import GrimmRibbityAnimaSampler, GrimmRibbityAnimaHiResFixScript
+    _anima_node = {
+        "GrimmRibbityAnimaSampler": GrimmRibbityAnimaSampler,
+        "GrimmRibbityAnimaHiResFixScript": GrimmRibbityAnimaHiResFixScript,
+    }
+    _anima_label = {
+        "GrimmRibbityAnimaSampler": "GrimmRibbity — Anima Sampler",
+        "GrimmRibbityAnimaHiResFixScript": "GrimmRibbity — Anima HiResFix Script",
+    }
+except Exception as _e:
+    print(f"[PromptLibrary] Anima sampler unavailable: {_e}")
+    _anima_node, _anima_label = {}, {}
+
 NODE_CLASS_MAPPINGS = {
     "PromptLibrary": PromptLibrary,
     "PromptLibraryMulti": PromptLibraryMulti,
@@ -2119,6 +2133,7 @@ NODE_CLASS_MAPPINGS = {
     **_civitai_node,
     **_sampler_node,
     **_lora_node,
+    **_anima_node,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptLibrary": "GrimmRibbity — Library",
@@ -2132,6 +2147,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **_civitai_label,
     **_sampler_label,
     **_lora_label,
+    **_anima_label,
 }
 WEB_DIRECTORY = "./web"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
