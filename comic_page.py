@@ -35,10 +35,11 @@ except ImportError:
     _torch = None
 
 
-# Default 2x2 panel colour scheme — rendering this 4-colour mask in any
-# image editor (red top-left, green top-right, blue bottom-left, yellow
-# bottom-right) is the simplest authoring path.
-_DEFAULT_COLORS = ("#FF0000", "#00FF00", "#0000FF", "#FFFF00")
+# Six unique default colours — one per panel slot. The first four match the
+# common 2x2 layout (red TL / green TR / blue BL / yellow BR); panels 5 and
+# 6 default to magenta and cyan so denser layouts don't accidentally share
+# a mask region with panel 1 or 2.
+_DEFAULT_COLORS = ("#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF")
 _PANEL_COUNT = 6  # widgets exposed; user can leave any unused (blank prompt)
 
 # Per-channel tolerance when matching a panel's hex color in the layout
@@ -119,7 +120,7 @@ class GrimmRibbityComicPage:
             "optional": {},
         }
         for i in range(1, _PANEL_COUNT + 1):
-            default_color = _DEFAULT_COLORS[(i - 1) % len(_DEFAULT_COLORS)]
+            default_color = _DEFAULT_COLORS[i - 1]
             spec["required"][f"panel_{i}_prompt"] = ("STRING", {
                 "default": "", "multiline": True,
                 "placeholder": f"panel {i} prompt — leave blank to skip this panel",
