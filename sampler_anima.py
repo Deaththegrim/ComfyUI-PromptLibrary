@@ -245,6 +245,12 @@ class GrimmRibbityAnimaSampler:
     def sample(self, model, positive, negative, latent_image, noise_seed, steps,
                cfg, sampler_name, scheduler, denoise, vae_decode,
                optional_vae=None, script=None):
+        if vae_decode != "false" and optional_vae is None:
+            raise ValueError(
+                "Anima Sampler: vae_decode is enabled but optional_vae is not wired. "
+                "Wire a VAE into the optional_vae input, or set vae_decode='false' to "
+                "skip decoding (the IMAGE port will then emit a 1×1×3 placeholder)."
+            )
         primary = nodes.common_ksampler(
             model, noise_seed, steps, cfg, sampler_name, scheduler,
             positive, negative, latent_image, denoise=denoise,
