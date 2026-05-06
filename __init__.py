@@ -2593,6 +2593,14 @@ except Exception as _e:
     print(f"[PromptLibrary] Anima sampler unavailable: {_e}")
     _anima_node, _anima_label = {}, {}
 
+try:
+    from .character_anchor import GrimmRibbityCharacterAnchor
+    _anchor_node = {"GrimmRibbityCharacterAnchor": GrimmRibbityCharacterAnchor}
+    _anchor_label = {"GrimmRibbityCharacterAnchor": "GrimmRibbity — Character Anchor"}
+except Exception as _e:
+    print(f"[PromptLibrary] Character Anchor unavailable: {_e}")
+    _anchor_node, _anchor_label = {}, {}
+
 NODE_CLASS_MAPPINGS = {
     "PromptLibrary": PromptLibrary,
     "PromptLibraryMulti": PromptLibraryMulti,
@@ -2607,6 +2615,7 @@ NODE_CLASS_MAPPINGS = {
     **_sampler_node,
     **_lora_node,
     **_anima_node,
+    **_anchor_node,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptLibrary": "GrimmRibbity — Library",
@@ -2622,6 +2631,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **_sampler_label,
     **_lora_label,
     **_anima_label,
+    **_anchor_label,
 }
 WEB_DIRECTORY = "./web"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
