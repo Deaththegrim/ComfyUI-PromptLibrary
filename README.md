@@ -58,6 +58,7 @@ After install, find them under **GrimmRibbity/** sub-menus in the node picker:
 
 **Library (the core suite)**
 - **GrimmRibbity — Library** — visual gallery picker. Outputs `prompt` (positive) and `negative` STRINGs from the selected entry/entries
+- **GrimmRibbity — Style (LoRA + Conditioning)** — same gallery, but applies the entry's stored LoRA stack to MODEL+CLIP and emits patched MODEL/CLIP plus encoded **positive + negative** CONDITIONING (concatted onto optional inputs). Up to 10 LoRAs per entry, edited inline in the modal. `bypass` toggle for A/B comparisons; `strength_scale` multiplies every LoRA at once
 - **GrimmRibbity — Multi Library (3 panels)** — three independent gallery panels in one node, replaces 3× Library + 2× Join Strings spaghetti
 - **GrimmRibbity — Save** — write prompts to the library during workflow runs (inputs: name, text, optional `negative`, optional `IMAGE` thumbnail, optional tags)
 - **GrimmRibbity — Random by Tag** — pick a random library entry by tag filter (outputs text, id, negative). Built for overnight loops
@@ -124,7 +125,8 @@ Right-click → Edit, or click the `+` tile to add. The modal is non-blocking �
 - **Tags** — comma-separated; autocompletes from existing tags via a `<datalist>`
 - **Prompt text** — the actual prompt string
 - **Reference image** — optional thumbnail; PNG/JPG/WebP/GIF/BMP, capped at 16 MB
-- **History** — disclosure showing every prior version of this entry (max 20). Click any row to revert.
+- **LoRAs** — up to 10 per entry. Click `+ Add LoRA` to attach a row (Model dropdown / Strength slider / Trigger words / Delete). Only the **Style** node consumes them; the plain Library node ignores them. Trigger words are appended after the prompt before encoding.
+- **History** — disclosure showing every prior version of this entry (max 20). Click any row to revert. Tracks LoRA-only changes too.
 
 ## Wildcards & overnight loops
 

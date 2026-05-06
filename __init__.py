@@ -277,6 +277,61 @@ def _parse_tags(value) -> list[str]:
     return seen
 
 
+_LORAS_PER_ENTRY_CAP = 10
+
+
+def _parse_loras(value) -> list[dict]:
+    """Normalise the modal's LoRA payload into the on-disk shape.
+
+    Accepts:
+      - a JSON-encoded string (what the modal sends inside multipart form data)
+      - a list of dicts (what zip-import / direct API callers send)
+    Returns a list of {name, strength_model, strength_clip, triggers, enabled}
+    capped at _LORAS_PER_ENTRY_CAP. Rows missing a `name` are dropped silently
+    so the modal can keep an empty placeholder row without writing junk to disk.
+    """
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        try:
+            data = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return []
+    else:
+        data = value
+    if not isinstance(data, list):
+        return []
+    out: list[dict] = []
+    for raw in data[:_LORAS_PER_ENTRY_CAP]:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            sm = float(raw.get("strength_model", raw.get("strength", 1.0)) or 0.0)
+        except (TypeError, ValueError):
+            sm = 1.0
+        # If only one strength is supplied, mirror it onto CLIP — matches
+        # the comfy LoraLoader UX where the two sliders default in lockstep.
+        try:
+            sc = float(raw.get("strength_clip", raw.get("strength", sm)) or 0.0)
+        except (TypeError, ValueError):
+            sc = sm
+        sm = max(-2.0, min(2.0, sm))
+        sc = max(-2.0, min(2.0, sc))
+        triggers = str(raw.get("triggers") or "").strip()
+        enabled = bool(raw.get("enabled", True))
+        out.append({
+            "name": name,
+            "strength_model": sm,
+            "strength_clip": sc,
+            "triggers": triggers,
+            "enabled": enabled,
+        })
+    return out
+
+
 def _image_path_for(prompt_id: str) -> Path | None:
     for ext in _ALLOWED_IMAGE_EXT:
         p = IMAGES_DIR / f"{prompt_id}{ext}"
@@ -389,24 +444,28 @@ def _touch(item: dict, *, created: bool) -> None:
 
 
 def _push_history(item: dict) -> None:
-    """Snapshot the current name/text/tags onto the entry's history list."""
+    """Snapshot the current name/text/tags/loras onto the entry's history list."""
     history = list(item.get("history") or [])
-    history.append({
+    snap: dict = {
         "ts": _now(),
         "name": item.get("name", ""),
         "text": item.get("text", ""),
         "tags": list(item.get("tags") or []),
-    })
+    }
+    if item.get("loras"):
+        snap["loras"] = [dict(l) for l in item["loras"]]
+    history.append(snap)
     item["history"] = history[-_HISTORY_CAP:]
 
 
 def _maybe_push_history(item: dict, new_name: str, new_text: str, new_tags: list,
-                          new_negative: str = "") -> None:
+                          new_negative: str = "", new_loras: list | None = None) -> None:
     """Push history only if any user-visible field actually changes (image excluded)."""
     if (item.get("name", "") == new_name
         and item.get("text", "") == new_text
         and item.get("negative", "") == new_negative
-        and list(item.get("tags") or []) == list(new_tags or [])):
+        and list(item.get("tags") or []) == list(new_tags or [])
+        and list(item.get("loras") or []) == list(new_loras or [])):
         return
     _push_history(item)
 
@@ -1497,12 +1556,28 @@ async def list_prompts(_request):
             "tags": item.get("tags", []),
             "rating": int(item.get("rating", 0) or 0),
             "notes": item.get("notes", ""),
+            "loras": item.get("loras", []),
             "created_at": item.get("created_at", 0),
             "updated_at": item.get("updated_at", 0),
             "order": item.get("order", idx),
             "has_image": _image_path_for(pid) is not None,
         })
     return web.json_response({"prompts": out})
+
+
+@routes.get("/prompt_library/loras")
+async def list_loras(_request):
+    """Names of every .safetensors LoRA visible to ComfyUI's folder_paths.
+    Sourced from get_filename_list("loras") so subfolders are preserved
+    (e.g. 'Anima/Anima Turbo LoRA.safetensors'). Frontend uses this to
+    populate the modal's LoRA-row dropdown."""
+    if folder_paths is None:
+        return web.json_response({"loras": [], "error": "folder_paths unavailable"})
+    try:
+        names = list(folder_paths.get_filename_list("loras") or [])
+    except Exception as e:
+        return web.json_response({"loras": [], "error": str(e)})
+    return web.json_response({"loras": sorted(names)})
 
 
 @routes.get("/prompt_library/tags")
@@ -1536,6 +1611,11 @@ async def upsert_prompt(request):
     negative = reader.get("negative") or ""
     tags = _parse_tags(reader.get("tags"))
     notes = (reader.get("notes") or "").strip()
+    loras_field = reader.get("loras")
+    # Distinguish "loras key omitted" (older clients, don't touch the field)
+    # from "loras key present but empty" (cleared in the modal, write []).
+    loras_provided = "loras" in reader
+    loras = _parse_loras(loras_field) if loras_provided else None
     rating_raw = reader.get("rating")
     rating: int | None = None
     if rating_raw not in (None, ""):
@@ -1575,7 +1655,8 @@ async def upsert_prompt(request):
             existing = {"id": pid}
             items.append(existing)
         else:
-            _maybe_push_history(existing, name, text, tags, new_negative=negative)
+            _maybe_push_history(existing, name, text, tags, new_negative=negative,
+                                  new_loras=loras if loras_provided else existing.get("loras"))
         existing["name"] = name
         existing["text"] = text
         existing["tags"] = tags
@@ -1589,6 +1670,11 @@ async def upsert_prompt(request):
             existing["notes"] = ""
         if rating is not None:
             existing["rating"] = rating
+        if loras_provided:
+            if loras:
+                existing["loras"] = loras
+            elif "loras" in existing:
+                existing["loras"] = []
         _touch(existing, created=created)
 
         if clear_image:
@@ -1614,6 +1700,7 @@ async def upsert_prompt(request):
         "tags": tags,
         "rating": existing.get("rating", 0),
         "notes": existing.get("notes", ""),
+        "loras": existing.get("loras", []),
         "has_image": _image_path_for(pid) is not None,
     })
 
@@ -1735,11 +1822,17 @@ async def revert_prompt(request):
         if snap is None:
             return web.json_response({"error": "snapshot not found"}, status=404)
 
+        snap_loras = _parse_loras(snap.get("loras")) if "loras" in snap else None
         # Save the current state so the revert itself is undoable.
-        _maybe_push_history(item, snap.get("name", ""), snap.get("text", ""), snap.get("tags") or [])
+        _maybe_push_history(item, snap.get("name", ""), snap.get("text", ""),
+                              snap.get("tags") or [],
+                              new_loras=snap_loras if snap_loras is not None
+                                         else item.get("loras"))
         item["name"] = snap.get("name", "")
         item["text"] = snap.get("text", "")
         item["tags"] = list(snap.get("tags") or [])
+        if snap_loras is not None:
+            item["loras"] = snap_loras
         _touch(item, created=False)
         _save(items)
 
@@ -1917,6 +2010,7 @@ def _import_zip(zip_bytes: bytes, *, mode: str = "add_only") -> tuple[int, int, 
                 text_val = raw.get("text", "") or ""
                 tags = _parse_tags(raw.get("tags") or [])
                 history = raw.get("history") if isinstance(raw.get("history"), list) else None
+                incoming_loras = _parse_loras(raw.get("loras")) if "loras" in raw else None
 
                 created = existing is None
                 if created:
@@ -1925,7 +2019,9 @@ def _import_zip(zip_bytes: bytes, *, mode: str = "add_only") -> tuple[int, int, 
                     index[pid] = existing
                     added += 1
                 else:
-                    _maybe_push_history(existing, name, text_val, tags)
+                    _maybe_push_history(existing, name, text_val, tags,
+                                          new_loras=incoming_loras if incoming_loras is not None
+                                                   else existing.get("loras"))
                     updated += 1
 
                 existing["name"] = name
@@ -1941,6 +2037,8 @@ def _import_zip(zip_bytes: bytes, *, mode: str = "add_only") -> tuple[int, int, 
                         pass
                 if "notes" in raw:
                     existing["notes"] = str(raw.get("notes") or "")
+                if incoming_loras is not None:
+                    existing["loras"] = incoming_loras
                 if history is not None and not created:
                     # Merge histories (incoming first, then existing); cap.
                     merged = list(history) + list(existing.get("history") or [])
@@ -2494,6 +2592,12 @@ async def duplicate_prompt(request):
             "text": src.get("text", ""),
             "tags": list(src.get("tags") or []),
         }
+        if src.get("negative"):
+            clone["negative"] = src["negative"]
+        if src.get("notes"):
+            clone["notes"] = src["notes"]
+        if src.get("loras"):
+            clone["loras"] = [dict(l) for l in src["loras"]]
         _touch(clone, created=True)
         items.append(clone)
         # Copy thumbnail if present.
@@ -2533,7 +2637,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.27.7"
+__version__ = "0.29.0"
 
 
 def _autobackup_on_version_change() -> None:
@@ -2637,6 +2741,17 @@ except Exception as _e:
     print(f"[PromptLibrary] Comic Page (Regional) unavailable: {_e}")
     _comic_page_node, _comic_page_label = {}, {}
 
+# Style node depends on torch + comfy.sd at import time, so guard the import
+# the same way the sampler nodes do — keeps the rest of the package usable
+# when ComfyUI isn't on the path (tests, maintenance scripts).
+try:
+    from .style_node import PromptLibraryStyle
+    _style_node = {"PromptLibraryStyle": PromptLibraryStyle}
+    _style_label = {"PromptLibraryStyle": "GrimmRibbity — Style (LoRA + Conditioning)"}
+except Exception as _e:
+    print(f"[PromptLibrary] Style node unavailable: {_e}")
+    _style_node, _style_label = {}, {}
+
 NODE_CLASS_MAPPINGS = {
     "PromptLibrary": PromptLibrary,
     "PromptLibraryMulti": PromptLibraryMulti,
@@ -2653,6 +2768,7 @@ NODE_CLASS_MAPPINGS = {
     **_anima_node,
     **_anchor_node,
     **_comic_page_node,
+    **_style_node,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptLibrary": "GrimmRibbity — Library",
@@ -2670,6 +2786,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **_anima_label,
     **_anchor_label,
     **_comic_page_label,
+    **_style_label,
 }
 WEB_DIRECTORY = "./web"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]

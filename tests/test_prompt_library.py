@@ -1617,6 +1617,168 @@ class PromptLibraryTests(unittest.TestCase):
         resp = asyncio.run(self.mod.reorder_prompts(req))
         self.assertEqual(resp.status, 400)
 
+    # ---- loras roundtrip -----------------------------------------------
+
+    def test_parse_loras_accepts_json_string(self):
+        raw = json.dumps([
+            {"name": "Anima/Anima Turbo LoRA.safetensors", "strength_model": 0.85,
+             "strength_clip": 0.85, "triggers": "anima style", "enabled": True},
+            {"name": "broken (no name)".replace("broken (no name)", ""),  # → empty → dropped
+             "strength_model": 1.0},
+        ])
+        out = self.mod._parse_loras(raw)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["name"], "Anima/Anima Turbo LoRA.safetensors")
+        self.assertAlmostEqual(out[0]["strength_model"], 0.85)
+        self.assertEqual(out[0]["triggers"], "anima style")
+
+    def test_parse_loras_caps_at_ten(self):
+        loras = [{"name": f"l{i}.safetensors"} for i in range(15)]
+        out = self.mod._parse_loras(loras)
+        self.assertEqual(len(out), 10)
+
+    def test_parse_loras_clamps_strength(self):
+        out = self.mod._parse_loras([{"name": "x.safetensors", "strength_model": 99}])
+        self.assertEqual(out[0]["strength_model"], 2.0)
+        self.assertEqual(out[0]["strength_clip"], 2.0)
+
+    def test_parse_loras_invalid_input_returns_empty(self):
+        self.assertEqual(self.mod._parse_loras(None), [])
+        self.assertEqual(self.mod._parse_loras(""), [])
+        self.assertEqual(self.mod._parse_loras("not json"), [])
+        self.assertEqual(self.mod._parse_loras({"not": "a list"}), [])
+
+    def test_upsert_persists_loras(self):
+        loras = json.dumps([
+            {"name": "Anima/Anima.safetensors", "strength_model": 0.7,
+             "strength_clip": 0.7, "triggers": "anima"},
+            {"name": "char/Hatsune.safetensors", "strength_model": 1.0,
+             "strength_clip": 1.0, "triggers": ""},
+        ])
+        req = FakeRequest(post_data={"name": "Style A", "text": "fluffy", "loras": loras})
+        resp = asyncio.run(self.mod.upsert_prompt(req))
+        body = json.loads(resp.body)
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(len(body["loras"]), 2)
+        self.assertEqual(body["loras"][0]["name"], "Anima/Anima.safetensors")
+        items = self.mod._load()
+        self.assertEqual(len(items[0]["loras"]), 2)
+
+    def test_upsert_omitting_loras_preserves_existing(self):
+        loras = json.dumps([{"name": "x.safetensors", "strength_model": 1.0}])
+        req1 = FakeRequest(post_data={"name": "S", "text": "t", "loras": loras})
+        body1 = json.loads(asyncio.run(self.mod.upsert_prompt(req1)).body)
+        # Edit name + text but DON'T send loras — old payload should be preserved.
+        req2 = FakeRequest(post_data={"id": body1["id"], "name": "S", "text": "v2"})
+        body2 = json.loads(asyncio.run(self.mod.upsert_prompt(req2)).body)
+        self.assertEqual(len(body2["loras"]), 1)
+        self.assertEqual(body2["loras"][0]["name"], "x.safetensors")
+
+    def test_upsert_empty_loras_clears(self):
+        loras = json.dumps([{"name": "x.safetensors"}])
+        req1 = FakeRequest(post_data={"name": "S", "text": "t", "loras": loras})
+        body1 = json.loads(asyncio.run(self.mod.upsert_prompt(req1)).body)
+        # Now send loras="[]" — backend should clear the list.
+        req2 = FakeRequest(post_data={"id": body1["id"], "name": "S", "text": "t",
+                                       "loras": "[]"})
+        body2 = json.loads(asyncio.run(self.mod.upsert_prompt(req2)).body)
+        self.assertEqual(body2["loras"], [])
+
+    def test_history_captures_lora_change(self):
+        l1 = json.dumps([{"name": "a.safetensors", "strength_model": 1.0}])
+        req1 = FakeRequest(post_data={"name": "S", "text": "same", "loras": l1})
+        body1 = json.loads(asyncio.run(self.mod.upsert_prompt(req1)).body)
+        l2 = json.dumps([{"name": "b.safetensors", "strength_model": 1.0}])
+        req2 = FakeRequest(post_data={"id": body1["id"], "name": "S", "text": "same",
+                                       "loras": l2})
+        asyncio.run(self.mod.upsert_prompt(req2))
+        items = self.mod._load()
+        # Only the loras changed — name + text stayed same. History should still
+        # have a snapshot recording the prior loras.
+        self.assertEqual(len(items[0].get("history") or []), 1)
+        self.assertEqual(items[0]["history"][0]["loras"][0]["name"], "a.safetensors")
+
+    def test_loras_route_returns_list(self):
+        # folder_paths may be None in the test env (no ComfyUI on path); the
+        # route should degrade gracefully rather than 500.
+        resp = asyncio.run(self.mod.list_loras(FakeRequest()))
+        body = json.loads(resp.body)
+        self.assertIn("loras", body)
+        self.assertIsInstance(body["loras"], list)
+
+    def test_list_route_includes_loras_field(self):
+        loras = json.dumps([{"name": "a.safetensors", "strength_model": 1.0}])
+        asyncio.run(self.mod.upsert_prompt(
+            FakeRequest(post_data={"name": "Z", "text": "t", "loras": loras})))
+        resp = asyncio.run(self.mod.list_prompts(FakeRequest()))
+        body = json.loads(resp.body)
+        self.assertEqual(len(body["prompts"]), 1)
+        self.assertEqual(len(body["prompts"][0]["loras"]), 1)
+
+    def test_duplicate_copies_loras(self):
+        loras = json.dumps([{"name": "a.safetensors", "strength_model": 0.5}])
+        body1 = json.loads(asyncio.run(self.mod.upsert_prompt(
+            FakeRequest(post_data={"name": "Orig", "text": "t", "loras": loras}))).body)
+        resp = asyncio.run(self.mod.duplicate_prompt(
+            FakeRequest(json_data={"id": body1["id"]})))
+        new_id = json.loads(resp.body)["id"]
+        items = {i["id"]: i for i in self.mod._load()}
+        self.assertEqual(len(items[new_id]["loras"]), 1)
+        self.assertEqual(items[new_id]["loras"][0]["name"], "a.safetensors")
+
+    def test_style_format_prompt_combines_text_and_triggers(self):
+        # style_node.py imports torch + comfy.sd which aren't present in
+        # .testenv. Stub them, register the test-loaded package so its
+        # `from . import _load, _lock` resolves, then import style_node.
+        import sys, types, importlib.util
+        stubs = ["torch", "comfy", "comfy.sd", "comfy.utils", "folder_paths"]
+        installed = []
+        pkg_name = self.mod.__name__   # "plib_<tmp>"
+        try:
+            for name in stubs:
+                if name not in sys.modules:
+                    sys.modules[name] = types.ModuleType(name)
+                    installed.append(name)
+            # Register the test module as a package and register it under the
+            # name `from . import` will look up.
+            sys.modules[pkg_name] = self.mod
+            self.mod.__path__ = [str(NODE_DIR)]
+            spec = importlib.util.spec_from_file_location(
+                f"{pkg_name}.style_node", NODE_DIR / "style_node.py")
+            style_node = importlib.util.module_from_spec(spec)
+            sys.modules[f"{pkg_name}.style_node"] = style_node
+            spec.loader.exec_module(style_node)
+            loras = [
+                {"name": "a", "triggers": "anime style", "enabled": True},
+                {"name": "b", "triggers": "blue eyes", "enabled": False},
+                {"name": "c", "triggers": "  ", "enabled": True},
+                {"name": "d", "triggers": "neon, vapor", "enabled": True},
+            ]
+            self.assertEqual(style_node._format_prompt("a girl", loras),
+                              "a girl, anime style, neon, vapor")
+            self.assertEqual(style_node._format_prompt("", loras),
+                              "anime style, neon, vapor")
+            self.assertEqual(style_node._format_prompt("only text", []), "only text")
+            # Trailing commas + whitespace get cleaned so the join doesn't
+            # produce a double-comma artefact.
+            self.assertEqual(
+                style_node._format_prompt("a girl, ",
+                    [{"name": "a", "triggers": "blue eyes,", "enabled": True}]),
+                "a girl, blue eyes",
+            )
+            # extra_text appends after triggers, no leading comma when text + triggers empty.
+            self.assertEqual(
+                style_node._format_prompt("base", loras, "moody lighting"),
+                "base, anime style, neon, vapor, moody lighting",
+            )
+            self.assertEqual(
+                style_node._format_prompt("", [], "just extras"), "just extras")
+        finally:
+            for name in installed:
+                sys.modules.pop(name, None)
+            sys.modules.pop(f"{pkg_name}.style_node", None)
+            sys.modules.pop(pkg_name, None)
+
     # ---- watcher (smoke) -----------------------------------------------
 
     def test_watcher_starts_when_invoked(self):

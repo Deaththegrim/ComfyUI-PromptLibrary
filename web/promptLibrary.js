@@ -2,6 +2,8 @@ import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 
 const NODE_NAME = "PromptLibrary";
+const STYLE_NODE_NAME = "PromptLibraryStyle";
+const GALLERY_NODE_NAMES = new Set([NODE_NAME, STYLE_NODE_NAME]);
 const MULTI_NODE_NAME = "PromptLibraryMulti";
 const MULTI_PANELS = 3;
 const COMIC_FRAME_NODE_NAME = "PromptLibraryComicFrame";
@@ -136,7 +138,7 @@ const CSS = `
 .pl-view-toggle .pl-btn { padding: 3px 7px; font-size: 13px; line-height: 1; }
 .pl-view-toggle .pl-btn.active { background: var(--pl-bg-selected-strong); border-color: var(--pl-accent); color: var(--pl-fg-strong); }
 .pl-modal { position: fixed; z-index: 10000; background: var(--pl-bg-elevated); color: var(--pl-fg); padding: 0 14px 14px;
-  border-radius: 6px; width: 460px; max-height: 80vh; overflow-y: auto;
+  border-radius: 6px; width: 540px; max-height: 80vh; overflow-y: auto;
   box-shadow: 0 8px 32px rgba(0,0,0,0.6); border: 1px solid var(--pl-border);
   display: flex; flex-direction: column; gap: 10px; font-family: sans-serif; font-size: 13px; }
 .pl-modal-header { position: sticky; top: 0; z-index: 1; }
@@ -161,6 +163,37 @@ const CSS = `
   overflow-y: auto; padding: 4px; background: var(--pl-bg-input); border-radius: 4px;
   margin-top: 4px; }
 .pl-history-empty { color: var(--pl-fg-placeholder); font-size: 11px; padding: 6px; text-align: center; }
+.pl-loras-section { display: flex; flex-direction: column; gap: 8px; padding: 10px;
+  background: var(--pl-bg-input); border: 1px solid var(--pl-border); border-radius: 4px; }
+.pl-loras-add-wrap { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; }
+.pl-loras-add { background: #6cae3e; color: #0e1809; border: none; padding: 6px 12px;
+  font-size: 13px; font-weight: 600; border-radius: 3px; cursor: pointer; }
+.pl-loras-add:hover { background: #7ec24a; }
+.pl-loras-add[disabled] { opacity: 0.45; cursor: not-allowed; }
+.pl-loras-add-help { font-size: 11px; color: var(--pl-fg-muted); }
+.pl-loras-list { display: flex; flex-direction: column; gap: 8px; }
+.pl-lora-row { display: grid;
+  grid-template-columns: 60px minmax(120px, 2fr) minmax(110px, 1fr) minmax(100px, 1.2fr) auto;
+  gap: 6px; align-items: end;
+  padding: 6px; background: var(--pl-bg-elevated); border: 1px solid var(--pl-border-soft); border-radius: 3px; }
+.pl-lora-row label { font-size: 10px; color: var(--pl-fg-muted); text-transform: uppercase;
+  letter-spacing: 0.4px; }
+.pl-lora-num { font-size: 12px; color: var(--pl-fg); align-self: end; padding-bottom: 4px; font-weight: 600; }
+.pl-lora-row select, .pl-lora-row input[type=text], .pl-lora-row input[type=number] {
+  background: var(--pl-bg-input); color: var(--pl-fg); border: 1px solid var(--pl-border);
+  padding: 4px 6px; border-radius: 3px; font-size: 11px; font-family: inherit; min-width: 0; width: 100%; box-sizing: border-box; }
+.pl-lora-row select:disabled { opacity: 0.6; }
+.pl-lora-strength { display: flex; flex-direction: column; gap: 3px; }
+.pl-lora-strength-bar { display: flex; align-items: center; gap: 4px; }
+.pl-lora-strength-bar input[type=range] { flex: 1 1 0; min-width: 0; accent-color: #6cae3e; }
+.pl-lora-strength-bar input[type=number] { width: 60px; flex: 0 0 auto; }
+.pl-lora-row .pl-lora-delete { background: transparent; color: var(--pl-fg-muted);
+  border: 1px solid var(--pl-border); padding: 4px 10px; font-size: 11px;
+  border-radius: 3px; cursor: pointer; align-self: end; }
+.pl-lora-row .pl-lora-delete:hover { color: var(--pl-danger); border-color: var(--pl-danger); }
+.pl-lora-disabled-toggle { display: flex; align-items: center; gap: 4px; font-size: 11px;
+  color: var(--pl-fg-muted); }
+.pl-lora-disabled-toggle input { accent-color: #6cae3e; }
 .pl-toast-stack { position: fixed; right: 16px; top: 16px; z-index: 10002;
   display: flex; flex-direction: column; gap: 6px; max-width: 360px; pointer-events: none; }
 .pl-toast { background: var(--pl-bg-elevated, #2a2a2a); color: var(--pl-fg, #ddd);
@@ -316,7 +349,7 @@ function slugify(name) {
     .slice(0, 64);
 }
 
-async function upsert({ id, name, text, negative, tags, rating, notes, imageFile, clearImage }) {
+async function upsert({ id, name, text, negative, tags, rating, notes, loras, imageFile, clearImage }) {
   const body = new FormData();
   if (id) body.append("id", id);
   body.append("name", name);
@@ -325,6 +358,11 @@ async function upsert({ id, name, text, negative, tags, rating, notes, imageFile
   if (tags !== undefined) body.append("tags", tags);
   if (rating !== undefined && rating !== null) body.append("rating", String(rating));
   if (notes !== undefined) body.append("notes", notes);
+  // The loras array is JSON-encoded into a single form field — multipart can't
+  // easily express a list of objects natively, and the backend already
+  // distinguishes "key omitted" (loras=undefined) from "explicit empty"
+  // (loras=[]) so we only attach it when the modal actually rendered the section.
+  if (loras !== undefined) body.append("loras", JSON.stringify(loras));
   if (clearImage) body.append("clear_image", "1");
   if (imageFile) body.append("image", imageFile, imageFile.name);
   const res = await api.fetchApi("/prompt_library/upsert", { method: "POST", body });
@@ -333,6 +371,20 @@ async function upsert({ id, name, text, negative, tags, rating, notes, imageFile
     throw new Error(err.error || `HTTP ${res.status}`);
   }
   return res.json();
+}
+
+// Cache the LoRA list across modal opens — fetched once per session unless
+// invalidated by a 'lora_library.updated' websocket event (none currently
+// emitted; the cache lives only as long as the page does, which is fine).
+let _loraListPromise = null;
+function loadLoraList() {
+  if (_loraListPromise === null) {
+    _loraListPromise = api.fetchApi("/prompt_library/loras")
+      .then(r => r.ok ? r.json() : { loras: [] })
+      .then(d => Array.isArray(d.loras) ? d.loras : [])
+      .catch(() => []);
+  }
+  return _loraListPromise;
 }
 
 async function deletePrompt(id) {
@@ -552,6 +604,206 @@ function imageUrl(id) {
 
 let _modalStack = 0;
 
+const LORAS_PER_ENTRY_CAP = 10;
+
+function buildLoraSection(initialLoras) {
+  // The whole section: green "+ Add LoRA" CTA + helper line + list of rows.
+  // Rows are hidden until "+ Add LoRA" is pressed. getValue() reads the
+  // current rows back out as a clean JSON-friendly list.
+  const wrap = document.createElement("div");
+  wrap.className = "pl-loras-section";
+
+  const heading = document.createElement("div");
+  heading.style.fontSize = "12px";
+  heading.style.color = "var(--pl-fg)";
+  heading.style.fontWeight = "600";
+  heading.textContent = "LoRAs";
+  // Tiny disclosure under the heading so users know which node consumes
+  // these — the STRING-output Library node ignores them on purpose.
+  const headingHint = document.createElement("div");
+  headingHint.style.fontSize = "10px";
+  headingHint.style.color = "var(--pl-fg-muted)";
+  headingHint.style.marginTop = "-4px";
+  headingHint.textContent = "Applied by the Style node when this entry is selected.";
+
+  const addWrap = document.createElement("div");
+  addWrap.className = "pl-loras-add-wrap";
+  const addBtn = document.createElement("button");
+  addBtn.type = "button";
+  addBtn.className = "pl-loras-add";
+  addBtn.textContent = "+ Add LoRA";
+  const addHelp = document.createElement("div");
+  addHelp.className = "pl-loras-add-help";
+  addHelp.textContent = "Adds another line to load a lora";
+  addWrap.append(addBtn, addHelp);
+
+  const list = document.createElement("div");
+  list.className = "pl-loras-list";
+
+  // The dropdown options are filled in lazily — we keep one shared <datalist>
+  // populated once the fetch resolves, and rebuild every row's <select> from
+  // it so the user sees a populated picker without waiting on the network.
+  const rows = [];
+  let loraNames = [];
+  const loraNamesPromise = loadLoraList().then(names => {
+    loraNames = names;
+    for (const row of rows) row.refreshOptions(loraNames);
+  });
+
+  const renumber = () => {
+    for (let i = 0; i < rows.length; i++) {
+      rows[i].setIndex(i + 1);
+    }
+    addBtn.disabled = rows.length >= LORAS_PER_ENTRY_CAP;
+    list.style.display = rows.length ? "" : "none";
+    heading.style.display = rows.length ? "" : "none";
+    headingHint.style.display = rows.length ? "" : "none";
+  };
+
+  const buildRow = (initial) => {
+    const row = document.createElement("div");
+    row.className = "pl-lora-row";
+
+    const numCell = document.createElement("div");
+    numCell.className = "pl-lora-num";
+
+    const modelCell = document.createElement("div");
+    modelCell.style.display = "flex";
+    modelCell.style.flexDirection = "column";
+    modelCell.style.gap = "3px";
+    const modelLabel = document.createElement("label");
+    modelLabel.textContent = "Model";
+    const modelSelect = document.createElement("select");
+    const refreshOptions = (names) => {
+      const current = modelSelect.value || initial?.name || "";
+      modelSelect.replaceChildren();
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = names.length ? "(pick a LoRA)" : "(no LoRAs found)";
+      modelSelect.appendChild(placeholder);
+      for (const n of names) {
+        const opt = document.createElement("option");
+        opt.value = n;
+        opt.textContent = n;
+        modelSelect.appendChild(opt);
+      }
+      // Preserve a value that's no longer in the list (LoRA removed from disk)
+      // so the user can see + delete it rather than silently losing it.
+      if (current && !names.includes(current)) {
+        const opt = document.createElement("option");
+        opt.value = current;
+        opt.textContent = `${current}  (missing)`;
+        modelSelect.appendChild(opt);
+      }
+      modelSelect.value = current;
+    };
+    refreshOptions(loraNames);
+    modelCell.append(modelLabel, modelSelect);
+
+    const strengthCell = document.createElement("div");
+    strengthCell.className = "pl-lora-strength";
+    const strengthLabel = document.createElement("label");
+    strengthLabel.textContent = "Strength";
+    const strengthBar = document.createElement("div");
+    strengthBar.className = "pl-lora-strength-bar";
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = "-2";
+    slider.max = "2";
+    slider.step = "0.05";
+    // Round to 2dp on the way in too — float math would otherwise show e.g.
+    // 0.8500000000000001 in the number input and look broken.
+    const roundStrength = (v) => Math.round(v * 100) / 100;
+    slider.value = String(roundStrength(initial?.strength_model ?? 1.0));
+    const num = document.createElement("input");
+    num.type = "number";
+    num.min = "-2";
+    num.max = "2";
+    num.step = "0.05";
+    num.value = slider.value;
+    slider.addEventListener("input", () => {
+      num.value = String(roundStrength(Number(slider.value)));
+    });
+    num.addEventListener("input", () => {
+      const v = Math.max(-2, Math.min(2, Number(num.value) || 0));
+      slider.value = String(v);
+    });
+    strengthBar.append(slider, num);
+    strengthCell.append(strengthLabel, strengthBar);
+
+    const triggersCell = document.createElement("div");
+    triggersCell.style.display = "flex";
+    triggersCell.style.flexDirection = "column";
+    triggersCell.style.gap = "3px";
+    const triggersLabel = document.createElement("label");
+    triggersLabel.textContent = "Trigger words";
+    const triggersInput = document.createElement("input");
+    triggersInput.type = "text";
+    triggersInput.placeholder = "optional, comma-separated";
+    triggersInput.value = initial?.triggers || "";
+    triggersCell.append(triggersLabel, triggersInput);
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "pl-lora-delete";
+    deleteBtn.textContent = "Delete";
+    deleteBtn.title = "Remove this LoRA from the entry";
+    deleteBtn.onclick = () => {
+      row.remove();
+      const idx = rows.indexOf(rowApi);
+      if (idx !== -1) rows.splice(idx, 1);
+      renumber();
+    };
+
+    row.append(numCell, modelCell, strengthCell, triggersCell, deleteBtn);
+
+    const rowApi = {
+      el: row,
+      setIndex(n) { numCell.textContent = `LoRA ${n}`; },
+      refreshOptions,
+      getValue() {
+        const name = (modelSelect.value || "").trim();
+        if (!name) return null;
+        const s = Math.max(-2, Math.min(2, Number(num.value) || 0));
+        return {
+          name,
+          strength_model: s,
+          strength_clip: s,
+          triggers: triggersInput.value.trim(),
+          enabled: true,
+        };
+      },
+    };
+    return rowApi;
+  };
+
+  addBtn.onclick = () => {
+    if (rows.length >= LORAS_PER_ENTRY_CAP) return;
+    const row = buildRow(null);
+    rows.push(row);
+    list.appendChild(row.el);
+    renumber();
+  };
+
+  // Preload existing LoRA rows for entries that already have a stack saved.
+  for (const l of (initialLoras || []).slice(0, LORAS_PER_ENTRY_CAP)) {
+    const row = buildRow(l);
+    rows.push(row);
+    list.appendChild(row.el);
+  }
+
+  wrap.append(heading, headingHint, addWrap, list);
+  renumber();
+
+  return {
+    el: wrap,
+    getLoras() {
+      return rows.map(r => r.getValue()).filter(v => v !== null);
+    },
+    waitForOptions: () => loraNamesPromise,
+  };
+}
+
 function openPromptModal({ existing, onSave, onDelete }) {
   const modal = document.createElement("div");
   modal.className = "pl-modal";
@@ -657,6 +909,11 @@ function openPromptModal({ existing, onSave, onDelete }) {
   notesArea.value = existing?.notes || "";
   notesArea.placeholder = "context, intended use, what works well...";
   notesLabel.appendChild(notesArea);
+
+  // LoRA stack — only consumed by the Style node, but the section is shown
+  // for every entry so the same library can serve both the STRING and the
+  // Style nodes without separate edit flows.
+  const loraSection = buildLoraSection(existing?.loras || []);
 
   const imgLabel = document.createElement("label");
   imgLabel.textContent = "Reference image (optional)";
@@ -864,6 +1121,7 @@ function openPromptModal({ existing, onSave, onDelete }) {
         tags: tagsInput.value,
         rating: ratingValue,
         notes: notesArea.value,
+        loras: loraSection.getLoras(),
         imageFile: imgInput.files[0] || null,
         clearImage,
       });
@@ -893,14 +1151,15 @@ function openPromptModal({ existing, onSave, onDelete }) {
   actions.appendChild(cancelBtn);
   actions.appendChild(saveBtn);
 
-  const children = [header, nameLabel, idLabel, tagsLabel, textLabel, negLabel, ratingLabel, notesLabel, imgLabel];
+  const children = [header, nameLabel, idLabel, tagsLabel, textLabel, negLabel,
+    ratingLabel, notesLabel, loraSection.el, imgLabel];
   if (historyDetails) children.push(historyDetails);
   children.push(status, actions);
   modal.append(...children);
 
   // Initial position: cascade modals so stacked windows don't overlap exactly.
   const offset = (_modalStack++ % 6) * 24;
-  modal.style.left = `calc(50% - 230px + ${offset}px)`;
+  modal.style.left = `calc(50% - 270px + ${offset}px)`;
   modal.style.top = `calc(15% + ${offset}px)`;
   document.body.appendChild(modal);
 
@@ -2370,7 +2629,7 @@ app.registerExtension({
       registerBackgroundNode(nodeType);
       return;
     }
-    if (nodeData.name !== NODE_NAME) return;
+    if (!GALLERY_NODE_NAMES.has(nodeData.name)) return;
     injectStyle();
 
     const onNodeCreated = nodeType.prototype.onNodeCreated;
@@ -2417,8 +2676,12 @@ app.registerExtension({
       this._promptLibraryCleanup = cleanup;
       this._promptLibraryGalleryWidget = galleryWidget;
 
-      this.size = [320, 320];
-      if (typeof this.setSize === "function") this.setSize([320, 320]);
+      // The Style node has more sockets (MODEL/CLIP in+out, CONDITIONING in+out,
+      // STRING out) and an extra_text textarea widget — give it more vertical
+      // room so the gallery doesn't end up squashed.
+      const initialSize = nodeData.name === STYLE_NODE_NAME ? [340, 480] : [320, 320];
+      this.size = initialSize;
+      if (typeof this.setSize === "function") this.setSize(initialSize);
       return r;
     };
 
