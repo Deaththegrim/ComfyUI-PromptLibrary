@@ -178,14 +178,29 @@ const CSS = `
   padding: 6px; background: var(--pl-bg-elevated); border: 1px solid var(--pl-border-soft); border-radius: 3px; }
 .pl-lora-row label { font-size: 10px; color: var(--pl-fg-muted); text-transform: uppercase;
   letter-spacing: 0.4px; }
-.pl-lora-num { font-size: 12px; color: var(--pl-fg); align-self: end; padding-bottom: 4px; font-weight: 600; }
+/* The number column has no label above its input, so its baseline sits 1
+   row-of-label below everything else. Push it down to line up with the
+   input row instead of bottom-aligning to the row edge. */
+.pl-lora-num { font-size: 12px; color: var(--pl-fg); align-self: end; padding-bottom: 6px;
+  font-weight: 600; }
 .pl-lora-row select, .pl-lora-row input[type=text], .pl-lora-row input[type=number] {
   background: var(--pl-bg-input); color: var(--pl-fg); border: 1px solid var(--pl-border);
   padding: 4px 6px; border-radius: 3px; font-size: 11px; font-family: inherit; min-width: 0; width: 100%; box-sizing: border-box; }
 .pl-lora-row select:disabled { opacity: 0.6; }
 .pl-lora-strength { display: flex; flex-direction: column; gap: 3px; }
 .pl-lora-strength-bar { display: flex; align-items: center; gap: 4px; }
-.pl-lora-strength-bar input[type=range] { flex: 1 1 0; min-width: 0; accent-color: #6cae3e; }
+/* Custom-styled range input — the browser default is a near-invisible thin
+   line. Track is a 4px green-on-grey bar; thumb is a 14px green disc. */
+.pl-lora-strength-bar input[type=range] { flex: 1 1 0; min-width: 0; -webkit-appearance: none;
+  appearance: none; height: 4px; background: var(--pl-border); border-radius: 2px; outline: none;
+  padding: 0; cursor: pointer; }
+.pl-lora-strength-bar input[type=range]::-webkit-slider-thumb { -webkit-appearance: none;
+  appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #6cae3e;
+  border: 1px solid #4d8a2c; cursor: grab; }
+.pl-lora-strength-bar input[type=range]::-moz-range-thumb { width: 14px; height: 14px;
+  border-radius: 50%; background: #6cae3e; border: 1px solid #4d8a2c; cursor: grab; }
+.pl-lora-strength-bar input[type=range]::-moz-range-track { background: var(--pl-border);
+  height: 4px; border-radius: 2px; }
 .pl-lora-strength-bar input[type=number] { width: 60px; flex: 0 0 auto; }
 .pl-lora-row .pl-lora-delete { background: transparent; color: var(--pl-fg-muted);
   border: 1px solid var(--pl-border); padding: 4px 10px; font-size: 11px;
@@ -739,7 +754,7 @@ function buildLoraSection(initialLoras) {
     triggersLabel.textContent = "Trigger words";
     const triggersInput = document.createElement("input");
     triggersInput.type = "text";
-    triggersInput.placeholder = "optional, comma-separated";
+    triggersInput.placeholder = "optional";
     triggersInput.value = initial?.triggers || "";
     triggersCell.append(triggersLabel, triggersInput);
 
