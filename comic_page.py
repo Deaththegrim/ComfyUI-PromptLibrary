@@ -20,18 +20,26 @@ from __future__ import annotations
 
 # Inspire Pack's folder is `ComfyUI-Inspire-Pack` (hyphens), so Python's
 # normal `from custom_nodes...import` won't resolve it. Pull the registered
-# class out of ComfyUI's global node registry instead — that's the
-# package-naming-agnostic path. __init__.py wraps this module's load in
-# try/except so the suite still registers if Inspire Pack isn't installed.
+# class out of ComfyUI's global node registry instead.
+#
+# Look up at runtime, not at module load: ComfyUI's node-registration order
+# isn't deterministic across custom packs, and PromptLibrary often loads
+# before Inspire Pack does. If we look up Inspire's class at import time,
+# `nodes.NODE_CLASS_MAPPINGS` is empty for Inspire's keys and we silently
+# disable Comic Page. Deferring to build() guarantees the dict is fully
+# populated by the time a workflow actually runs the node.
 import nodes as _comfy_nodes  # type: ignore
 
-try:
-    RegionalConditioningColorMask = _comfy_nodes.NODE_CLASS_MAPPINGS["RegionalConditioningColorMask"]
-except (AttributeError, KeyError) as _e:
-    raise ImportError(
-        "GrimmRibbity Comic Page requires ComfyUI-Inspire-Pack to be installed "
-        "(it provides RegionalConditioningColorMask)."
-    ) from _e
+
+def _lookup_regional_cond_color_mask():
+    cls = getattr(_comfy_nodes, "NODE_CLASS_MAPPINGS", {}).get("RegionalConditioningColorMask")
+    if cls is None:
+        raise RuntimeError(
+            "GrimmRibbity Comic Page requires ComfyUI-Inspire-Pack to be installed and "
+            "loaded (it provides RegionalConditioningColorMask). If Inspire Pack IS "
+            "installed, restart ComfyUI — node-registration order matters."
+        )
+    return cls
 
 # Default 2x2 panel colour scheme — rendering this 4-colour mask in any
 # image editor (red top-left, green top-right, blue bottom-left, yellow
@@ -104,7 +112,7 @@ class GrimmRibbityComicPage:
     CATEGORY = "GrimmRibbity/Comic"
 
     def build(self, clip, panel_layout, strength, set_cond_area, **panels):
-        regional = RegionalConditioningColorMask()
+        regional = _lookup_regional_cond_color_mask()()
         combined: list = []
         active = 0
         for i in range(1, _PANEL_COUNT + 1):
