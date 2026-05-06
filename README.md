@@ -2,9 +2,9 @@
 
 [![tests](https://github.com/Deaththegrim/ComfyUI-PromptLibrary/actions/workflows/tests.yml/badge.svg)](https://github.com/Deaththegrim/ComfyUI-PromptLibrary/actions/workflows/tests.yml)
 
-A visual prompt manager for ComfyUI (formerly *Ribbity — ComfyUI Prompt Library*). Browse a thumbnail grid of saved prompts, tag them, drop them into your workflow with one click. Filesystem-backed — your library survives browser clears and syncs cleanly across machines.
+A visual prompt manager for ComfyUI (formerly *Ribbity — ComfyUI Prompt Library*). Browse a thumbnail grid of saved prompts, tag them, attach a per-entry LoRA stack, and drop the whole bundle into your workflow with one click. Filesystem-backed — your library survives browser clears and syncs cleanly across machines.
 
-Four nodes, one shared library, no third-party dependencies.
+A dozen+ nodes (Library, Style, Save, Random, Wildcard Expand, Multi, Comic Frame / Scene / Background, Comic Page Regional, Character Anchor, Save Image (Civitai), SDXL + Anima samplers, LoRA Picker), one shared library, mostly zero third-party dependencies — the Character Anchor node optionally pulls in IPAdapter Plus.
 
 ## Screenshots
 
@@ -16,7 +16,7 @@ The Comic Frame node combines a character, scene, and background entry into one 
 
 ![Comic Frame overview](docs/screenshots/comic-frame-overview.png)
 
-Plug it into your sampler with a Power Lora Loader for one-click LoRA stacks:
+Plug it into your sampler with a Power Lora Loader for one-click LoRA stacks — or use the new **Style node** (since v0.29.0) to bake the LoRA stack right into the gallery entry:
 
 ![SDXL pipeline](docs/screenshots/sdxl-pipeline.png)
 
