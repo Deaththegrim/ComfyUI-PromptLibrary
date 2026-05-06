@@ -1,45 +1,39 @@
-"""GrimmRibbity Comic Page (Regional) node.
+"""GrimmRibbity Comic Page (Regional) node — self-contained.
 
-Wraps Inspire Pack's RegionalConditioningColorMask + combine-conditionings
-pattern into a single node that takes a color-mask layout image and N
-per-panel prompts, and emits a single CONDITIONING ready for the sampler.
+Takes a color-mask layout image + N per-panel prompts and emits a single
+CONDITIONING ready for the sampler. Each panel's prompt is encoded with
+CLIP and constrained to its color region in the layout mask.
 
-Pair upstream with `GrimmRibbity — Character Anchor` (or any IPAdapter setup
-that produces a MODEL with a global character lock) and this gives you the
-per-panel scene/action conditioning for a single-gen multi-panel comic page.
+Pair upstream with `GrimmRibbity — Character Anchor` (or any IPAdapter
+setup that produces a MODEL with a global character lock) and this gives
+you per-panel scene/action conditioning for a single-gen multi-panel page.
 
-The 2026 research consensus is that per-panel generation with shared
+The 2026 research consensus is that per-panel generation with a shared
 IPAdapter anchor still beats single-gen; this node is the path for users
 who explicitly want the single-gen approach (faster, lower per-panel
 control). See research/comic_pipeline_2026.md for context.
 
-Hard dependency on ComfyUI-Inspire-Pack — module import fails fast and the
-suite registers without the node if Inspire isn't installed.
+NO external custom-pack dependencies. Uses only ComfyUI's built-in
+CLIPTextEncode and ConditioningSetMask plus torch — both always present
+in any ComfyUI install. Color-to-mask conversion is implemented here
+rather than imported from Inspire Pack.
 """
 from __future__ import annotations
 
-# Inspire Pack's folder is `ComfyUI-Inspire-Pack` (hyphens), so Python's
-# normal `from custom_nodes...import` won't resolve it. Pull the registered
-# class out of ComfyUI's global node registry instead.
-#
-# Look up at runtime, not at module load: ComfyUI's node-registration order
-# isn't deterministic across custom packs, and PromptLibrary often loads
-# before Inspire Pack does. If we look up Inspire's class at import time,
-# `nodes.NODE_CLASS_MAPPINGS` is empty for Inspire's keys and we silently
-# disable Comic Page. Deferring to build() guarantees the dict is fully
-# populated by the time a workflow actually runs the node.
+# CLIPTextEncode and ConditioningSetMask are in ComfyUI's nodes.py core,
+# registered before any custom packs load. The deferred-lookup pattern
+# isn't needed for these — they're guaranteed present at runtime.
 import nodes as _comfy_nodes  # type: ignore
 
+# torch is a ComfyUI core dep but the headless test venv (.testenv) skips
+# it for speed. Lazy import inside the helper that needs it so the module
+# still loads under tests; the helper raises a clear error if torch is
+# genuinely missing at runtime.
+try:
+    import torch as _torch  # type: ignore
+except ImportError:
+    _torch = None
 
-def _lookup_regional_cond_color_mask():
-    cls = getattr(_comfy_nodes, "NODE_CLASS_MAPPINGS", {}).get("RegionalConditioningColorMask")
-    if cls is None:
-        raise RuntimeError(
-            "GrimmRibbity Comic Page requires ComfyUI-Inspire-Pack to be installed and "
-            "loaded (it provides RegionalConditioningColorMask). If Inspire Pack IS "
-            "installed, restart ComfyUI — node-registration order matters."
-        )
-    return cls
 
 # Default 2x2 panel colour scheme — rendering this 4-colour mask in any
 # image editor (red top-left, green top-right, blue bottom-left, yellow
@@ -47,11 +41,38 @@ def _lookup_regional_cond_color_mask():
 _DEFAULT_COLORS = ("#FF0000", "#00FF00", "#0000FF", "#FFFF00")
 _PANEL_COUNT = 6  # widgets exposed; user can leave any unused (blank prompt)
 
+# Per-channel tolerance when matching a panel's hex color in the layout
+# image. Anti-alias artifacts on panel boundaries can shift a pure red
+# pixel by a few units; ~10/255 ≈ 0.039 swallows that without bleeding
+# into adjacent panels at this contrast level.
+_COLOR_MATCH_TOLERANCE = 0.04
 
-def _empty_conditioning():
-    """Empty CONDITIONING — a list of zero entries. Used as the fallback
-    when no panels have prompts (downstream sampler still needs a value)."""
-    return []
+
+def _hex_to_rgb01(hex_color: str) -> tuple[float, float, float]:
+    """Parse '#RRGGBB' or 'RRGGBB' into a (r, g, b) tuple in 0–1 range."""
+    h = hex_color.strip().lstrip("#")
+    if len(h) != 6:
+        raise ValueError(f"expected 6-char hex color, got {hex_color!r}")
+    return (
+        int(h[0:2], 16) / 255.0,
+        int(h[2:4], 16) / 255.0,
+        int(h[4:6], 16) / 255.0,
+    )
+
+
+def _color_to_mask(image, hex_color: str):
+    """Build a binary MASK from an IMAGE tensor by matching a target color.
+
+    image: (B, H, W, 3) float in 0–1 (ComfyUI's IMAGE convention)
+    returns: (B, H, W) float in {0.0, 1.0} — mask where image≈hex_color
+    """
+    if _torch is None:
+        raise RuntimeError("torch is required at runtime — ComfyUI provides it.")
+    r, g, b = _hex_to_rgb01(hex_color)
+    target = _torch.tensor([r, g, b], dtype=image.dtype, device=image.device)
+    # L1 distance per pixel across the 3 channels — channels-last tensor.
+    diff = (image - target).abs().sum(dim=-1)  # (B, H, W)
+    return (diff < _COLOR_MATCH_TOLERANCE * 3).to(dtype=image.dtype)
 
 
 class GrimmRibbityComicPage:
@@ -59,8 +80,7 @@ class GrimmRibbityComicPage:
 
     For each panel: encode its prompt with the supplied CLIP and constrain
     the resulting conditioning to the panel's color region in the layout
-    mask. Combine all panel conditionings into one output.
-    """
+    mask. Combine all panel conditionings into one output."""
 
     DESCRIPTION = (
         "Build a single CONDITIONING from a color-coded panel-layout mask "
@@ -68,9 +88,9 @@ class GrimmRibbityComicPage:
         "Wire CLIP in, panel_layout in (red/green/blue/yellow color mask), "
         "type per-panel prompts, and the output goes into your sampler's "
         "positive input. Empty prompts are skipped — leaving panel_5/6 blank "
-        "gives you a 4-panel page; using all 6 gives a denser layout. "
+        "gives a 4-panel page; using all 6 gives a denser layout. "
         "Pair with GrimmRibbity Character Anchor for character lock across "
-        "panels."
+        "panels. No third-party node packs required."
     )
 
     @classmethod
@@ -112,7 +132,9 @@ class GrimmRibbityComicPage:
     CATEGORY = "GrimmRibbity/Comic"
 
     def build(self, clip, panel_layout, strength, set_cond_area, **panels):
-        regional = _lookup_regional_cond_color_mask()()
+        encoder = _comfy_nodes.NODE_CLASS_MAPPINGS["CLIPTextEncode"]()
+        masker = _comfy_nodes.NODE_CLASS_MAPPINGS["ConditioningSetMask"]()
+
         combined: list = []
         active = 0
         for i in range(1, _PANEL_COUNT + 1):
@@ -120,14 +142,9 @@ class GrimmRibbityComicPage:
             color = (panels.get(f"panel_{i}_color") or "").strip()
             if not prompt or not color:
                 continue
-            # RegionalConditioningColorMask.doit returns (CONDITIONING, MASK) —
-            # we only need the conditioning; mask is for downstream use the
-            # caller can compute themselves if they need it.
-            cond, _mask = regional.doit(
-                clip=clip, color_mask=panel_layout, mask_color=color,
-                strength=strength, set_cond_area=set_cond_area, prompt=prompt,
-            )
-            # CONDITIONING is a list of entries; concatenate to combine regions.
+            mask = _color_to_mask(panel_layout, color)
+            (cond,) = encoder.encode(clip, prompt)
+            (cond,) = masker.append(cond, mask, set_cond_area, strength)
             if isinstance(cond, list):
                 combined.extend(cond)
             else:
@@ -135,7 +152,7 @@ class GrimmRibbityComicPage:
             active += 1
         if active == 0:
             print("[ComicPage] no panels had prompts — emitting empty CONDITIONING")
-            return (_empty_conditioning(),)
+            return ([],)
         return (combined,)
 
 
