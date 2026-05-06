@@ -112,7 +112,10 @@ class GrimmRibbityComicPage:
             color = (panels.get(f"panel_{i}_color") or "").strip()
             if not prompt or not color:
                 continue
-            (cond,) = regional.doit(
+            # RegionalConditioningColorMask.doit returns (CONDITIONING, MASK) —
+            # we only need the conditioning; mask is for downstream use the
+            # caller can compute themselves if they need it.
+            cond, _mask = regional.doit(
                 clip=clip, color_mask=panel_layout, mask_color=color,
                 strength=strength, set_cond_area=set_cond_area, prompt=prompt,
             )

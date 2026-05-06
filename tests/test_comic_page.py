@@ -24,9 +24,9 @@ def _install_fake_nodes_module():
                 "clip": clip, "color_mask": color_mask, "mask_color": mask_color,
                 "strength": strength, "set_cond_area": set_cond_area, "prompt": prompt,
             })
-            # Return a single-entry CONDITIONING — a list of one tuple — same
-            # shape Inspire Pack returns.
-            return ([(f"cond({mask_color}:{prompt[:20]})", {})],)
+            # Real Inspire returns (CONDITIONING, MASK) — a 2-tuple. Our wrapper
+            # discards the mask. Mirror that shape so tests catch unpacking bugs.
+            return ([(f"cond({mask_color}:{prompt[:20]})", {})], f"mask({mask_color})")
 
     fake_nodes = types.ModuleType("nodes")
     fake_nodes.NODE_CLASS_MAPPINGS = {
