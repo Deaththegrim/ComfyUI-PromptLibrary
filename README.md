@@ -54,12 +54,35 @@ Your `data/` folder is gitignored, so `git pull` won't touch your library. On fi
 
 ## Nodes
 
-After install, find them in the node menu under **utils/**:
+After install, find them under **GrimmRibbity/** sub-menus in the node picker:
 
-- **GrimmRibbity — Library** — visual gallery picker, outputs `STRING` (the selected prompt's text)
-- **GrimmRibbity — Save** — write prompts to the library during workflow runs (inputs: name, text, optional `IMAGE` thumbnail, optional tags)
-- **GrimmRibbity — Random by Tag** — pick a random library entry by tag filter, for overnight gen loops
+**Library (the core suite)**
+- **GrimmRibbity — Library** — visual gallery picker. Outputs `prompt` (positive) and `negative` STRINGs from the selected entry/entries
+- **GrimmRibbity — Multi Library (3 panels)** — three independent gallery panels in one node, replaces 3× Library + 2× Join Strings spaghetti
+- **GrimmRibbity — Save** — write prompts to the library during workflow runs (inputs: name, text, optional `negative`, optional `IMAGE` thumbnail, optional tags)
+- **GrimmRibbity — Random by Tag** — pick a random library entry by tag filter (outputs text, id, negative). Built for overnight loops
 - **GrimmRibbity — Wildcard Expand** — expand `{a|b|c}` alternatives and `__name__` library refs in any string
+
+**Comic / character workflow helpers**
+- **GrimmRibbity — Comic Frame** — combines character + scene + background entries into one prompt, with per-frame seed offset for comic batches
+- **GrimmRibbity — Scene** — per-frame scene knobs (camera_angle, mood, lighting, framing) + free-text extras
+- **GrimmRibbity — Background (locked)** — locked background preset for series consistency
+- **GrimmRibbity — Character Anchor** — wraps IPAdapter Plus's UnifiedLoader + Apply pair into a single MODEL→MODEL transform. Pin a character's face/style across comic panels with one node instead of three. Includes a `bypass` toggle and an `attn_mask` input for future regional workflows. **Requires [ComfyUI_IPAdapter_plus](https://github.com/cubiq/ComfyUI_IPAdapter_plus).**
+
+**Output**
+- **GrimmRibbity — Save Image (Civitai)** — SaveImage replacement that writes A1111/Civitai-compatible PNG metadata. Auto-detects model, LoRAs, positive/negative, seed, sampler, scheduler from the workflow trace. Override any field if auto-detect picks the wrong sampler in multi-KSampler workflows
+- **GrimmRibbity — Thumbnail Saver** — writes library thumbnails on workflow runs
+
+**Sampling (optional, requires torch)**
+- **GrimmRibbity — SDXL Sampler** + **Pack SDXL Tuple** — SDXL sampler with optional refiner + HiResFix script
+- **GrimmRibbity — Anima Sampler** — KSampler-shaped sampler with HiResFix script support
+
+**LoRA picker**
+- **GrimmRibbity — LoRA Picker** — dropdown picker that emits a `<lora:path:weight>` token for downstream parsing (rgthree Power LoRA Loader / A1111-style)
+
+### Negative prompt field
+
+Every entry can store an optional `negative` field alongside its positive `text`. The Library, Save, and Random nodes all flow it on a second STRING output. Wire that into the negative side of your sampler. Backward-compatible — entries without a negative field load as empty.
 
 ## Gallery
 
