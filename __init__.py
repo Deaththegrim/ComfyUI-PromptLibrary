@@ -1406,6 +1406,20 @@ class PromptLibraryComicFrame:
                 "background": ("STRING", {"default": "", "multiline": True,
                                            "forceInput": True,
                     "tooltip": "Wire from a GrimmRibbity Background node. Repeated verbatim on every frame."}),
+                # Negative-side wires — flow Library's `negative` output into
+                # any of these and ComicFrame joins them into one negative
+                # output so a single sampler pair (positive/negative) sees the
+                # full per-frame stack.
+                "character_negative": ("STRING", {"default": "", "multiline": True,
+                                                   "forceInput": True,
+                    "tooltip": "Optional. Wire from a Library node's `negative` output for the "
+                               "character. Repeated verbatim on every frame."}),
+                "scene_negative": ("STRING", {"default": "", "multiline": True,
+                                               "forceInput": True,
+                    "tooltip": "Optional. Negative-prompt counterpart for the scene wire."}),
+                "background_negative": ("STRING", {"default": "", "multiline": True,
+                                                    "forceInput": True,
+                    "tooltip": "Optional. Negative-prompt counterpart for the background wire."}),
                 # Adds frame_index to whatever upstream seed you wire in,
                 # giving each panel a deterministic-but-different seed.
                 "base_seed": ("INT", {"default": 0, "min": 0, "max": _INT_MAX,
@@ -1416,13 +1430,14 @@ class PromptLibraryComicFrame:
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "INT", "INT")
-    RETURN_NAMES = ("prompt", "action", "seed", "frame_count")
+    RETURN_TYPES = ("STRING", "STRING", "INT", "INT", "STRING")
+    RETURN_NAMES = ("prompt", "action", "seed", "frame_count", "negative")
     OUTPUT_TOOLTIPS = (
         "Final positive prompt: character + scene + background + frames[index].",
         "Just the per-frame action text. Useful for filename builders or text overlays.",
         "base_seed + (frame_index - 1). Wire into CivitaiSaveImage.seed_override.",
         "Total number of authored frames. Useful for downstream branching/looping.",
+        "Joined negative prompt from any wired *_negative inputs (empty if none).",
     )
     FUNCTION = "assemble"
     CATEGORY = "GrimmRibbity/Comic"
@@ -1438,7 +1453,9 @@ class PromptLibraryComicFrame:
         return [str(f).strip() for f in data]
 
     def assemble(self, frames_json, frame_index, separator=", ",
-                 character="", scene="", background="", base_seed=0):
+                 character="", scene="", background="",
+                 character_negative="", scene_negative="", background_negative="",
+                 base_seed=0):
         frames = self._parse_frames(frames_json)
         if not frames:
             print("[PromptLibraryComicFrame] no frames defined; emitting anchors only")
@@ -1450,8 +1467,11 @@ class PromptLibraryComicFrame:
         parts = [p.strip() for p in (character, scene, background, action)
                  if p and p.strip()]
         prompt = separator.join(parts)
+        neg_parts = [p.strip() for p in (character_negative, scene_negative, background_negative)
+                      if p and p.strip()]
+        negative = separator.join(neg_parts)
         seed = (int(base_seed) + max(0, int(frame_index) - 1)) & _INT_MAX
-        return (prompt, action, seed, len(frames))
+        return (prompt, action, seed, len(frames), negative)
 
 
 if PromptServer is not None:

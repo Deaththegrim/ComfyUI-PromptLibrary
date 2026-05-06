@@ -1144,7 +1144,7 @@ class PromptLibraryTests(unittest.TestCase):
 
     def test_comic_frame_combines_anchors_and_action(self):
         node = self.mod.PromptLibraryComicFrame()
-        prompt, action, seed, count = node.assemble(
+        prompt, action, seed, count, negative = node.assemble(
             frames_json='["kicks the door open", "phone rings", "answers, surprised"]',
             frame_index=2, separator=", ",
             character="frieren, white hair",
@@ -1156,10 +1156,11 @@ class PromptLibraryTests(unittest.TestCase):
         self.assertEqual(action, "phone rings")
         self.assertEqual(seed, 1001)
         self.assertEqual(count, 3)
+        self.assertEqual(negative, "")  # no negatives wired
 
     def test_comic_frame_clamps_index_above_range(self):
         node = self.mod.PromptLibraryComicFrame()
-        prompt, action, seed, count = node.assemble(
+        prompt, action, seed, count, _neg = node.assemble(
             frames_json='["a", "b"]', frame_index=99,
             character="x",
         )
@@ -1168,14 +1169,14 @@ class PromptLibraryTests(unittest.TestCase):
 
     def test_comic_frame_clamps_index_below_range(self):
         node = self.mod.PromptLibraryComicFrame()
-        prompt, action, _seed, _count = node.assemble(
+        prompt, action, _seed, _count, _neg = node.assemble(
             frames_json='["a", "b"]', frame_index=0,
         )
         self.assertEqual(action, "a")
 
     def test_comic_frame_no_frames_emits_anchors_only(self):
         node = self.mod.PromptLibraryComicFrame()
-        prompt, action, _seed, count = node.assemble(
+        prompt, action, _seed, count, _neg = node.assemble(
             frames_json='[]', frame_index=1,
             character="hero", scene="night", background="rooftop",
         )
@@ -1185,18 +1186,39 @@ class PromptLibraryTests(unittest.TestCase):
 
     def test_comic_frame_invalid_frames_json_falls_back(self):
         node = self.mod.PromptLibraryComicFrame()
-        prompt, action, _, count = node.assemble(
+        prompt, action, _, count, _neg = node.assemble(
             frames_json='not valid json', frame_index=1, character="x",
         )
         self.assertEqual(prompt, "x")
         self.assertEqual(action, "")
         self.assertEqual(count, 0)
 
+    def test_comic_frame_joins_wired_negatives(self):
+        node = self.mod.PromptLibraryComicFrame()
+        _prompt, _action, _seed, _count, negative = node.assemble(
+            frames_json='["a"]', frame_index=1, separator=", ",
+            character="hero",
+            character_negative="lowres",
+            scene_negative="bad_anatomy",
+            background_negative="watermark",
+        )
+        self.assertEqual(negative, "lowres, bad_anatomy, watermark")
+
+    def test_comic_frame_skips_blank_negatives_in_join(self):
+        node = self.mod.PromptLibraryComicFrame()
+        _, _, _, _, negative = node.assemble(
+            frames_json='["a"]', frame_index=1, separator=", ",
+            character_negative="lowres",
+            scene_negative="",            # blank — skipped
+            background_negative="watermark",
+        )
+        self.assertEqual(negative, "lowres, watermark")
+
     def test_comic_frame_seed_offset_per_frame(self):
         node = self.mod.PromptLibraryComicFrame()
         seeds = []
         for i in range(1, 4):
-            _, _, seed, _ = node.assemble(
+            _, _, seed, _, _ = node.assemble(
                 frames_json='["a","b","c"]', frame_index=i, base_seed=12345,
             )
             seeds.append(seed)
