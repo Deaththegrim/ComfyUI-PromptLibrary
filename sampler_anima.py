@@ -227,6 +227,17 @@ class GrimmRibbityAnimaSampler:
                 "script": (GRIMM_ANIMA_SCRIPT_TYPE, {
                     "tooltip": "Optional Anima script pipe (e.g. Anima HiResFix). Runs "
                                "after the primary pass."}),
+                "save_prompt_log": ("BOOLEAN", {"default": False,
+                    "tooltip": "When True, append one JSONL line per call to prompt_log_path "
+                               "(positive, negative, loras, seed, sampler params, model). "
+                               "Default off — flip on for overnight batches you want to grep later."}),
+                "prompt_log_path": ("STRING", {"default": "", "multiline": False,
+                    "tooltip": "JSONL log file. Empty = <output>/prompt_logs/prompts.jsonl. "
+                               "Relative paths root at the ComfyUI output dir; absolute paths "
+                               "honoured verbatim."}),
+            },
+            "hidden": {
+                "prompt_trace": "PROMPT",
             },
         }
 
@@ -244,7 +255,8 @@ class GrimmRibbityAnimaSampler:
 
     def sample(self, model, positive, negative, latent_image, noise_seed, steps,
                cfg, sampler_name, scheduler, denoise, vae_decode,
-               optional_vae=None, script=None):
+               optional_vae=None, script=None,
+               save_prompt_log=False, prompt_log_path="", prompt_trace=None):
         if vae_decode != "false" and optional_vae is None:
             raise ValueError(
                 "Anima Sampler: vae_decode is enabled but optional_vae is not wired. "
@@ -272,5 +284,22 @@ class GrimmRibbityAnimaSampler:
         image_out = _vae_decode(optional_vae, latent_out, mode=vae_decode)
         if image_out is None:
             image_out = torch.zeros((1, 1, 1, 3))
+
+        if save_prompt_log:
+            try:
+                from .prompt_log import append_prompt_log, build_record, resolve_log_path
+                batch_size = (latent_image.get("samples").shape[0]
+                               if isinstance(latent_image, dict)
+                               and hasattr(latent_image.get("samples"), "shape") else 1)
+                record = build_record(
+                    sampler_node="GrimmRibbityAnimaSampler",
+                    prompt_trace=prompt_trace,
+                    runtime={"seed": int(noise_seed), "steps": steps, "cfg": cfg,
+                              "sampler_name": sampler_name, "scheduler": scheduler,
+                              "denoise": denoise, "batch_size": batch_size},
+                )
+                append_prompt_log(record, resolve_log_path(prompt_log_path))
+            except Exception as e:
+                print(f"[GrimmRibbityAnimaSampler] prompt_log append failed: {e}")
 
         return (image_out, latent_out, model, int(noise_seed))

@@ -635,6 +635,17 @@ class GrimmRibbitySamplerSDXL:
                                "a VAE) or the sampler will use the model's bundled VAE if your "
                                "tuple was packed via our default flow. Required if the tuple "
                                "comes from a path that doesn't include a VAE."}),
+                "save_prompt_log": ("BOOLEAN", {"default": False,
+                    "tooltip": "When True, append one JSONL line per call to prompt_log_path "
+                               "(positive, negative, loras, seed, sampler params, model). "
+                               "Default off — flip on for overnight batches you want to grep later."}),
+                "prompt_log_path": ("STRING", {"default": "", "multiline": False,
+                    "tooltip": "JSONL log file. Empty = <output>/prompt_logs/prompts.jsonl. "
+                               "Relative paths root at the ComfyUI output dir; absolute paths "
+                               "honoured verbatim."}),
+            },
+            "hidden": {
+                "prompt_trace": "PROMPT",
             },
         }
 
@@ -656,7 +667,9 @@ class GrimmRibbitySamplerSDXL:
 
     def sample(self, sdxl_tuple, noise_seed, steps, cfg, sampler_name, scheduler,
                latent_image, start_at_step, end_at_step, vae_decode,
-               script=None, optional_vae=None, **legacy_kwargs):
+               script=None, optional_vae=None,
+               save_prompt_log=False, prompt_log_path="",
+               prompt_trace=None, **legacy_kwargs):
         # Backward-compat shim: workflows saved against v0.21.0 wire ports
         # named differently (e.g. vae_override). Drain them here so the
         # workflow keeps loading instead of crashing on an unexpected kwarg.
@@ -715,4 +728,22 @@ class GrimmRibbitySamplerSDXL:
 
         out_tuple = (base_model, base_clip, positive_cond, negative_cond,
                      *(rest + [None] * (4 - len(rest)))[:4])
+
+        if save_prompt_log:
+            try:
+                from .prompt_log import append_prompt_log, build_record, resolve_log_path
+                batch_size = (latent_image.get("samples").shape[0]
+                               if isinstance(latent_image, dict)
+                               and hasattr(latent_image.get("samples"), "shape") else 1)
+                record = build_record(
+                    sampler_node="GrimmRibbitySamplerSDXL",
+                    prompt_trace=prompt_trace,
+                    runtime={"seed": int(noise_seed), "steps": steps, "cfg": cfg,
+                              "sampler_name": sampler_name, "scheduler": scheduler,
+                              "batch_size": batch_size},
+                )
+                append_prompt_log(record, resolve_log_path(prompt_log_path))
+            except Exception as e:
+                print(f"[GrimmRibbitySamplerSDXL] prompt_log append failed: {e}")
+
         return (image_out, latent_out, base_model, base_clip, vae, int(noise_seed), out_tuple)
