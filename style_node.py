@@ -234,23 +234,32 @@ class PromptLibraryStyle:
     FUNCTION = "apply"
     CATEGORY = "GrimmRibbity/Library"
 
+    @staticmethod
+    def _split_ids(prompt_id: str) -> list[str]:
+        return [p.strip() for p in (prompt_id or "").split(",") if p.strip()]
+
     @classmethod
     def IS_CHANGED(cls, model, clip, prompt_id, positive=None, negative=None,
                     extra_text="", strength_scale=1.0, bypass=False):
         if bypass:
             return "bypass"
+        ids = cls._split_ids(prompt_id)
         with _lock:
-            entry = next((i for i in _load() if i.get("id") == (prompt_id or "").strip()), None)
-        if entry is None:
-            return f"miss:{prompt_id}"
-        loras = entry.get("loras") or []
-        sig = "|".join(
-            f"{l.get('name','')}:{l.get('strength_model',1.0):g}:{l.get('strength_clip',1.0):g}:"
-            f"{int(bool(l.get('enabled', True)))}:{(l.get('triggers') or '').strip()}"
-            for l in loras
-        )
-        return (f"{entry.get('text','')}::{entry.get('negative','')}::{extra_text}::"
-                f"{strength_scale:g}::{sig}")
+            items = {i.get("id"): i for i in _load()}
+        sigs: list[str] = []
+        for pid in ids:
+            entry = items.get(pid)
+            if entry is None:
+                sigs.append(f"miss:{pid}")
+                continue
+            loras = entry.get("loras") or []
+            lora_sig = "|".join(
+                f"{l.get('name','')}:{l.get('strength_model',1.0):g}:{l.get('strength_clip',1.0):g}:"
+                f"{int(bool(l.get('enabled', True)))}:{(l.get('triggers') or '').strip()}"
+                for l in loras
+            )
+            sigs.append(f"{entry.get('text','')}::{entry.get('negative','')}::{lora_sig}")
+        return f"{extra_text}::{strength_scale:g}::" + "@@".join(sigs)
 
     def apply(self, model, clip, prompt_id, positive=None, negative=None,
                 extra_text="", strength_scale=1.0, bypass=False):
@@ -261,34 +270,65 @@ class PromptLibraryStyle:
             neg_out = negative if negative else _encode_prompt(clip, "")
             return (model, clip, pos_out, neg_out, "")
 
-        pid = (prompt_id or "").strip()
+        ids = self._split_ids(prompt_id)
         with _lock:
-            entry = next((i for i in _load() if i.get("id") == pid), None)
-        if entry is None:
-            _log.warning("PromptLibraryStyle: no entry with id=%r; passing through", pid)
+            items = {i.get("id"): i for i in _load()}
+        entries = [items[pid] for pid in ids if pid in items]
+        missing = [pid for pid in ids if pid not in items]
+        for pid in missing:
+            _log.warning("PromptLibraryStyle: no entry with id=%r; skipped", pid)
+
+        if not entries:
+            # Nothing selected (or every selection missing) — emit a valid
+            # but trivial conditioning so the sampler doesn't crash.
             pos_out = positive if positive else _encode_prompt(clip, "")
             neg_out = negative if negative else _encode_prompt(clip, "")
             return (model, clip, pos_out, neg_out, "")
 
-        loras = list(entry.get("loras") or [])
-        patched_model, patched_clip, lora_status = _apply_loras(
-            model, clip, loras, strength_scale)
-        full_text = _format_prompt(entry.get("text", ""), loras, extra_text)
+        # Stack every selected entry's LoRAs in pick-order. Comfy's load_lora_for_models
+        # composes patches additively on the model patcher, so applying entry A's
+        # LoRAs then entry B's gives the same effect as the rgthree Power Lora Loader
+        # chained twice. Same patched clip then encodes both prompts.
+        patched_model, patched_clip = model, clip
+        all_loras: list[dict] = []
+        prompt_parts: list[str] = []
+        neg_parts: list[str] = []
+        all_status: list[str] = []
+        for entry in entries:
+            loras = list(entry.get("loras") or [])
+            patched_model, patched_clip, status = _apply_loras(
+                patched_model, patched_clip, loras, strength_scale)
+            all_loras.extend(loras)
+            all_status.extend(status)
+            text = _trim_comma_ws(entry.get("text", ""))
+            if text:
+                prompt_parts.append(text)
+            neg = _trim_comma_ws(entry.get("negative", ""))
+            if neg:
+                neg_parts.append(neg)
+
+        # _format_prompt joins entry text + every LoRA's triggers + extra_text.
+        # We've already collected the per-entry texts into prompt_parts; pass an
+        # empty text and let the loras + extra_text path do the trigger appends,
+        # then prepend the joined prompts.
+        joined_text = ", ".join(prompt_parts)
+        full_text = _format_prompt(joined_text, all_loras, extra_text)
+
         new_pos = _encode_prompt(patched_clip, full_text)
         merged_pos = _concat_conditioning(positive, new_pos)
-        # Negative is encoded only when the entry actually carries one — the
-        # input negative passes through untouched otherwise. This matches
-        # how the Library node treats the negative STRING.
-        entry_neg = (entry.get("negative") or "").strip()
-        if entry_neg:
-            new_neg = _encode_prompt(patched_clip, entry_neg)
+
+        if neg_parts:
+            joined_neg = ", ".join(neg_parts)
+            new_neg = _encode_prompt(patched_clip, joined_neg)
             merged_neg = _concat_conditioning(negative, new_neg)
         elif negative:
             merged_neg = negative
         else:
             merged_neg = _encode_prompt(patched_clip, "")
 
-        if lora_status:
-            _log.info("PromptLibraryStyle: applied %d LoRA(s) for %r: %s",
-                       len(loras), entry.get("name", pid), " ".join(lora_status))
+        if all_status or len(entries) > 1:
+            names = [e.get("name") or e.get("id", "?") for e in entries]
+            _log.info("PromptLibraryStyle: %d entries (%s); %d LoRA(s): %s",
+                       len(entries), ", ".join(names), len(all_loras),
+                       " ".join(all_status) or "(none)")
         return (patched_model, patched_clip, merged_pos, merged_neg, full_text)
