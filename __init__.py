@@ -1473,6 +1473,7 @@ async def list_prompts(_request):
             "id": pid,
             "name": item.get("name", ""),
             "text": item.get("text", ""),
+            "negative": item.get("negative", ""),
             "tags": item.get("tags", []),
             "rating": int(item.get("rating", 0) or 0),
             "notes": item.get("notes", ""),

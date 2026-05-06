@@ -243,6 +243,28 @@ class PromptLibraryTests(unittest.TestCase):
         body = json.loads(resp.body)
         self.assertEqual(body, {"prompts": []})
 
+    def test_list_route_exposes_negative_field(self):
+        # The frontend modal needs /list to surface negative so the textarea
+        # repopulates on edit. Default empty for entries that don't store one.
+        self.mod._save([
+            {"id": "a", "name": "A", "text": "a", "tags": []},
+            {"id": "b", "name": "B", "text": "b", "tags": [], "negative": "lowres, blurry"},
+        ])
+        resp = asyncio.run(self.mod.list_prompts(FakeRequest()))
+        body = json.loads(resp.body)
+        by_id = {p["id"]: p for p in body["prompts"]}
+        self.assertEqual(by_id["a"]["negative"], "")
+        self.assertEqual(by_id["b"]["negative"], "lowres, blurry")
+
+    def test_upsert_route_accepts_negative_field(self):
+        req = FakeRequest(post_data={"name": "Cat", "text": "fluffy",
+                                       "negative": "no_dogs, no_cars"})
+        resp = asyncio.run(self.mod.upsert_prompt(req))
+        body = json.loads(resp.body)
+        self.assertEqual(resp.status, 200)
+        items = self.mod._load()
+        self.assertEqual(items[0]["negative"], "no_dogs, no_cars")
+
     def test_upsert_creates_new_prompt(self):
         req = FakeRequest(post_data={"name": "Cat", "text": "fluffy"})
         resp = asyncio.run(self.mod.upsert_prompt(req))

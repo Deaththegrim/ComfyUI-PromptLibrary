@@ -316,11 +316,12 @@ function slugify(name) {
     .slice(0, 64);
 }
 
-async function upsert({ id, name, text, tags, rating, notes, imageFile, clearImage }) {
+async function upsert({ id, name, text, negative, tags, rating, notes, imageFile, clearImage }) {
   const body = new FormData();
   if (id) body.append("id", id);
   body.append("name", name);
   body.append("text", text);
+  if (negative !== undefined) body.append("negative", negative);
   if (tags !== undefined) body.append("tags", tags);
   if (rating !== undefined && rating !== null) body.append("rating", String(rating));
   if (notes !== undefined) body.append("notes", notes);
@@ -610,6 +611,15 @@ function openPromptModal({ existing, onSave, onDelete }) {
   textArea.value = existing?.text || "";
   textLabel.appendChild(textArea);
 
+  // Optional negative prompt — paired with the positive on the Library/Save/
+  // Random nodes' second STRING output. Empty stays empty (no field written).
+  const negLabel = document.createElement("label");
+  negLabel.textContent = "Negative prompt (optional)";
+  const negArea = document.createElement("textarea");
+  negArea.value = existing?.negative || "";
+  negArea.placeholder = "lowres, bad_anatomy, watermark…  (leave blank to omit)";
+  negLabel.appendChild(negArea);
+
   // Rating: 5 toggle stars. Clicking the active rating clears it (rating = 0).
   const ratingLabel = document.createElement("label");
   ratingLabel.textContent = "Rating";
@@ -850,6 +860,7 @@ function openPromptModal({ existing, onSave, onDelete }) {
         id: existing?.id || customId,
         name,
         text: textArea.value,
+        negative: negArea.value,
         tags: tagsInput.value,
         rating: ratingValue,
         notes: notesArea.value,
@@ -882,7 +893,7 @@ function openPromptModal({ existing, onSave, onDelete }) {
   actions.appendChild(cancelBtn);
   actions.appendChild(saveBtn);
 
-  const children = [header, nameLabel, idLabel, tagsLabel, textLabel, ratingLabel, notesLabel, imgLabel];
+  const children = [header, nameLabel, idLabel, tagsLabel, textLabel, negLabel, ratingLabel, notesLabel, imgLabel];
   if (historyDetails) children.push(historyDetails);
   children.push(status, actions);
   modal.append(...children);
