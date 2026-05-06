@@ -1625,6 +1625,7 @@ def _import_csv(text: str, *, mode: str = "add_only") -> tuple[int, int, int, li
                 errors.append(f"row {row_num}: empty name")
                 continue
             text_val = row.get("text", "") or ""
+            negative_val = (row.get("negative") or "").strip()
             # Tags use ';' inside CSV cell since ',' is the field delimiter.
             tags = _parse_tags((row.get("tags") or "").replace(";", ","))
             row_id = (row.get("id") or "").strip()
@@ -1645,11 +1646,17 @@ def _import_csv(text: str, *, mode: str = "add_only") -> tuple[int, int, int, li
                 index[row_id] = existing
                 added += 1
             else:
-                _maybe_push_history(existing, name, text_val, tags)
+                _maybe_push_history(existing, name, text_val, tags,
+                                      new_negative=negative_val)
                 updated += 1
             existing["name"] = name
             existing["text"] = text_val
             existing["tags"] = tags
+            # Same blank-clears-the-field semantics as Save / upsert: only
+            # write the field if the row supplies one OR the entry already
+            # has one (so a blank cell on an update genuinely clears it).
+            if negative_val or "negative" in existing:
+                existing["negative"] = negative_val
             _touch(existing, created=created)
 
         _save(items)

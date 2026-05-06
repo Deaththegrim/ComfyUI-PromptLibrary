@@ -705,6 +705,33 @@ class PromptLibraryTests(unittest.TestCase):
         _, _, _, errors = self.mod._import_csv(text)
         self.assertTrue(any("name" in e for e in errors))
 
+    def test_import_csv_accepts_optional_negative_column(self):
+        text = "name,text,negative\nKnight,a knight,lowres bad_anatomy\n"
+        added, _, _, errors = self.mod._import_csv(text)
+        self.assertEqual(added, 1)
+        self.assertEqual(errors, [])
+        items = self.mod._load()
+        self.assertEqual(items[0]["negative"], "lowres bad_anatomy")
+
+    def test_import_csv_omits_negative_field_when_column_absent(self):
+        # No negative column at all — the existing CSV format keeps working
+        # and entries don't get a stray empty negative field.
+        text = "name,text\nKnight,a knight\n"
+        added, _, _, errors = self.mod._import_csv(text)
+        self.assertEqual(added, 1)
+        self.assertEqual(errors, [])
+        self.assertNotIn("negative", self.mod._load()[0])
+
+    def test_import_csv_blank_negative_on_update_clears_existing(self):
+        # Mirrors the Save-node semantics: blank input on update explicitly
+        # clears any prior value.
+        self.mod._save([{"id": "k", "name": "Knight", "text": "a knight",
+                          "tags": [], "negative": "lowres"}])
+        text = "name,text,negative,id\nKnight,a knight,,k\n"
+        _, updated, _, _ = self.mod._import_csv(text, mode="update")
+        self.assertEqual(updated, 1)
+        self.assertEqual(self.mod._load()[0]["negative"], "")
+
     def test_import_csv_route(self):
         text = "name,text,tags,id\nFoo,bar,t1;t2,foo\n"
         req = FakeRequest(post_data={"csv": text})
