@@ -400,10 +400,12 @@ def _push_history(item: dict) -> None:
     item["history"] = history[-_HISTORY_CAP:]
 
 
-def _maybe_push_history(item: dict, new_name: str, new_text: str, new_tags: list) -> None:
+def _maybe_push_history(item: dict, new_name: str, new_text: str, new_tags: list,
+                          new_negative: str = "") -> None:
     """Push history only if any user-visible field actually changes (image excluded)."""
     if (item.get("name", "") == new_name
         and item.get("text", "") == new_text
+        and item.get("negative", "") == new_negative
         and list(item.get("tags") or []) == list(new_tags or [])):
         return
     _push_history(item)
@@ -458,9 +460,13 @@ class PromptLibrary:
             }
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("prompt",)
-    OUTPUT_TOOLTIPS = ("The selected prompt(s) joined by the separator.",)
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("prompt", "negative")
+    OUTPUT_TOOLTIPS = (
+        "The selected prompt(s) joined by the separator.",
+        "Joined negative-prompt text from the same entries (empty for entries "
+        "that don't store one). Wire into the negative side of your sampler.",
+    )
     FUNCTION = "load_prompt"
     CATEGORY = "GrimmRibbity/Library"
 
@@ -472,23 +478,31 @@ class PromptLibrary:
     def IS_CHANGED(cls, prompt_id, separator=", "):
         ids = cls._split_ids(prompt_id)
         with _lock:
-            items = {i.get("id"): i.get("text", "") for i in _load()}
-        return separator.join(items.get(pid, "") for pid in ids)
+            items = {i.get("id"): (i.get("text", ""), i.get("negative", ""))
+                     for i in _load()}
+        joined_pos = separator.join(items.get(pid, ("", ""))[0] for pid in ids)
+        joined_neg = separator.join(items.get(pid, ("", ""))[1] for pid in ids)
+        return f"{joined_pos}|||{joined_neg}"
 
     def load_prompt(self, prompt_id: str, separator: str = ", "):
         ids = self._split_ids(prompt_id)
         with _lock:
-            items = {i.get("id"): i.get("text", "") for i in _load()}
-        parts = []
-        missing = []
+            items = {i.get("id"): (i.get("text", ""), i.get("negative", ""))
+                     for i in _load()}
+        pos_parts: list[str] = []
+        neg_parts: list[str] = []
+        missing: list[str] = []
         for pid in ids:
             if pid in items:
-                parts.append(items[pid])
+                pos, neg = items[pid]
+                pos_parts.append(pos)
+                if neg:
+                    neg_parts.append(neg)
             else:
                 missing.append(pid)
         if missing:
             print(f"[PromptLibrary] no prompt with id(s)={missing!r}; skipped")
-        return (separator.join(parts),)
+        return (separator.join(pos_parts), separator.join(neg_parts))
 
 
 class PromptLibraryMulti:
@@ -687,6 +701,9 @@ class PromptLibrarySave:
             "optional": {
                 "thumbnail": ("IMAGE", {"tooltip": "Optional preview image. The first frame is "
                                                       "downsized to <=512px and stored as a thumbnail."}),
+                "negative": ("STRING", {"default": "", "multiline": True,
+                    "tooltip": "Optional negative-prompt text stored alongside this entry. "
+                               "The Library loader emits it on its 'negative' output port."}),
                 "tags": ("STRING", {"default": "", "multiline": False,
                     "tooltip": "Comma-separated tags. Use 'category:value' (e.g. model:anima, "
                                "style:cyberpunk) to enable category-grouped filter chips."}),
@@ -709,7 +726,7 @@ class PromptLibrarySave:
     CATEGORY = "GrimmRibbity/Library"
     OUTPUT_NODE = True
 
-    def save(self, name, text, thumbnail=None, tags="", prompt_id="", overwrite_by_name=False):
+    def save(self, name, text, thumbnail=None, negative="", tags="", prompt_id="", overwrite_by_name=False):
         name = (name or "").strip()
         if not name:
             raise ValueError("PromptLibrarySave: name is required")
@@ -734,11 +751,14 @@ class PromptLibrarySave:
                 existing = {"id": pid}
                 items.append(existing)
             else:
-                _maybe_push_history(existing, name, text or "", parsed_tags)
+                _maybe_push_history(existing, name, text or "", parsed_tags,
+                                      new_negative=negative or "")
 
             existing["name"] = name
             existing["text"] = text or ""
             existing["tags"] = parsed_tags
+            if negative or "negative" in existing:
+                existing["negative"] = negative or ""
             _touch(existing, created=created)
 
             if thumbnail is not None:
@@ -879,11 +899,12 @@ class PromptLibraryRandom:
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("text", "id")
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("text", "id", "negative")
     OUTPUT_TOOLTIPS = (
         "The randomly picked entry's prompt text (after wildcard expansion).",
         "The picked entry's ID — useful for logging or re-running.",
+        "The entry's negative-prompt text (empty if none stored).",
     )
     FUNCTION = "pick"
     CATEGORY = "GrimmRibbity/Library"
@@ -902,13 +923,16 @@ class PromptLibraryRandom:
             matches = list(items)
         if not matches:
             print(f"[PromptLibrary] no entries match tag_filter={tag_filter!r}")
-            return ("", "")
+            return ("", "", "")
         rng = random.Random(seed)
         chosen = rng.choice(matches)
         text = chosen.get("text", "")
+        negative = chosen.get("negative", "")
         if expand_wildcards:
             text = _expand_wildcards(text, items, rng)
-        return (text, chosen.get("id", ""))
+            if negative:
+                negative = _expand_wildcards(negative, items, rng)
+        return (text, chosen.get("id", ""), negative)
 
 
 class PromptLibraryWildcard:
@@ -1488,6 +1512,7 @@ async def upsert_prompt(request):
     pid = (reader.get("id") or "").strip()
     name = (reader.get("name") or "").strip()
     text = reader.get("text") or ""
+    negative = reader.get("negative") or ""
     tags = _parse_tags(reader.get("tags"))
     notes = (reader.get("notes") or "").strip()
     rating_raw = reader.get("rating")
@@ -1529,10 +1554,14 @@ async def upsert_prompt(request):
             existing = {"id": pid}
             items.append(existing)
         else:
-            _maybe_push_history(existing, name, text, tags)
+            _maybe_push_history(existing, name, text, tags, new_negative=negative)
         existing["name"] = name
         existing["text"] = text
         existing["tags"] = tags
+        if negative:
+            existing["negative"] = negative
+        elif "negative" in existing:
+            existing["negative"] = ""
         if notes:
             existing["notes"] = notes
         elif "notes" in existing:

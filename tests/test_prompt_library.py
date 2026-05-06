@@ -175,15 +175,15 @@ class PromptLibraryTests(unittest.TestCase):
     def test_load_prompt_returns_text_for_known_id(self):
         self.mod._save([{"id": "k1", "name": "n", "text": "hello"}])
         node = self.mod.PromptLibrary()
-        self.assertEqual(node.load_prompt("k1"), ("hello",))
+        self.assertEqual(node.load_prompt("k1"), ("hello", ""))
 
     def test_load_prompt_empty_for_missing_id(self):
         node = self.mod.PromptLibrary()
-        self.assertEqual(node.load_prompt("missing"), ("",))
+        self.assertEqual(node.load_prompt("missing"), ("", ""))
 
     def test_load_prompt_empty_for_blank_id(self):
         node = self.mod.PromptLibrary()
-        self.assertEqual(node.load_prompt(""), ("",))
+        self.assertEqual(node.load_prompt(""), ("", ""))
 
     def test_load_prompt_joins_multiple_ids_with_separator(self):
         self.mod._save([
@@ -192,20 +192,43 @@ class PromptLibraryTests(unittest.TestCase):
             {"id": "c", "name": "C", "text": "gamma"},
         ])
         node = self.mod.PromptLibrary()
-        self.assertEqual(node.load_prompt("a,b,c"), ("alpha, beta, gamma",))
-        self.assertEqual(node.load_prompt("a, b , c"), ("alpha, beta, gamma",))
-        self.assertEqual(node.load_prompt("a,c", separator=" | "), ("alpha | gamma",))
+        self.assertEqual(node.load_prompt("a,b,c"), ("alpha, beta, gamma", ""))
+        self.assertEqual(node.load_prompt("a, b , c"), ("alpha, beta, gamma", ""))
+        self.assertEqual(node.load_prompt("a,c", separator=" | "), ("alpha | gamma", ""))
 
     def test_load_prompt_skips_missing_in_multi_id(self):
         self.mod._save([{"id": "a", "name": "A", "text": "alpha"}])
         node = self.mod.PromptLibrary()
-        self.assertEqual(node.load_prompt("a,missing,a"), ("alpha, alpha",))
+        self.assertEqual(node.load_prompt("a,missing,a"), ("alpha, alpha", ""))
+
+    def test_load_prompt_returns_negative_when_present(self):
+        self.mod._save([{"id": "k1", "name": "n", "text": "hello",
+                         "negative": "lowres, bad_anatomy"}])
+        node = self.mod.PromptLibrary()
+        self.assertEqual(node.load_prompt("k1"), ("hello", "lowres, bad_anatomy"))
+
+    def test_load_prompt_joins_negatives_skipping_empties(self):
+        # Three entries: only the middle one has a negative — joined output
+        # should contain just that one (no leading/trailing separator junk).
+        self.mod._save([
+            {"id": "a", "name": "A", "text": "alpha"},
+            {"id": "b", "name": "B", "text": "beta", "negative": "blurry"},
+            {"id": "c", "name": "C", "text": "gamma", "negative": "watermark"},
+        ])
+        node = self.mod.PromptLibrary()
+        out = node.load_prompt("a,b,c")
+        self.assertEqual(out[0], "alpha, beta, gamma")
+        self.assertEqual(out[1], "blurry, watermark")
 
     def test_is_changed_reflects_text(self):
+        # IS_CHANGED key is positive|||negative so changes on either side
+        # invalidate ComfyUI's cached output.
         self.mod._save([{"id": "k", "name": "n", "text": "v1"}])
-        self.assertEqual(self.mod.PromptLibrary.IS_CHANGED("k"), "v1")
+        self.assertEqual(self.mod.PromptLibrary.IS_CHANGED("k"), "v1|||")
         self.mod._save([{"id": "k", "name": "n", "text": "v2"}])
-        self.assertEqual(self.mod.PromptLibrary.IS_CHANGED("k"), "v2")
+        self.assertEqual(self.mod.PromptLibrary.IS_CHANGED("k"), "v2|||")
+        self.mod._save([{"id": "k", "name": "n", "text": "v2", "negative": "blurry"}])
+        self.assertEqual(self.mod.PromptLibrary.IS_CHANGED("k"), "v2|||blurry")
 
     def test_input_types_shape(self):
         spec = self.mod.PromptLibrary.INPUT_TYPES()
@@ -754,8 +777,13 @@ class PromptLibraryTests(unittest.TestCase):
 
     def _seed_library(self, prompts):
         """Helper: write prompts as the library."""
-        items = [{"id": p["id"], "name": p.get("name", p["id"]),
-                  "text": p.get("text", ""), "tags": p.get("tags", [])} for p in prompts]
+        items = []
+        for p in prompts:
+            entry = {"id": p["id"], "name": p.get("name", p["id"]),
+                     "text": p.get("text", ""), "tags": p.get("tags", [])}
+            if "negative" in p:
+                entry["negative"] = p["negative"]
+            items.append(entry)
         self.mod._save(items)
 
     def test_wildcard_choice_deterministic_with_seed(self):
@@ -1134,9 +1162,10 @@ class PromptLibraryTests(unittest.TestCase):
             {"id": "noir", "text": "noir city", "tags": ["style"]},
         ])
         node = self.mod.PromptLibraryRandom()
-        text, pid = node.pick(tag_filter="character", seed=0)
+        text, pid, neg = node.pick(tag_filter="character", seed=0)
         self.assertIn(pid, {"elf", "wizard"})
         self.assertEqual(text, pid)
+        self.assertEqual(neg, "")
 
     def test_random_and_filter_multi_tag(self):
         self._seed_library([
@@ -1145,14 +1174,14 @@ class PromptLibraryTests(unittest.TestCase):
             {"id": "robot", "text": "robot", "tags": ["character", "scifi"]},
         ])
         node = self.mod.PromptLibraryRandom()
-        text, pid = node.pick(tag_filter="character, fantasy", seed=0)
+        text, pid, _ = node.pick(tag_filter="character, fantasy", seed=0)
         self.assertIn(pid, {"elf", "wizard"})
 
     def test_random_no_match_returns_empty(self):
         self._seed_library([{"id": "x", "text": "x", "tags": ["a"]}])
         node = self.mod.PromptLibraryRandom()
         out = node.pick(tag_filter="missing", seed=0)
-        self.assertEqual(out, ("", ""))
+        self.assertEqual(out, ("", "", ""))
 
     def test_random_empty_filter_picks_anything(self):
         self._seed_library([
@@ -1160,7 +1189,7 @@ class PromptLibraryTests(unittest.TestCase):
             {"id": "b", "text": "b"},
         ])
         node = self.mod.PromptLibraryRandom()
-        _, pid = node.pick(tag_filter="", seed=0)
+        _, pid, _ = node.pick(tag_filter="", seed=0)
         self.assertIn(pid, {"a", "b"})
 
     def test_random_seed_determinism(self):
@@ -1175,9 +1204,55 @@ class PromptLibraryTests(unittest.TestCase):
             {"id": "knight", "text": "{red|blue} knight", "tags": ["character"]},
         ])
         node = self.mod.PromptLibraryRandom()
-        text, pid = node.pick(tag_filter="character", seed=0, expand_wildcards=True)
+        text, pid, _ = node.pick(tag_filter="character", seed=0, expand_wildcards=True)
         self.assertIn(text, {"red knight", "blue knight"})
         self.assertEqual(pid, "knight")
+
+    def test_random_emits_negative_when_present(self):
+        self._seed_library([
+            {"id": "k", "text": "knight", "tags": ["c"], "negative": "lowres, blurry"},
+        ])
+        node = self.mod.PromptLibraryRandom()
+        text, pid, neg = node.pick(tag_filter="c", seed=0)
+        self.assertEqual((text, pid, neg), ("knight", "k", "lowres, blurry"))
+
+    def test_random_expands_wildcards_in_negative(self):
+        self._seed_library([
+            {"id": "k", "text": "knight", "tags": ["c"],
+             "negative": "{lowres|blurry}, watermark"},
+        ])
+        node = self.mod.PromptLibraryRandom()
+        _, _, neg = node.pick(tag_filter="c", seed=0, expand_wildcards=True)
+        self.assertIn(neg, {"lowres, watermark", "blurry, watermark"})
+
+    # ---- PromptLibrarySave with negative -------------------------------
+
+    def test_save_node_stores_negative_when_provided(self):
+        node = self.mod.PromptLibrarySave()
+        node.save(name="Knight", text="knight", negative="lowres, blurry")
+        items = self.mod._load()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["text"], "knight")
+        self.assertEqual(items[0]["negative"], "lowres, blurry")
+
+    def test_save_node_skips_negative_when_blank(self):
+        # Blank negative on a fresh entry means: don't even write the field,
+        # to keep prompts.json tidy for the 95% of entries that don't use it.
+        node = self.mod.PromptLibrarySave()
+        node.save(name="Knight", text="knight")
+        items = self.mod._load()
+        self.assertEqual(len(items), 1)
+        self.assertNotIn("negative", items[0])
+
+    def test_save_node_clears_negative_when_explicitly_blanked(self):
+        # If the entry already had a negative and the user updates with blank,
+        # the field should be set to "" (cleared), not silently retained.
+        node = self.mod.PromptLibrarySave()
+        node.save(name="Knight", text="knight", negative="lowres")
+        node.save(name="Knight", text="knight", negative="", overwrite_by_name=True)
+        items = self.mod._load()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].get("negative", "MISSING"), "")
 
     # ---- PromptLibraryWildcard node ------------------------------------
 
