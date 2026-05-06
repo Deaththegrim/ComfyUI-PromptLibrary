@@ -2602,6 +2602,14 @@ except Exception as _e:
     print(f"[PromptLibrary] Character Anchor unavailable: {_e}")
     _anchor_node, _anchor_label = {}, {}
 
+try:
+    from .comic_page import GrimmRibbityComicPage
+    _comic_page_node = {"GrimmRibbityComicPage": GrimmRibbityComicPage}
+    _comic_page_label = {"GrimmRibbityComicPage": "GrimmRibbity — Comic Page (Regional)"}
+except Exception as _e:
+    print(f"[PromptLibrary] Comic Page (Regional) unavailable: {_e}")
+    _comic_page_node, _comic_page_label = {}, {}
+
 NODE_CLASS_MAPPINGS = {
     "PromptLibrary": PromptLibrary,
     "PromptLibraryMulti": PromptLibraryMulti,
@@ -2617,6 +2625,7 @@ NODE_CLASS_MAPPINGS = {
     **_lora_node,
     **_anima_node,
     **_anchor_node,
+    **_comic_page_node,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptLibrary": "GrimmRibbity — Library",
@@ -2633,6 +2642,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **_lora_label,
     **_anima_label,
     **_anchor_label,
+    **_comic_page_label,
 }
 WEB_DIRECTORY = "./web"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
