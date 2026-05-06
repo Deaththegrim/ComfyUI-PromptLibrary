@@ -1,0 +1,26 @@
+{
+  "id": "style-minimal",
+  "revision": 0,
+  "last_node_id": 1,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "PromptLibraryStyle",
+      "pos": [80, 60],
+      "size": [340, 720],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {"Node name for S&R": "PromptLibraryStyle"},
+      "widgets_values": ["", "", 1.0, false]
+    }
+  ],
+  "links": [],
+  "groups": [],
+  "config": {},
+  "extra": {"frontendVersion": "1.0"},
+  "version": 0.4
+}

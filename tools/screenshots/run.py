@@ -140,6 +140,60 @@ def screenshot_gallery(page: Page, out: Path) -> None:
     el.screenshot(path=str(out))
 
 
+def screenshot_node(page: Page, node_type: str, out: Path, *, pad: int = 16) -> None:
+    """Snapshot the full LiteGraph node — header bar + sockets + the embedded
+    DOM widget. The node frame is drawn on a <canvas>, not in the DOM, so we
+    compute its screen-space bounding rect from app.canvas.ds (offset + scale)
+    and the node's own pos/size, then clip a viewport screenshot to it."""
+    rect = page.evaluate("""(typeName) => {
+        if (!window.app?.graph || !window.app?.canvas) return null;
+        const node = window.app.graph._nodes.find(n => n.type === typeName);
+        if (!node) return null;
+        const ds = window.app.canvas.ds;
+        const cv = window.app.canvas.canvas;
+        const cRect = cv.getBoundingClientRect();
+        // LiteGraph: node.pos is the body top-left; the title bar sits above it.
+        const titleH = (window.LiteGraph && window.LiteGraph.NODE_TITLE_HEIGHT) || 30;
+        const screenX = cRect.left + (node.pos[0] + ds.offset[0]) * ds.scale;
+        const screenY = cRect.top + (node.pos[1] - titleH + ds.offset[1]) * ds.scale;
+        const w = node.size[0] * ds.scale;
+        const h = (node.size[1] + titleH) * ds.scale;
+        return {x: screenX, y: screenY, w: w, h: h};
+    }""", node_type)
+    if not rect:
+        raise RuntimeError(f"node {node_type!r} not found in current graph")
+    # Resize the viewport if the node would overflow it — happens with the
+    # taller Style node at default zoom + 540×900 viewport.
+    vp = page.viewport_size
+    needed_w = int(rect["x"] + rect["w"] + pad)
+    needed_h = int(rect["y"] + rect["h"] + pad)
+    if vp and (needed_w > vp["width"] or needed_h > vp["height"]):
+        page.set_viewport_size({"width": max(vp["width"], needed_w),
+                                  "height": max(vp["height"], needed_h)})
+        page.wait_for_timeout(200)
+        rect = page.evaluate("""(typeName) => {
+            const node = window.app.graph._nodes.find(n => n.type === typeName);
+            const ds = window.app.canvas.ds;
+            const cv = window.app.canvas.canvas;
+            const cRect = cv.getBoundingClientRect();
+            const titleH = (window.LiteGraph && window.LiteGraph.NODE_TITLE_HEIGHT) || 30;
+            return {
+                x: cRect.left + (node.pos[0] + ds.offset[0]) * ds.scale,
+                y: cRect.top + (node.pos[1] - titleH + ds.offset[1]) * ds.scale,
+                w: node.size[0] * ds.scale,
+                h: (node.size[1] + titleH) * ds.scale,
+            };
+        }""", node_type)
+    page.screenshot(path=str(out), clip={
+        "x": max(0, rect["x"] - pad),
+        "y": max(0, rect["y"] - pad),
+        "width": rect["w"] + pad * 2,
+        "height": rect["h"] + pad * 2,
+    })
+    if vp:
+        page.set_viewport_size(vp)
+
+
 # --------------------------------------------------------------------------
 # Scenarios
 # --------------------------------------------------------------------------
@@ -284,10 +338,45 @@ def _scn_modal_history(page: Page, out: Path) -> None:
     screenshot_modal(page, out, scroll_to=".pl-modal details")
 
 
+def _scn_library_node_with_sockets(page: Page, out: Path) -> None:
+    """Full Library node — header, MODEL/CLIP/strength_scale input sockets,
+    embedded gallery, prompt/negative/MODEL/CLIP output sockets. Captures
+    the v0.32+ socket additions."""
+    wait_for_gallery(page)
+    # Reset the canvas zoom + pan to a known state so the screenshot is
+    # reproducible (drag from a previous run could have left it offset).
+    page.evaluate("""() => {
+        const ds = window.app?.canvas?.ds;
+        if (ds) { ds.scale = 1.0; ds.offset = [0, 0]; }
+        window.app?.canvas?.draw?.(true, true);
+    }""")
+    page.wait_for_timeout(300)
+    screenshot_node(page, "PromptLibrary", out)
+
+
+def _scn_style_node_with_sockets(page: Page, out: Path) -> None:
+    """Full Style node — MODEL/CLIP/positive/negative inputs + extra_text/
+    strength_scale/bypass widgets + embedded gallery + 5 outputs."""
+    wait_for_gallery(page)
+    page.evaluate("""() => {
+        const ds = window.app?.canvas?.ds;
+        if (ds) { ds.scale = 1.0; ds.offset = [0, 0]; }
+        window.app?.canvas?.draw?.(true, true);
+    }""")
+    page.wait_for_timeout(300)
+    screenshot_node(page, "PromptLibraryStyle", out)
+
+
 SCENARIOS: list[Scenario] = [
     Scenario("library-gallery", "library-minimal.json",
               _scn_library_gallery,
               "Full Library gallery, default state."),
+    Scenario("library-node-with-sockets", "library-minimal.json",
+              _scn_library_node_with_sockets,
+              "Full Library node showing MODEL/CLIP/strength_scale sockets (v0.32+)."),
+    Scenario("style-node-with-sockets", "style-minimal.json",
+              _scn_style_node_with_sockets,
+              "Full Style node showing MODEL/CLIP/CONDITIONING in/out (v0.29+)."),
     Scenario("gallery-list-view", "library-minimal.json",
               _scn_gallery_list_view,
               "Library gallery in single-column list mode."),
