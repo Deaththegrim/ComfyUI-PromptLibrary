@@ -3,10 +3,17 @@ __pycache__/
 *.pyo
 .pytest_cache/
 
-# Local prompt library (user data, not source)
-data/prompts.json
+# Local prompt library (user data, not source).
+# Ignore everything under data/ except the images/ subdir's .gitkeep —
+# this catches prompts.json, snapshots/, hash_cache.json, .last_version,
+# and anything else the runtime drops into data/.
+data/*
+!data/images/
 data/images/*
 !data/images/.gitkeep
+
+# Personal dev notes / scratchpads — never ship.
+research/
 
 # Editor / OS junk
 .vscode/
