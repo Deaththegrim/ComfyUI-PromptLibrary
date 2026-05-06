@@ -76,10 +76,58 @@ def _load() -> list[dict]:
     try:
         with STORE_PATH.open("r", encoding="utf-8") as f:
             data = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
+    except json.JSONDecodeError as e:
+        return _recover_corrupt_store(e)
+    except OSError as e:
         print(f"[PromptLibrary] failed to read {STORE_PATH}: {e}; treating as empty")
         return []
-    return data if isinstance(data, list) else []
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("prompts"), list):
+        items = data["prompts"]
+        print(f"[PromptLibrary] {STORE_PATH.name} was an export manifest (format={data.get('format')!r}, {len(items)} prompts); rewriting as storage list")
+        _snapshot_prompts("pre_heal_manifest")
+        try:
+            _save(items)
+        except OSError as e:
+            print(f"[PromptLibrary] could not rewrite {STORE_PATH}: {e}")
+        return items
+    return []
+
+
+def _recover_corrupt_store(err: Exception) -> list[dict]:
+    """Quarantine an unparseable prompts.json and try the newest snapshot.
+    Without this, corruption is indistinguishable from an empty library."""
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    quarantined = STORE_PATH.with_name(f"{STORE_PATH.name}.broken-{ts}")
+    try:
+        STORE_PATH.rename(quarantined)
+        print(f"[PromptLibrary] {STORE_PATH.name} unparseable ({err}); moved to {quarantined.name}")
+    except OSError as oe:
+        print(f"[PromptLibrary] {STORE_PATH.name} unparseable; quarantine failed: {oe}; treating as empty")
+        return []
+    if not SNAPSHOT_DIR.exists():
+        return []
+    snaps = sorted(SNAPSHOT_DIR.glob("*.json"))
+    if not snaps:
+        return []
+    newest = snaps[-1]
+    try:
+        shutil.copy2(newest, STORE_PATH)
+        with STORE_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as re:
+        print(f"[PromptLibrary] snapshot {newest.name} unusable: {re}; treating as empty")
+        return []
+    if isinstance(data, list):
+        print(f"[PromptLibrary] restored prompts.json from snapshot {newest.name} ({len(data)} entries)")
+        return data
+    if isinstance(data, dict) and isinstance(data.get("prompts"), list):
+        items = data["prompts"]
+        print(f"[PromptLibrary] restored prompts.json from snapshot {newest.name} (manifest, {len(items)} entries)")
+        _save(items)
+        return items
+    return []
 
 
 _last_known_mtime = 0.0

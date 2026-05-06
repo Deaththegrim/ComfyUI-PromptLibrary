@@ -51,6 +51,7 @@ def _load_module(tmp_root: Path):
     mod.DATA_DIR = tmp_root / "data"
     mod.IMAGES_DIR = mod.DATA_DIR / "images"
     mod.STORE_PATH = mod.DATA_DIR / "prompts.json"
+    mod.SNAPSHOT_DIR = mod.DATA_DIR / "snapshots"
     mod.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     return mod
 
@@ -106,10 +107,60 @@ class PromptLibraryTests(unittest.TestCase):
     def test_load_handles_corrupted_json(self):
         self.mod.STORE_PATH.write_text("not json {{{")
         self.assertEqual(self.mod._load(), [])
+        self.assertFalse(self.mod.STORE_PATH.exists())
+        broken = list(self.mod.DATA_DIR.glob("prompts.json.broken-*"))
+        self.assertEqual(len(broken), 1)
+
+    def test_load_restores_from_snapshot_when_corrupted(self):
+        good = [{"id": "k1", "name": "n", "text": "hello"}]
+        self.mod._save(good)
+        self.mod._snapshot_prompts("manual_test")
+        self.mod.STORE_PATH.write_text("not json {{{")
+        self.assertEqual(self.mod._load(), good)
+        broken = list(self.mod.DATA_DIR.glob("prompts.json.broken-*"))
+        self.assertEqual(len(broken), 1)
 
     def test_load_handles_non_list_json(self):
         self.mod.STORE_PATH.write_text('{"foo": "bar"}')
         self.assertEqual(self.mod._load(), [])
+
+    def test_load_heals_export_manifest_into_storage_list(self):
+        manifest = {
+            "format": "grimm-ribbity-prompt-library",
+            "format_version": 1,
+            "exported_with": "0.27.3",
+            "prompts": [{"id": "k1", "name": "n", "text": "hello"}],
+        }
+        self.mod.STORE_PATH.write_text(json.dumps(manifest))
+        self.assertEqual(self.mod._load(), manifest["prompts"])
+        with self.mod.STORE_PATH.open() as f:
+            self.assertIsInstance(json.load(f), list)
+        snaps = list(self.mod.SNAPSHOT_DIR.glob("*pre_heal_manifest*.json"))
+        self.assertEqual(len(snaps), 1)
+
+    def test_load_falls_through_when_snapshot_also_corrupt(self):
+        # Both prompts.json AND the only snapshot are unparseable — must not
+        # crash, must quarantine the live file, must return empty list.
+        self.mod._save([{"id": "k1", "name": "n", "text": "hello"}])
+        self.mod._snapshot_prompts("manual_test")
+        snap = next(iter(self.mod.SNAPSHOT_DIR.glob("*.json")))
+        snap.write_text("also broken {{{")
+        self.mod.STORE_PATH.write_text("not json {{{")
+        self.assertEqual(self.mod._load(), [])
+        broken = list(self.mod.DATA_DIR.glob("prompts.json.broken-*"))
+        self.assertEqual(len(broken), 1)
+
+    def test_load_picks_newest_snapshot_among_many(self):
+        # Two snapshots — older has stale data, newer has the right entries.
+        # The recovery path should pick the newer one.
+        old = [{"id": "old", "name": "n", "text": "old"}]
+        new = [{"id": "new1", "name": "n", "text": "new"},
+               {"id": "new2", "name": "n", "text": "new2"}]
+        self.mod.SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        (self.mod.SNAPSHOT_DIR / "20260101-000000-a.json").write_text(json.dumps(old))
+        (self.mod.SNAPSHOT_DIR / "20260601-120000-b.json").write_text(json.dumps(new))
+        self.mod.STORE_PATH.write_text("not json {{{")
+        self.assertEqual(self.mod._load(), new)
 
     def test_safe_id_accepts_valid(self):
         for ok in ["abc", "a_b-c", "ABC123", "x" * 64]:
