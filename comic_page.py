@@ -101,6 +101,13 @@ class GrimmRibbityComicPage:
                 "panel_layout": ("IMAGE", {"tooltip": "Color-coded mask image. Each panel is a "
                                                        "different solid color matching the panel_N_color "
                                                        "fields below. Same dimensions as your final canvas."}),
+                "shared_prompt": ("STRING", {"default": "", "multiline": True,
+                    "placeholder": "character + style traits prepended to EVERY panel — e.g. "
+                                    "'jessica vale, blue_hair, red_eyes, comic style'",
+                    "tooltip": "Text prepended to every non-empty panel prompt before encoding. "
+                               "This is THE knob for character consistency across panels — type the "
+                               "character description here once and every panel inherits it. Pair "
+                               "with Character Anchor for a face/style lock on top."}),
                 "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01,
                     "tooltip": "How strongly each panel's prompt binds to its region. 1.0 is normal; "
                                "higher values pull harder. Lower (0.5–0.7) lets panels bleed into each other."}),
@@ -131,9 +138,15 @@ class GrimmRibbityComicPage:
     FUNCTION = "build"
     CATEGORY = "GrimmRibbity/Comic"
 
-    def build(self, clip, panel_layout, strength, set_cond_area, **panels):
+    def build(self, clip, panel_layout, shared_prompt, strength, set_cond_area, **panels):
         encoder = _comfy_nodes.NODE_CLASS_MAPPINGS["CLIPTextEncode"]()
         masker = _comfy_nodes.NODE_CLASS_MAPPINGS["ConditioningSetMask"]()
+
+        # `shared_prompt` is prepended to each non-empty panel prompt before
+        # encoding. This is the consistency knob — character + style traits
+        # typed once and inherited by every panel. Joined with ", " so it
+        # reads as a comma-separated tag list (matches booru/SDXL convention).
+        shared = (shared_prompt or "").strip()
 
         combined: list = []
         active = 0
@@ -142,8 +155,9 @@ class GrimmRibbityComicPage:
             color = (panels.get(f"panel_{i}_color") or "").strip()
             if not prompt or not color:
                 continue
+            full_prompt = f"{shared}, {prompt}" if shared else prompt
             mask = _color_to_mask(panel_layout, color)
-            (cond,) = encoder.encode(clip, prompt)
+            (cond,) = encoder.encode(clip, full_prompt)
             (cond,) = masker.append(cond, mask, set_cond_area, strength)
             if isinstance(cond, list):
                 combined.extend(cond)

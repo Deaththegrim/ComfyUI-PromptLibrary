@@ -146,7 +146,7 @@ class ComicPageNodeTests(unittest.TestCase):
 
     def test_active_panels_each_invoke_clip_and_mask_once(self):
         out = self.node.build(
-            clip="CLIP", panel_layout=self.layout, strength=1.0, set_cond_area="mask bounds",
+            clip="CLIP", panel_layout=self.layout, shared_prompt="", strength=1.0, set_cond_area="mask bounds",
             panel_1_prompt="a knight", panel_1_color="#FF0000",
             panel_2_prompt="a wizard", panel_2_color="#00FF00",
             panel_3_prompt="",        panel_3_color="#0000FF",
@@ -165,7 +165,7 @@ class ComicPageNodeTests(unittest.TestCase):
 
     def test_skips_panels_with_blank_prompts(self):
         self.node.build(
-            clip="CLIP", panel_layout=self.layout, strength=1.0, set_cond_area="default",
+            clip="CLIP", panel_layout=self.layout, shared_prompt="", strength=1.0, set_cond_area="default",
             panel_1_prompt="",  panel_1_color="#FF0000",
             panel_2_prompt="x", panel_2_color="#00FF00",
             panel_3_prompt="",  panel_3_color="#0000FF",
@@ -177,7 +177,7 @@ class ComicPageNodeTests(unittest.TestCase):
 
     def test_skips_panels_with_blank_color(self):
         self.node.build(
-            clip="CLIP", panel_layout=self.layout, strength=1.0, set_cond_area="mask bounds",
+            clip="CLIP", panel_layout=self.layout, shared_prompt="", strength=1.0, set_cond_area="mask bounds",
             panel_1_prompt="x", panel_1_color="",       # missing color → skip
             panel_2_prompt="y", panel_2_color="#00FF00",
             panel_3_prompt="",  panel_3_color="#0000FF",
@@ -190,7 +190,7 @@ class ComicPageNodeTests(unittest.TestCase):
 
     def test_no_active_panels_returns_empty_conditioning(self):
         out = self.node.build(
-            clip="CLIP", panel_layout=self.layout, strength=1.0, set_cond_area="default",
+            clip="CLIP", panel_layout=self.layout, shared_prompt="", strength=1.0, set_cond_area="default",
             panel_1_prompt="", panel_1_color="#FF0000",
             panel_2_prompt="", panel_2_color="#00FF00",
             panel_3_prompt="", panel_3_color="#0000FF",
@@ -204,7 +204,7 @@ class ComicPageNodeTests(unittest.TestCase):
 
     def test_strength_and_set_cond_area_propagate(self):
         self.node.build(
-            clip="CLIP", panel_layout=self.layout, strength=0.6, set_cond_area="default",
+            clip="CLIP", panel_layout=self.layout, shared_prompt="", strength=0.6, set_cond_area="default",
             panel_1_prompt="x", panel_1_color="#FF0000",
             panel_2_prompt="",  panel_2_color="#00FF00",
             panel_3_prompt="",  panel_3_color="#0000FF",
@@ -215,11 +215,44 @@ class ComicPageNodeTests(unittest.TestCase):
         self.assertEqual(_MASK_CALLS[0]["strength"], 0.6)
         self.assertEqual(_MASK_CALLS[0]["set_cond_area"], "default")
 
+    def test_shared_prompt_prepends_to_every_panel(self):
+        # The consistency-fix feature: shared_prompt prefixes every non-blank
+        # panel before CLIP encoding. Empty panels are still skipped.
+        self.node.build(
+            clip="CLIP", panel_layout=self.layout,
+            shared_prompt="jessica vale, blue_hair",
+            strength=1.0, set_cond_area="mask bounds",
+            panel_1_prompt="standing in forest", panel_1_color="#FF0000",
+            panel_2_prompt="action pose",        panel_2_color="#00FF00",
+            panel_3_prompt="",                    panel_3_color="#0000FF",
+            panel_4_prompt="",                    panel_4_color="#FFFF00",
+            panel_5_prompt="",                    panel_5_color="#FF00FF",
+            panel_6_prompt="",                    panel_6_color="#00FFFF",
+        )
+        self.assertEqual(len(_ENCODE_CALLS), 2)
+        self.assertEqual(_ENCODE_CALLS[0]["prompt"],
+                          "jessica vale, blue_hair, standing in forest")
+        self.assertEqual(_ENCODE_CALLS[1]["prompt"],
+                          "jessica vale, blue_hair, action pose")
+
+    def test_blank_shared_prompt_doesnt_alter_panel_prompt(self):
+        self.node.build(
+            clip="CLIP", panel_layout=self.layout, shared_prompt="",
+            strength=1.0, set_cond_area="mask bounds",
+            panel_1_prompt="just this", panel_1_color="#FF0000",
+            panel_2_prompt="",          panel_2_color="#00FF00",
+            panel_3_prompt="",          panel_3_color="#0000FF",
+            panel_4_prompt="",          panel_4_color="#FFFF00",
+            panel_5_prompt="",          panel_5_color="#FF00FF",
+            panel_6_prompt="",          panel_6_color="#00FFFF",
+        )
+        self.assertEqual(_ENCODE_CALLS[0]["prompt"], "just this")
+
     def test_mask_passed_to_set_mask_is_correct_shape(self):
         # The mask we build via _color_to_mask should be the exact tensor
         # passed into ConditioningSetMask — verify shape preservation.
         self.node.build(
-            clip="CLIP", panel_layout=self.layout, strength=1.0, set_cond_area="mask bounds",
+            clip="CLIP", panel_layout=self.layout, shared_prompt="", strength=1.0, set_cond_area="mask bounds",
             panel_1_prompt="x", panel_1_color="#FF0000",
             panel_2_prompt="",  panel_2_color="#00FF00",
             panel_3_prompt="",  panel_3_color="#0000FF",
