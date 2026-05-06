@@ -54,8 +54,6 @@ class GrimmRibbityCharacterAnchor:
         return {
             "required": {
                 "model": ("MODEL", {"tooltip": "MODEL chain. Wire from your LoRA loader's MODEL output."}),
-                "reference": ("IMAGE", {"tooltip": "Character reference image. ONE high-quality canonical "
-                                                     "shot of the character is the recommended source."}),
                 "preset": (list(_PRESETS), {"default": "PLUS FACE (portraits)",
                     "tooltip": "IPAdapter Plus preset. PLUS FACE for portraits is the right pick "
                                "for character consistency across comic panels. PLUS for general "
@@ -77,6 +75,12 @@ class GrimmRibbityCharacterAnchor:
                                "disable IPAdapter for a specific gen without unwiring."}),
             },
             "optional": {
+                # IMAGE is optional so a bypass=True flow doesn't need a dummy
+                # reference wired. With bypass=False and no reference, we
+                # raise a clear error rather than crashing inside the upstream.
+                "reference": ("IMAGE", {"tooltip": "Character reference image. ONE high-quality canonical "
+                                                     "shot of the character is the recommended source. "
+                                                     "Required when bypass=False; can be unwired when bypass=True."}),
                 "attn_mask": ("MASK", {"tooltip": "Optional attention mask for regional application — "
                                                     "the bridge to multi-panel single-gen workflows."}),
             },
@@ -89,10 +93,16 @@ class GrimmRibbityCharacterAnchor:
     FUNCTION = "anchor"
     CATEGORY = "GrimmRibbity/Character"
 
-    def anchor(self, model, reference, preset, weight, weight_type, start_at, end_at,
-                bypass, attn_mask=None):
+    def anchor(self, model, preset, weight, weight_type, start_at, end_at,
+                bypass, reference=None, attn_mask=None):
         if bypass:
             return (model,)
+        if reference is None:
+            raise ValueError(
+                "Character Anchor: bypass=False but no reference image is wired. "
+                "Connect an IMAGE source to the 'reference' input, or set bypass=True "
+                "to pass the model through unchanged."
+            )
 
         loader = IPAdapterUnifiedLoader()
         model_with_ipa, ipadapter = loader.load_models(model, preset)

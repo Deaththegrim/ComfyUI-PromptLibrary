@@ -61,10 +61,12 @@ class CharacterAnchorTests(unittest.TestCase):
     def test_input_types_shape(self):
         spec = character_anchor.GrimmRibbityCharacterAnchor.INPUT_TYPES()
         self.assertIn("required", spec)
-        for k in ("model", "reference", "preset", "weight", "weight_type",
+        for k in ("model", "preset", "weight", "weight_type",
                   "start_at", "end_at", "bypass"):
             self.assertIn(k, spec["required"], f"missing required input {k}")
-        # attn_mask is optional (regional bridge)
+        # reference and attn_mask are optional — reference because bypass=True
+        # should work without one wired; attn_mask for the regional bridge.
+        self.assertIn("reference", spec["optional"])
         self.assertIn("attn_mask", spec["optional"])
         self.assertEqual(character_anchor.GrimmRibbityCharacterAnchor.RETURN_TYPES, ("MODEL",))
 
@@ -133,6 +135,31 @@ class CharacterAnchorTests(unittest.TestCase):
         call = _APPLY_CALLS[0]
         self.assertEqual(call["start_at"], 0.2)
         self.assertEqual(call["end_at"], 0.85)
+
+    def test_bypass_true_without_reference_passes_through(self):
+        # Common case: user wants to disable the IPAdapter for one gen and
+        # doesn't want to wire a dummy reference image just to satisfy a
+        # required input. With reference now optional, bypass+no-image
+        # should work cleanly.
+        out = self.node.anchor(
+            model="M", preset="PLUS FACE (portraits)",
+            weight=0.7, weight_type="standard", start_at=0.0, end_at=1.0,
+            bypass=True,  # reference left as default None
+        )
+        self.assertEqual(out, ("M",))
+        self.assertEqual(_LOADER_CALLS, [])
+
+    def test_bypass_false_without_reference_raises(self):
+        # The flip side: if you actually want IPAdapter on (bypass=False) but
+        # forgot to wire reference, we raise a clear error rather than crash
+        # somewhere inside the IPAdapter Plus internals.
+        with self.assertRaises(ValueError) as ctx:
+            self.node.anchor(
+                model="M", preset="PLUS FACE (portraits)",
+                weight=0.7, weight_type="standard", start_at=0.0, end_at=1.0,
+                bypass=False,  # but no reference!
+            )
+        self.assertIn("reference", str(ctx.exception).lower())
 
 
 if __name__ == "__main__":
