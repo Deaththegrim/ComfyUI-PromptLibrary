@@ -6,6 +6,20 @@ A visual prompt manager for ComfyUI (formerly *Ribbity — ComfyUI Prompt Librar
 
 Four nodes, one shared library, no third-party dependencies.
 
+## Screenshots
+
+The Library node embeds a full thumbnail gallery — search, tag-filter, multi-select, and drop the joined prompt text right into your workflow:
+
+![Library gallery](docs/screenshots/library-gallery.png)
+
+The Comic Frame node combines a character, scene, and background entry into one prompt — so a single workflow can iterate across hundreds of style/character/outfit combinations:
+
+![Comic Frame overview](docs/screenshots/comic-frame-overview.png)
+
+Plug it into your sampler with a Power Lora Loader for one-click LoRA stacks:
+
+![SDXL pipeline](docs/screenshots/sdxl-pipeline.png)
+
 ## Install
 
 > **Get it from one of these — don't grab the unversioned `Code → Download ZIP` button or random commits.**
