@@ -8,15 +8,30 @@ already in your library is fine — no need to seed fake entries).
 
 ## Done
 
-- [x] `library-gallery.png` — full thumbnail gallery, multiple tiles selected
-- [x] `comic-frame-overview.png` — Comic Frame node combining character + scene + background
-- [x] `sdxl-pipeline.png` — sampler chain end-to-end
+Captured by the screenshot runner — re-run any time the UI changes:
 
-## v0.29.0 — Style node + LoRA modal
+```sh
+python3 tools/screenshots/run.py
+```
 
-- [ ] `edit-prompt-modal-loras.png` — Edit Prompt modal open, name + prompt + 1–2 LoRA rows visible (Model dropdown picked, Strength slider not at default, Trigger words filled). Captures the `+ Add LoRA` button + helper text and the green slider/thumb.
-- [ ] `style-node-workflow.png` — Style node wired between CheckpointLoader and KSampler (or the SDXL Sampler), with `positive` and `negative` flowing into the sampler. Show the gallery embedded in the node body with an entry selected.
-- [ ] `style-node-bypass.png` — same node with `bypass=true` so the user sees the toggle in context.
+- [x] `library-gallery.png` — full thumbnail gallery, default state
+- [x] `library-node-with-sockets.png` — full Library node showing v0.32 MODEL/CLIP optional sockets
+- [x] `style-node-with-sockets.png` — full Style node showing v0.29 positive/negative split I/O + bypass widget
+- [x] `gallery-list-view.png` — single-column list mode
+- [x] `gallery-search-clear.png` — search active with × clear button
+- [x] `gallery-tag-filter.png` — `anima character` chip active, grid filtered
+- [x] `gallery-bulk-select.png` — two tiles checkbox-selected, bulk action bar
+- [x] `gallery-context-menu.png` — right-click menu on a tile
+- [x] `edit-prompt-modal-loras.png` — Edit Prompt modal with the LoRA section open + one row
+- [x] `modal-history.png` — Edit Prompt modal with the History disclosure expanded
+- [x] `comic-frame-overview.png` — Comic Frame node combining character + scene + background (manual)
+- [x] `sdxl-pipeline.png` — sampler chain end-to-end (manual)
+
+## v0.29.0 / v0.32.0 — Style node + Library MODEL+CLIP follow-ups
+
+- [ ] `style-node-workflow.png` — Style node wired between CheckpointLoader and KSampler (or the SDXL Sampler), with `positive` and `negative` flowing into the sampler. Show the gallery embedded in the node body with an entry selected. (Manual capture — needs a complete graph.)
+- [ ] `style-node-bypass.png` — same node with `bypass=true` so the user sees the toggle in context. (Manual.)
+- [ ] `library-node-loras-applied.png` — Library node with MODEL+CLIP wired and a tile selected showing patched outputs flowing downstream. (Manual.)
 
 ## v0.30.0 — Prompt log
 
@@ -39,18 +54,14 @@ already in your library is fine — no need to seed fake entries).
 
 ## Gallery features (zoom-ins)
 
-- [ ] `gallery-bulk-select.png` — multi-select with the bulk action bar (Tag / Export / Delete).
-- [ ] `gallery-context-menu.png` — right-click menu on a tile.
-- [ ] `gallery-list-view.png` — `▦ / ≡` toggled to list view, dense listing.
-- [ ] `gallery-tag-filter.png` — tag chip row, one or two chips active, grid filtered.
-- [ ] `gallery-search-clear.png` — `pl-search-clear` × showing while a search query is active.
-- [ ] `gallery-drag-reorder.png` — mid-drag of a tile in Manual sort mode.
-- [ ] `gallery-empty-state.png` — empty library with the empty-state message.
+Most of these are now automated — see the **Done** list above. Two left:
+
+- [ ] `gallery-drag-reorder.png` — mid-drag of a tile in Manual sort mode. (Hard to script — drag gesture timing is brittle.)
+- [ ] `gallery-empty-state.png` — empty library with the empty-state message. (Needs a temporary library reset; better captured manually on a fresh install.)
 
 ## Modal disclosures
 
-- [ ] `modal-history.png` — History `<details>` open with multiple snapshots + a Revert button.
-- [ ] `modal-image-paste.png` — modal mid-paste with the toast confirming clipboard image.
+- [ ] `modal-image-paste.png` — modal mid-paste with the toast confirming clipboard image. (Needs simulated clipboard paste — manual.)
 
 ## After capture
 

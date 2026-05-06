@@ -58,7 +58,11 @@ After install, find them under **GrimmRibbity/** sub-menus in the node picker:
 
 **Library (the core suite)**
 - **GrimmRibbity — Library** — visual gallery picker. Outputs `prompt` (positive) and `negative` STRINGs from the selected entry/entries. **If MODEL + CLIP are wired in (optional)**, the LoRA stack attached to every selected entry is applied in pick-order and patched MODEL/CLIP are emitted on the matching outputs — single node replaces a Library + Power Lora Loader chain. Multi-tile selection stacks every entry's LoRAs.
-- **GrimmRibbity — Style (LoRA + Conditioning)** — like the Library node above but takes the next step: also encodes the joined positive + negative on the patched CLIP and emits `CONDITIONING` outputs (concatted onto optional inputs). Same gallery, same LoRA stack, but skips the separate CLIPTextEncode step. `bypass` toggle for A/B comparisons; `strength_scale` multiplies every LoRA at once
+
+  ![Library node](docs/screenshots/library-node-with-sockets.png)
+- **GrimmRibbity — Style (LoRA + Conditioning)** — like the Library node above but takes the next step: also encodes the joined positive + negative on the patched CLIP and emits `CONDITIONING` outputs (concatted onto optional inputs). Same gallery, same LoRA stack, but skips the separate CLIPTextEncode step. `bypass` toggle for A/B comparisons; `strength_scale` multiplies every LoRA at once.
+
+  ![Style node](docs/screenshots/style-node-with-sockets.png)
 - **GrimmRibbity — Multi Library (3 panels)** — three independent gallery panels in one node, replaces 3× Library + 2× Join Strings spaghetti
 - **GrimmRibbity — Save** — write prompts to the library during workflow runs (inputs: name, text, optional `negative`, optional `IMAGE` thumbnail, optional tags)
 - **GrimmRibbity — Random by Tag** — pick a random library entry by tag filter (outputs text, id, negative). Built for overnight loops
@@ -96,7 +100,11 @@ The Library node embeds a full gallery in the node body:
 - Shift-click range-extends the selection from the last-clicked tile.
 - The same selection drives the bulk bar at the top — with one or more selected you get **Tag / Export / Delete**.
 - Right-click a tile for **Edit / Duplicate / Export this / Delete**.
+
+  ![Tile context menu](docs/screenshots/gallery-context-menu.png)
 - Toolbar **▦ / ≡** switches between thumbnail grid and single-column list view (the list is good for dense libraries — 56 px thumb on the left, full name on the right).
+
+  ![List view](docs/screenshots/gallery-list-view.png)
 - Drag-and-drop tiles to reorder when sort mode is **Manual**.
 - Keyboard: arrow keys move focus, **Enter** toggles selection on the focused tile, **Delete** removes, **/** focuses search, **Esc** clears the selection.
 
@@ -127,8 +135,12 @@ Right-click → Edit, or click the `+` tile to add. The modal is non-blocking �
 - **Tags** — comma-separated; autocompletes from existing tags via a `<datalist>`
 - **Prompt text** — the actual prompt string
 - **Reference image** — optional thumbnail; PNG/JPG/WebP/GIF/BMP, capped at 16 MB
-- **LoRAs** — up to 10 per entry. Click `+ Add LoRA` to attach a row (Model dropdown / Strength slider / Trigger words / Delete). Only the **Style** node consumes them; the plain Library node ignores them. Trigger words are appended after the prompt before encoding.
+- **LoRAs** — up to 10 per entry. Click `+ Add LoRA` to attach a row (Model dropdown / Strength slider / Trigger words / Delete). Consumed by the **Library** node (since v0.32, when MODEL+CLIP are wired) and the **Style** node (which also encodes prompts on the patched CLIP). Trigger words are appended after the prompt before encoding.
+
+  ![LoRA section in the Edit Prompt modal](docs/screenshots/edit-prompt-modal-loras.png)
 - **History** — disclosure showing every prior version of this entry (max 20). Click any row to revert. Tracks LoRA-only changes too.
+
+  ![History disclosure](docs/screenshots/modal-history.png)
 
 ## Wildcards & overnight loops
 
