@@ -221,6 +221,11 @@ _KSAMPLER_TYPES = {
     "easy kSamplerTiled", "easy kSamplerInpainting",
     "easy kSamplerDownscaleUnet", "easy kSamplerSDTurbo",
     "easy unSampler",
+    # Our own samplers — SamplerSDXL routes through `sdxl_tuple`, AnimaSampler
+    # uses standard model/positive/negative inputs (with `noise_seed` instead
+    # of `seed`, already handled in _SAMPLER_PARAM_KEYS).
+    "GrimmRibbitySamplerSDXL",
+    "GrimmRibbityAnimaSampler",
 }
 # The set above that uses a `pipe` input rather than direct model/pos/neg links.
 _EASY_PIPE_SAMPLER_TYPES = {
@@ -252,9 +257,13 @@ _MODEL_PASSTHROUGH_TYPES = {
     "FreeU", "FreeU_V2", "PerturbedAttentionGuidance",
     "RescaleCFG", "PerpNeg",
 }
-# `Pack SDXL Tuple` (Efficiency Nodes) packs base_model/base_positive/base_negative
-# into a single tuple. The SDXL Eff. sampler reads them via `sdxl_tuple`.
-_SDXL_TUPLE_PACK_TYPE = "Pack SDXL Tuple"
+# Tuple-pack nodes that bundle base_model/base_positive/base_negative into a
+# single SDXL_TUPLE wire. SDXL samplers read everything back through that wire
+# instead of having direct model/pos/neg inputs.
+_SDXL_TUPLE_PACK_TYPES = {
+    "Pack SDXL Tuple",         # Efficiency Nodes
+    "GrimmRibbityPackSDXLTuple",  # this repo's pack node
+}
 
 
 def _link_source(value):
@@ -277,7 +286,7 @@ def _resolve_sampler_links(prompt: dict, sampler_node: dict) -> tuple:
     tuple_src = _link_source(inputs.get("sdxl_tuple"))
     if tuple_src and tuple_src in prompt:
         pack = prompt[tuple_src]
-        if (pack or {}).get("class_type") == _SDXL_TUPLE_PACK_TYPE:
+        if (pack or {}).get("class_type") in _SDXL_TUPLE_PACK_TYPES:
             p_in = pack.get("inputs") or {}
             return (p_in.get("base_model"),
                     p_in.get("base_positive"),
@@ -373,7 +382,7 @@ def _walk_model_chain(prompt: dict, start_node_id: str | None):
                 return f"{folder}{_PREFIX_SEP}{mname}", list(reversed(loras))
             return None, list(reversed(loras))
 
-        if ctype == _SDXL_TUPLE_PACK_TYPE:
+        if ctype in _SDXL_TUPLE_PACK_TYPES:
             current = _link_source(inputs.get("base_model"))
             continue
 

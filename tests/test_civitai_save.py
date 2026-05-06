@@ -198,6 +198,69 @@ class WorkflowExtractionTests(unittest.TestCase):
         self.assertEqual(m["sampler_name"], "dpmpp_2m")
         self.assertEqual(m["scheduler"], "karras")
 
+    def test_grimmribbity_sdxl_sampler_via_grimmribbity_pack(self):
+        # This repo's own SDXL sampler + pack node — same shape as Eff.'s but
+        # both class names differ. The trace must accept both.
+        from civitai_save import extract_workflow_metadata
+        prompt = {
+            "1": {"class_type": "CheckpointLoaderSimple",
+                   "inputs": {"ckpt_name": "krakenNOIR_v3.safetensors"}},
+            "10": {"class_type": "Power Lora Loader (rgthree)", "inputs": {
+                "model": ["1", 0], "clip": ["1", 1],
+                "lora_1": {"on": True, "lora": "EldritchComicsXL1.2.safetensors",
+                           "strength": 0.3},
+            }},
+            "20": {"class_type": "CLIPTextEncode",
+                    "inputs": {"text": "noir cityscape", "clip": ["10", 1]}},
+            "21": {"class_type": "CLIPTextEncode",
+                    "inputs": {"text": "watermark", "clip": ["10", 1]}},
+            "30": {"class_type": "GrimmRibbityPackSDXLTuple", "inputs": {
+                "base_model": ["10", 0], "base_clip": ["10", 1],
+                "base_positive": ["20", 0], "base_negative": ["21", 0],
+            }},
+            "40": {"class_type": "GrimmRibbitySamplerSDXL", "inputs": {
+                "noise_seed": 458592068423968, "steps": 30, "cfg": 5.0,
+                "sampler_name": "dpmpp_2m_sde_gpu", "scheduler": "karras",
+                "sdxl_tuple": ["30", 0],
+            }},
+        }
+        m = extract_workflow_metadata(prompt)
+        self.assertEqual(m["model_label"], "checkpoints::krakenNOIR_v3.safetensors")
+        self.assertEqual(m["loras"], [("EldritchComicsXL1.2.safetensors", 0.3)])
+        self.assertEqual(m["positive"], "noir cityscape")
+        self.assertEqual(m["negative"], "watermark")
+        self.assertEqual(m["seed"], 458592068423968)
+        self.assertEqual(m["sampler_name"], "dpmpp_2m_sde_gpu")
+        self.assertEqual(m["scheduler"], "karras")
+
+    def test_grimmribbity_anima_sampler_direct_inputs(self):
+        # Anima sampler — no tuple, just direct model/positive/negative wires
+        # like a vanilla KSampler. Uses noise_seed instead of seed.
+        from civitai_save import extract_workflow_metadata
+        prompt = {
+            "1": {"class_type": "UNETLoader",
+                   "inputs": {"unet_name": "anima_v4.safetensors"}},
+            "2": {"class_type": "CLIPTextEncode",
+                    "inputs": {"text": "1girl, sunset", "clip": ["1", 1]}},
+            "3": {"class_type": "CLIPTextEncode",
+                    "inputs": {"text": "low quality", "clip": ["1", 1]}},
+            "4": {"class_type": "GrimmRibbityAnimaSampler", "inputs": {
+                "model": ["1", 0],
+                "positive": ["2", 0], "negative": ["3", 0],
+                "latent_image": ["99", 0],
+                "noise_seed": 12345, "steps": 25, "cfg": 4.0,
+                "sampler_name": "euler", "scheduler": "normal",
+            }},
+        }
+        m = extract_workflow_metadata(prompt)
+        self.assertEqual(m["model_label"], "diffusion_models::anima_v4.safetensors")
+        self.assertEqual(m["positive"], "1girl, sunset")
+        self.assertEqual(m["negative"], "low quality")
+        self.assertEqual(m["seed"], 12345)
+        self.assertEqual(m["steps"], 25)
+        self.assertEqual(m["cfg"], 4.0)
+        self.assertEqual(m["sampler_name"], "euler")
+
     def test_rgthree_lora_loader_stack(self):
         from civitai_save import extract_workflow_metadata
         prompt = {
