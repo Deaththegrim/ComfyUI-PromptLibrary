@@ -57,8 +57,8 @@ Your `data/` folder is gitignored, so `git pull` won't touch your library. On fi
 After install, find them under **GrimmRibbity/** sub-menus in the node picker:
 
 **Library (the core suite)**
-- **GrimmRibbity — Library** — visual gallery picker. Outputs `prompt` (positive) and `negative` STRINGs from the selected entry/entries
-- **GrimmRibbity — Style (LoRA + Conditioning)** — same gallery, but applies the entry's stored LoRA stack to MODEL+CLIP and emits patched MODEL/CLIP plus encoded **positive + negative** CONDITIONING (concatted onto optional inputs). Up to 10 LoRAs per entry, edited inline in the modal. `bypass` toggle for A/B comparisons; `strength_scale` multiplies every LoRA at once
+- **GrimmRibbity — Library** — visual gallery picker. Outputs `prompt` (positive) and `negative` STRINGs from the selected entry/entries. **If MODEL + CLIP are wired in (optional)**, the LoRA stack attached to every selected entry is applied in pick-order and patched MODEL/CLIP are emitted on the matching outputs — single node replaces a Library + Power Lora Loader chain. Multi-tile selection stacks every entry's LoRAs.
+- **GrimmRibbity — Style (LoRA + Conditioning)** — like the Library node above but takes the next step: also encodes the joined positive + negative on the patched CLIP and emits `CONDITIONING` outputs (concatted onto optional inputs). Same gallery, same LoRA stack, but skips the separate CLIPTextEncode step. `bypass` toggle for A/B comparisons; `strength_scale` multiplies every LoRA at once
 - **GrimmRibbity — Multi Library (3 panels)** — three independent gallery panels in one node, replaces 3× Library + 2× Join Strings spaghetti
 - **GrimmRibbity — Save** — write prompts to the library during workflow runs (inputs: name, text, optional `negative`, optional `IMAGE` thumbnail, optional tags)
 - **GrimmRibbity — Random by Tag** — pick a random library entry by tag filter (outputs text, id, negative). Built for overnight loops

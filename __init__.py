@@ -504,7 +504,11 @@ class PromptLibrary:
     DESCRIPTION = (
         "Visual prompt picker. Browse the gallery, click tiles to select one "
         "or many entries, and the joined prompt text is emitted on the output. "
-        "Multi-select is persistent across filter/search changes."
+        "Multi-select is persistent across filter/search changes. "
+        "If MODEL + CLIP are wired in, the LoRA stacks attached to every "
+        "selected entry (set in the Edit Prompt modal) are applied in "
+        "selection order — single node replaces a Library + Power Lora "
+        "Loader chain."
     )
 
     @classmethod
@@ -516,15 +520,32 @@ class PromptLibrary:
                                "you don't normally type here, but you can paste IDs to pre-select."}),
                 "separator": ("STRING", {"default": ", ", "multiline": False,
                     "tooltip": "Glue between joined entries when multiple tiles are selected."}),
-            }
+            },
+            "optional": {
+                "model": ("MODEL", {
+                    "tooltip": "Optional. Wire to enable LoRA application. The selected "
+                               "entries' LoRA stacks are applied to this MODEL in pick-order; "
+                               "the patched MODEL is emitted on the matching output. Leave "
+                               "unwired for STRING-only behaviour (the default)."}),
+                "clip": ("CLIP", {
+                    "tooltip": "Optional. Required alongside MODEL for LoRA application. "
+                               "Patched CLIP is emitted on the matching output."}),
+                "strength_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05,
+                    "tooltip": "Multiplier applied to every LoRA's strength_model + strength_clip "
+                               "for this run. 0.0 disables all LoRAs without unwiring MODEL/CLIP."}),
+            },
         }
 
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("prompt", "negative")
+    RETURN_TYPES = ("STRING", "STRING", "MODEL", "CLIP")
+    RETURN_NAMES = ("prompt", "negative", "model", "clip")
     OUTPUT_TOOLTIPS = (
         "The selected prompt(s) joined by the separator.",
         "Joined negative-prompt text from the same entries (empty for entries "
         "that don't store one). Wire into the negative side of your sampler.",
+        "MODEL with every selected entry's LoRA stack applied. None if MODEL "
+        "input was unwired.",
+        "CLIP with every selected entry's LoRA stack applied. None if CLIP "
+        "input was unwired.",
     )
     FUNCTION = "load_prompt"
     CATEGORY = "GrimmRibbity/Library"
@@ -534,34 +555,95 @@ class PromptLibrary:
         return [p.strip() for p in (prompt_id or "").split(",") if p.strip()]
 
     @classmethod
-    def IS_CHANGED(cls, prompt_id, separator=", "):
+    def IS_CHANGED(cls, prompt_id, separator=", ", model=None, clip=None,
+                    strength_scale=1.0):
         ids = cls._split_ids(prompt_id)
         with _lock:
-            items = {i.get("id"): (i.get("text", ""), i.get("negative", ""))
-                     for i in _load()}
-        joined_pos = separator.join(items.get(pid, ("", ""))[0] for pid in ids)
-        joined_neg = separator.join(items.get(pid, ("", ""))[1] for pid in ids)
-        return f"{joined_pos}|||{joined_neg}"
+            items = {i.get("id"): i for i in _load()}
+        # Include LoRA signatures in the hash only when MODEL/CLIP would
+        # actually use them — otherwise editing an entry's LoRA stack
+        # shouldn't re-trigger pure STRING-only consumers.
+        lora_aware = model is not None and clip is not None
+        parts: list[str] = []
+        for pid in ids:
+            entry = items.get(pid)
+            if entry is None:
+                parts.append(f"miss:{pid}")
+                continue
+            text = entry.get("text", "")
+            neg = entry.get("negative", "")
+            if lora_aware:
+                loras = entry.get("loras") or []
+                lora_sig = "|".join(
+                    f"{l.get('name','')}:{l.get('strength_model',1.0):g}:"
+                    f"{l.get('strength_clip',1.0):g}:"
+                    f"{int(bool(l.get('enabled', True)))}:"
+                    f"{(l.get('triggers') or '').strip()}"
+                    for l in loras
+                )
+                parts.append(f"{text}::{neg}::{lora_sig}")
+            else:
+                parts.append(f"{text}::{neg}")
+        return (f"{separator}::{strength_scale:g}::"
+                + ("L" if lora_aware else "S") + "::"
+                + "@@".join(parts))
 
-    def load_prompt(self, prompt_id: str, separator: str = ", "):
+    def load_prompt(self, prompt_id: str, separator: str = ", ",
+                     model=None, clip=None, strength_scale: float = 1.0):
         ids = self._split_ids(prompt_id)
         with _lock:
-            items = {i.get("id"): (i.get("text", ""), i.get("negative", ""))
-                     for i in _load()}
+            items = {i.get("id"): i for i in _load()}
         pos_parts: list[str] = []
         neg_parts: list[str] = []
+        entries: list[dict] = []
         missing: list[str] = []
         for pid in ids:
-            if pid in items:
-                pos, neg = items[pid]
-                pos_parts.append(pos)
-                if neg:
-                    neg_parts.append(neg)
-            else:
+            entry = items.get(pid)
+            if entry is None:
                 missing.append(pid)
+                continue
+            entries.append(entry)
+            text = entry.get("text", "")
+            if text:
+                pos_parts.append(text)
+            neg = entry.get("negative", "")
+            if neg:
+                neg_parts.append(neg)
         if missing:
             print(f"[PromptLibrary] no prompt with id(s)={missing!r}; skipped")
-        return (separator.join(pos_parts), separator.join(neg_parts))
+
+        prompt_out = separator.join(pos_parts)
+        neg_out = separator.join(neg_parts)
+
+        # LoRA application only runs when both MODEL and CLIP are wired.
+        # The helper lives in style_node.py — lazy-imported here so the
+        # plain STRING-only flow doesn't need torch / comfy.sd at import.
+        model_out, clip_out = model, clip
+        if model is not None and clip is not None and entries:
+            try:
+                from .style_node import _apply_loras
+                patched_model, patched_clip = model, clip
+                applied = 0
+                status_all: list[str] = []
+                for entry in entries:
+                    loras = list(entry.get("loras") or [])
+                    if not loras:
+                        continue
+                    patched_model, patched_clip, status = _apply_loras(
+                        patched_model, patched_clip, loras, strength_scale)
+                    applied += sum(1 for s in status if s.startswith("+"))
+                    status_all.extend(status)
+                model_out, clip_out = patched_model, patched_clip
+                if status_all:
+                    names = [e.get("name") or e.get("id", "?") for e in entries]
+                    print(f"[PromptLibrary] {len(entries)} entr{'y' if len(entries) == 1 else 'ies'} "
+                          f"({', '.join(names)}); {applied} LoRA(s) applied: "
+                          f"{' '.join(status_all)}")
+            except Exception as e:
+                print(f"[PromptLibrary] LoRA application failed: {e}; "
+                      f"emitting unpatched MODEL/CLIP")
+
+        return (prompt_out, neg_out, model_out, clip_out)
 
 
 class PromptLibraryMulti:
@@ -2637,7 +2719,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.31.0"
+__version__ = "0.32.0"
 
 
 def _autobackup_on_version_change() -> None:

@@ -172,18 +172,27 @@ class PromptLibraryTests(unittest.TestCase):
 
     # ---- node logic -----------------------------------------------------
 
+    def _strip_lora_outputs(self, result):
+        """The Library node now returns (prompt, negative, model, clip).
+        Tests that pre-date the LoRA-aware sockets only care about the
+        first two; this helper trims the rest so they read cleanly."""
+        return result[:2]
+
     def test_load_prompt_returns_text_for_known_id(self):
         self.mod._save([{"id": "k1", "name": "n", "text": "hello"}])
         node = self.mod.PromptLibrary()
-        self.assertEqual(node.load_prompt("k1"), ("hello", ""))
+        self.assertEqual(self._strip_lora_outputs(node.load_prompt("k1")),
+                          ("hello", ""))
 
     def test_load_prompt_empty_for_missing_id(self):
         node = self.mod.PromptLibrary()
-        self.assertEqual(node.load_prompt("missing"), ("", ""))
+        self.assertEqual(self._strip_lora_outputs(node.load_prompt("missing")),
+                          ("", ""))
 
     def test_load_prompt_empty_for_blank_id(self):
         node = self.mod.PromptLibrary()
-        self.assertEqual(node.load_prompt(""), ("", ""))
+        self.assertEqual(self._strip_lora_outputs(node.load_prompt("")),
+                          ("", ""))
 
     def test_load_prompt_joins_multiple_ids_with_separator(self):
         self.mod._save([
@@ -192,20 +201,25 @@ class PromptLibraryTests(unittest.TestCase):
             {"id": "c", "name": "C", "text": "gamma"},
         ])
         node = self.mod.PromptLibrary()
-        self.assertEqual(node.load_prompt("a,b,c"), ("alpha, beta, gamma", ""))
-        self.assertEqual(node.load_prompt("a, b , c"), ("alpha, beta, gamma", ""))
-        self.assertEqual(node.load_prompt("a,c", separator=" | "), ("alpha | gamma", ""))
+        self.assertEqual(self._strip_lora_outputs(node.load_prompt("a,b,c")),
+                          ("alpha, beta, gamma", ""))
+        self.assertEqual(self._strip_lora_outputs(node.load_prompt("a, b , c")),
+                          ("alpha, beta, gamma", ""))
+        self.assertEqual(self._strip_lora_outputs(node.load_prompt("a,c", separator=" | ")),
+                          ("alpha | gamma", ""))
 
     def test_load_prompt_skips_missing_in_multi_id(self):
         self.mod._save([{"id": "a", "name": "A", "text": "alpha"}])
         node = self.mod.PromptLibrary()
-        self.assertEqual(node.load_prompt("a,missing,a"), ("alpha, alpha", ""))
+        self.assertEqual(self._strip_lora_outputs(node.load_prompt("a,missing,a")),
+                          ("alpha, alpha", ""))
 
     def test_load_prompt_returns_negative_when_present(self):
         self.mod._save([{"id": "k1", "name": "n", "text": "hello",
                          "negative": "lowres, bad_anatomy"}])
         node = self.mod.PromptLibrary()
-        self.assertEqual(node.load_prompt("k1"), ("hello", "lowres, bad_anatomy"))
+        self.assertEqual(self._strip_lora_outputs(node.load_prompt("k1")),
+                          ("hello", "lowres, bad_anatomy"))
 
     def test_load_prompt_joins_negatives_skipping_empties(self):
         # Three entries: only the middle one has a negative — joined output
@@ -220,15 +234,48 @@ class PromptLibraryTests(unittest.TestCase):
         self.assertEqual(out[0], "alpha, beta, gamma")
         self.assertEqual(out[1], "blurry, watermark")
 
+    def test_load_prompt_unwired_model_clip_pass_none(self):
+        """When MODEL/CLIP aren't wired, the corresponding outputs are None
+        and no LoRA work is attempted (no torch needed)."""
+        self.mod._save([{"id": "k1", "name": "n", "text": "hello",
+                         "loras": [{"name": "x.safetensors", "strength_model": 1.0}]}])
+        node = self.mod.PromptLibrary()
+        out = node.load_prompt("k1")
+        self.assertEqual(out[:2], ("hello", ""))
+        self.assertIsNone(out[2])
+        self.assertIsNone(out[3])
+
     def test_is_changed_reflects_text(self):
-        # IS_CHANGED key is positive|||negative so changes on either side
-        # invalidate ComfyUI's cached output.
+        # IS_CHANGED hash includes the entry's text + negative so changes on
+        # either side invalidate ComfyUI's cached output. The exact format
+        # is opaque — we just need different values to produce different keys.
         self.mod._save([{"id": "k", "name": "n", "text": "v1"}])
-        self.assertEqual(self.mod.PromptLibrary.IS_CHANGED("k"), "v1|||")
+        h_v1 = self.mod.PromptLibrary.IS_CHANGED("k")
+        self.assertIn("v1", h_v1)
         self.mod._save([{"id": "k", "name": "n", "text": "v2"}])
-        self.assertEqual(self.mod.PromptLibrary.IS_CHANGED("k"), "v2|||")
+        h_v2 = self.mod.PromptLibrary.IS_CHANGED("k")
+        self.assertNotEqual(h_v1, h_v2)
         self.mod._save([{"id": "k", "name": "n", "text": "v2", "negative": "blurry"}])
-        self.assertEqual(self.mod.PromptLibrary.IS_CHANGED("k"), "v2|||blurry")
+        h_v2_neg = self.mod.PromptLibrary.IS_CHANGED("k")
+        self.assertNotEqual(h_v2, h_v2_neg)
+        self.assertIn("blurry", h_v2_neg)
+
+    def test_is_changed_includes_loras_only_when_lora_aware(self):
+        """Editing an entry's LoRA stack shouldn't invalidate the cache for
+        STRING-only consumers (no MODEL/CLIP wired) — that would force a
+        re-run on every LoRA tweak even though the output text is identical."""
+        self.mod._save([{"id": "k", "name": "n", "text": "v"}])
+        h_no_lora = self.mod.PromptLibrary.IS_CHANGED("k")
+        self.mod._save([{"id": "k", "name": "n", "text": "v",
+                          "loras": [{"name": "x.safetensors", "strength_model": 1.0,
+                                     "strength_clip": 1.0, "triggers": "", "enabled": True}]}])
+        h_with_lora = self.mod.PromptLibrary.IS_CHANGED("k")
+        self.assertEqual(h_no_lora, h_with_lora)
+        # But with model+clip wired (sentinel objects work — IS_CHANGED only
+        # checks for not-None), the LoRA signature gets folded in.
+        h_lora_aware = self.mod.PromptLibrary.IS_CHANGED(
+            "k", model=object(), clip=object())
+        self.assertNotEqual(h_no_lora, h_lora_aware)
 
     def test_input_types_shape(self):
         spec = self.mod.PromptLibrary.INPUT_TYPES()
