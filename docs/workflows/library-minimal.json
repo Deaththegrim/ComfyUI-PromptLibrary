@@ -1,0 +1,29 @@
+{
+  "id": "library-minimal",
+  "revision": 0,
+  "last_node_id": 1,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "PromptLibrary",
+      "pos": [80, 60],
+      "size": [560, 620],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {"name": "prompt", "type": "STRING", "links": null, "slot_index": 0},
+        {"name": "negative", "type": "STRING", "links": null, "slot_index": 1}
+      ],
+      "properties": {"Node name for S&R": "PromptLibrary"},
+      "widgets_values": ["", ", "]
+    }
+  ],
+  "links": [],
+  "groups": [],
+  "config": {},
+  "extra": {"frontendVersion": "1.0"},
+  "version": 0.4
+}
