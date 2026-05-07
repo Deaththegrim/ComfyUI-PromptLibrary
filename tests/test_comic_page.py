@@ -269,5 +269,62 @@ class ComicPageNodeTests(unittest.TestCase):
         self.assertEqual(mask[0, 1, 1].item(), 0.0)
 
 
+@_NEEDS_TORCH
+class PerPanelStrengthTests(unittest.TestCase):
+    """The panel_strengths CSV widget overrides the global strength on a
+    per-panel basis. Position N maps to panel N; blank/missing positions
+    fall back to the global default."""
+
+    def setUp(self):
+        _ENCODE_CALLS.clear()
+        _MASK_CALLS.clear()
+        from comic_page import GrimmRibbityComicPage
+        self.node = GrimmRibbityComicPage()
+        self.layout = torch.zeros((1, 2, 2, 3))
+        self.layout[0, 0, 0] = torch.tensor([1.0, 0.0, 0.0])  # red
+        self.layout[0, 0, 1] = torch.tensor([0.0, 1.0, 0.0])  # green
+        self.layout[0, 1, 0] = torch.tensor([0.0, 0.0, 1.0])  # blue
+
+    def _build(self, panel_strengths, *, strength=1.0):
+        self.node.build(
+            clip="CLIP", panel_layout=self.layout, shared_prompt="",
+            strength=strength, set_cond_area="mask bounds",
+            panel_strengths=panel_strengths,
+            panel_1_prompt="a", panel_1_color="#FF0000",
+            panel_2_prompt="b", panel_2_color="#00FF00",
+            panel_3_prompt="c", panel_3_color="#0000FF",
+            panel_4_prompt="",  panel_4_color="#FFFF00",
+            panel_5_prompt="",  panel_5_color="#FF00FF",
+            panel_6_prompt="",  panel_6_color="#00FFFF",
+        )
+
+    def test_csv_overrides_each_panel(self):
+        self._build("0.5, 1.0, 1.5", strength=0.7)
+        strengths = [c["strength"] for c in _MASK_CALLS]
+        self.assertEqual(strengths, [0.5, 1.0, 1.5])
+
+    def test_blank_position_falls_back_to_global(self):
+        # Middle panel left blank — uses global strength.
+        self._build("0.4, , 1.2", strength=0.9)
+        strengths = [c["strength"] for c in _MASK_CALLS]
+        self.assertEqual(strengths, [0.4, 0.9, 1.2])
+
+    def test_short_csv_doesnt_break_later_panels(self):
+        # Only one override; remaining panels use global.
+        self._build("2.0", strength=0.5)
+        strengths = [c["strength"] for c in _MASK_CALLS]
+        self.assertEqual(strengths, [2.0, 0.5, 0.5])
+
+    def test_unparseable_token_falls_back_to_global(self):
+        self._build("0.5, xyz, 1.5", strength=0.8)
+        strengths = [c["strength"] for c in _MASK_CALLS]
+        self.assertEqual(strengths, [0.5, 0.8, 1.5])
+
+    def test_empty_csv_uses_global_for_every_panel(self):
+        self._build("", strength=0.6)
+        strengths = [c["strength"] for c in _MASK_CALLS]
+        self.assertEqual(strengths, [0.6, 0.6, 0.6])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -148,6 +148,46 @@ class PromptLogTests(unittest.TestCase):
         self.assertNotIn("denoise", rec)
         self.assertEqual(rec["batch_size"], 1)
 
+    def test_build_record_extracts_loras_and_model_from_trace(self):
+        """When the workflow trace contains a CheckpointLoader + LoraLoader
+        chain feeding the sampler, build_record should pull both into the
+        log line (model_label + loras list)."""
+        prompt_trace = {
+            "1": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": 5, "steps": 20, "cfg": 7.0,
+                    "sampler_name": "euler", "scheduler": "simple",
+                    "model": ["10", 0], "positive": ["20", 0], "negative": ["20", 0],
+                },
+            },
+            "10": {
+                "class_type": "LoraLoader",
+                "inputs": {"model": ["11", 0], "lora_name": "Anima.safetensors",
+                            "strength_model": 0.85, "strength_clip": 0.85},
+            },
+            "11": {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": "Anima/anima_v3.safetensors"},
+            },
+            "20": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": "a girl"},
+            },
+        }
+        rec = self.pl.build_record(
+            sampler_node="GrimmRibbityAnimaSampler",
+            prompt_trace=prompt_trace,
+            runtime={"seed": 5, "steps": 20, "cfg": 7.0,
+                      "sampler_name": "euler", "scheduler": "simple"},
+        )
+        self.assertIn("model", rec)
+        self.assertIn("anima_v3", rec["model"])
+        self.assertEqual(len(rec["loras"]), 1)
+        self.assertEqual(rec["loras"][0]["name"], "Anima.safetensors")
+        self.assertAlmostEqual(rec["loras"][0]["strength"], 0.85)
+        self.assertEqual(rec["positive"], "a girl")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

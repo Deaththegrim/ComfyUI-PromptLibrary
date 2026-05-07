@@ -110,14 +110,24 @@ class GrimmRibbityComicPage:
                                "character description here once and every panel inherits it. Pair "
                                "with Character Anchor for a face/style lock on top."}),
                 "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01,
-                    "tooltip": "How strongly each panel's prompt binds to its region. 1.0 is normal; "
-                               "higher values pull harder. Lower (0.5–0.7) lets panels bleed into each other."}),
+                    "tooltip": "Default strength for every panel. How strongly each panel's prompt "
+                               "binds to its region. 1.0 is normal; higher values pull harder. Lower "
+                               "(0.5–0.7) lets panels bleed into each other. Override per panel "
+                               "with the panel_strengths field below."}),
                 "set_cond_area": (["default", "mask bounds"], {"default": "mask bounds",
                     "tooltip": "'mask bounds' restricts conditioning to the panel's bounding box "
                                "(cleaner separation). 'default' applies to the whole canvas with "
                                "masked attention."}),
             },
-            "optional": {},
+            "optional": {
+                "panel_strengths": ("STRING", {"default": "", "multiline": False,
+                    "placeholder": "1.0, 1.0, 1.5, 0.7  — leave blank to use the global strength",
+                    "tooltip": "Per-panel strength override, comma-separated. Position N in the "
+                               "list maps to panel N. Blank or missing positions fall back to the "
+                               "global strength above. Useful when one panel needs to dominate "
+                               "(boost its strength) or recede (lower it) without changing every "
+                               "panel's binding."}),
+            },
         }
         for i in range(1, _PANEL_COUNT + 1):
             default_color = _DEFAULT_COLORS[i - 1]
@@ -139,7 +149,8 @@ class GrimmRibbityComicPage:
     FUNCTION = "build"
     CATEGORY = "GrimmRibbity/Comic"
 
-    def build(self, clip, panel_layout, shared_prompt, strength, set_cond_area, **panels):
+    def build(self, clip, panel_layout, shared_prompt, strength, set_cond_area,
+                panel_strengths="", **panels):
         encoder = _comfy_nodes.NODE_CLASS_MAPPINGS["CLIPTextEncode"]()
         masker = _comfy_nodes.NODE_CLASS_MAPPINGS["ConditioningSetMask"]()
 
@@ -149,6 +160,21 @@ class GrimmRibbityComicPage:
         # reads as a comma-separated tag list (matches booru/SDXL convention).
         shared = (shared_prompt or "").strip()
 
+        # Parse per-panel strength overrides. Position N in the CSV maps to
+        # panel N; missing or unparseable positions fall back to the global
+        # strength so a partial override (e.g. "1.0, , 1.5") just affects
+        # the panels the user actually specified.
+        per_panel: list[float | None] = []
+        for token in (panel_strengths or "").split(","):
+            t = token.strip()
+            if not t:
+                per_panel.append(None)
+                continue
+            try:
+                per_panel.append(float(t))
+            except ValueError:
+                per_panel.append(None)
+
         combined: list = []
         active = 0
         for i in range(1, _PANEL_COUNT + 1):
@@ -156,10 +182,12 @@ class GrimmRibbityComicPage:
             color = (panels.get(f"panel_{i}_color") or "").strip()
             if not prompt or not color:
                 continue
+            override = per_panel[i - 1] if i - 1 < len(per_panel) else None
+            panel_strength = strength if override is None else override
             full_prompt = f"{shared}, {prompt}" if shared else prompt
             mask = _color_to_mask(panel_layout, color)
             (cond,) = encoder.encode(clip, full_prompt)
-            (cond,) = masker.append(cond, mask, set_cond_area, strength)
+            (cond,) = masker.append(cond, mask, set_cond_area, panel_strength)
             if isinstance(cond, list):
                 combined.extend(cond)
             else:

@@ -439,5 +439,36 @@ class HashCacheTests(unittest.TestCase):
             os.unlink(path)
 
 
+class WalkModelChainCycleTests(unittest.TestCase):
+    """A malformed workflow forming a model-chain cycle (node A → node B
+    → node A) used to silently exit the walker via the `seen` set, which
+    is correct behaviour but not exercised by any test. This locks in
+    that the walker terminates instead of recursing forever."""
+
+    def test_lora_chain_with_self_referential_cycle(self):
+        from civitai_save import extract_workflow_metadata
+        # KSampler → LoraLoader_A.model → LoraLoader_B.model → LoraLoader_A
+        # (impossible in real Comfy, but a cycle in the graph data).
+        prompt = {
+            "1": {"class_type": "KSampler",
+                   "inputs": {"model": ["10", 0], "positive": ["20", 0],
+                              "negative": ["20", 0], "seed": 1, "steps": 10,
+                              "cfg": 7, "sampler_name": "euler",
+                              "scheduler": "simple"}},
+            "10": {"class_type": "LoraLoader",
+                    "inputs": {"model": ["11", 0], "lora_name": "a.safetensors",
+                                "strength_model": 1.0}},
+            "11": {"class_type": "LoraLoader",
+                    "inputs": {"model": ["10", 0], "lora_name": "b.safetensors",
+                                "strength_model": 1.0}},
+            "20": {"class_type": "CLIPTextEncode", "inputs": {"text": "x"}},
+        }
+        meta = extract_workflow_metadata(prompt)
+        # Should terminate. The exact loras / model_label depend on which
+        # node the walker visits first — what matters is that the call
+        # returns (a finite dict) rather than recursing forever.
+        self.assertIsInstance(meta, dict)
+
+
 if __name__ == "__main__":
     unittest.main()
