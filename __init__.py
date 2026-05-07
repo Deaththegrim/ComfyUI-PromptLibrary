@@ -217,10 +217,24 @@ def _list_snapshots() -> list[dict]:
 def _restore_snapshot(name: str) -> dict:
     """Restore prompts.json from a snapshot. Returns a dict describing what
     happened. Refuses paths with separators (no escapes outside the
-    snapshot dir)."""
+    snapshot dir) AND verifies the resolved path is actually rooted inside
+    SNAPSHOT_DIR — handles symlink edge cases the substring check would
+    otherwise miss."""
     if not name or "/" in name or "\\" in name or ".." in name:
         return {"ok": False, "error": f"invalid snapshot name {name!r}"}
     src = SNAPSHOT_DIR / name
+    # Defence in depth: even with the substring check above, a symlink in
+    # SNAPSHOT_DIR pointing outside (placed by a separate process) could
+    # let _restore_snapshot copy from any file the Comfy process can read.
+    # resolve() chases symlinks; is_relative_to() catches the escape.
+    try:
+        resolved = src.resolve(strict=False)
+        snapshot_root = SNAPSHOT_DIR.resolve(strict=False)
+        if not resolved.is_relative_to(snapshot_root):
+            return {"ok": False,
+                    "error": f"snapshot {name!r} resolves outside the snapshots directory"}
+    except (OSError, ValueError) as e:
+        return {"ok": False, "error": f"could not resolve snapshot path: {e}"}
     if not src.is_file():
         return {"ok": False, "error": f"snapshot {name!r} not found"}
     # Take a "current state" snapshot too so undo is itself undoable.
@@ -491,23 +505,38 @@ def _start_watcher() -> None:
 
     def loop():
         global _last_known_mtime
+        # Debounce window: when external edits land in a tight burst (e.g. a
+        # script writing several entries in <2 s), we'd otherwise emit a
+        # websocket refresh per change. Wait for the mtime to settle for
+        # one full tick before notifying — coalesces the burst into one
+        # gallery refresh on every connected client.
+        pending_since: float | None = None
+        pending_mtime = 0.0
         while True:
             time.sleep(2)
             # Two-layer guard: the inner try/except OSError handles the
-            # narrow stat-failure case (storage unmounted, file replaced
-            # between exists() and stat()); the outer try/except Exception
-            # is the survival net so a future bug in _notify_change (e.g.
-            # a websocket exception) doesn't silently kill the thread and
-            # break the gallery's auto-refresh feature for the rest of
-            # the Comfy session.
+            # narrow stat-failure case; the outer try/except Exception is
+            # the survival net so a future bug in _notify_change can't
+            # silently kill the thread and break gallery auto-refresh for
+            # the rest of the Comfy session.
             try:
                 try:
                     mtime = STORE_PATH.stat().st_mtime if STORE_PATH.exists() else 0.0
                 except OSError:
                     continue
-                if mtime != _last_known_mtime:
-                    _last_known_mtime = mtime
-                    _notify_change()
+                if mtime == _last_known_mtime:
+                    pending_since = None
+                    continue
+                if pending_mtime != mtime:
+                    # New change observed — start (or restart) the
+                    # coalescing window.
+                    pending_mtime = mtime
+                    pending_since = time.monotonic()
+                    continue
+                # Same mtime as last tick — file has settled, fire.
+                _last_known_mtime = mtime
+                pending_since = None
+                _notify_change()
             except Exception as e:
                 print(f"[PromptLibrary] watcher iteration failed: {e!r}; continuing")
 
@@ -2858,7 +2887,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.43.0"
+__version__ = "0.44.0"
 
 
 def _autobackup_on_version_change() -> None:

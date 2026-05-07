@@ -192,6 +192,12 @@ const CSS = `
 .pl-lora-strength-tag { display: inline-block; width: 14px; min-width: 14px;
   font-size: 10px; font-weight: 600; color: var(--pl-fg-muted); text-align: center;
   font-family: monospace; }
+.pl-lora-strength-header { display: flex; align-items: center; justify-content: space-between; }
+.pl-lora-strength-link { background: transparent; color: var(--pl-fg-muted);
+  border: 1px solid var(--pl-border); border-radius: 3px; padding: 1px 5px;
+  font-size: 11px; cursor: pointer; line-height: 1; }
+.pl-lora-strength-link:hover { color: var(--pl-fg-strong); border-color: var(--pl-fg-muted); }
+.pl-lora-strength-link.linked { color: var(--pl-accent); border-color: var(--pl-accent); }
 /* Custom-styled range input — the browser default is a near-invisible thin
    line. Track is a 4px green-on-grey bar; thumb is a 14px green disc. */
 .pl-lora-strength-bar input[type=range] { flex: 1 1 0; min-width: 0; -webkit-appearance: none;
@@ -632,6 +638,22 @@ let _modalStack = 0;
 
 const LORAS_PER_ENTRY_CAP = 10;
 
+// Chunked-render thresholds for the gallery grid. Below the threshold
+// every tile is built in one frame (the v0.36-39 path). Above it, the
+// first _TILES_PER_CHUNK tiles render synchronously (above-fold paint
+// stays instant) and the rest stream in via requestIdleCallback so a
+// 1000+ tile library doesn't block the main thread for 100+ ms.
+const _CHUNKED_RENDER_THRESHOLD = 200;
+const _TILES_PER_CHUNK = 60;
+
+function _scheduleIdle(fn) {
+  if (typeof requestIdleCallback === "function") {
+    requestIdleCallback(fn, { timeout: 100 });
+  } else {
+    setTimeout(fn, 0);
+  }
+}
+
 function buildLoraSection(initialLoras) {
   // The whole section: green "+ Add LoRA" CTA + helper line + list of rows.
   // Rows are hidden until "+ Add LoRA" is pressed. getValue() reads the
@@ -731,8 +753,9 @@ function buildLoraSection(initialLoras) {
     const strengthLabel = document.createElement("label");
     strengthLabel.textContent = "Strength (M / C)";
     strengthLabel.title = "Top slider = MODEL strength, bottom = CLIP strength. "
-      + "The Style node passes each independently to comfy.sd.load_lora_for_models — "
-      + "matches stock LoraLoader semantics. Defaults to mirrored (both 1.0).";
+      + "Click the 🔗 / 🔓 button to link/unlink them — when linked, dragging "
+      + "either slider drags the other to match. The Style node passes each "
+      + "independently to comfy.sd.load_lora_for_models.";
 
     // Round to 2dp on the way in too — float math would otherwise show e.g.
     // 0.8500000000000001 in the number input and look broken.
@@ -768,7 +791,12 @@ function buildLoraSection(initialLoras) {
         slider.value = String(v);
       });
       bar.append(tag, slider, num);
-      return { bar, slider, num,
+      const setValue = (v) => {
+        const clamped = Math.max(-2, Math.min(2, roundStrength(Number(v) || 0)));
+        slider.value = String(clamped);
+        num.value = slider.value;
+      };
+      return { bar, slider, num, setValue,
         read: () => Math.max(-2, Math.min(2, Number(num.value) || 0)) };
     };
 
@@ -779,7 +807,50 @@ function buildLoraSection(initialLoras) {
     // the two values).
     const clipStrength = buildStrengthPair(
       initial?.strength_clip ?? initial?.strength_model ?? 1.0, "C");
-    strengthCell.append(strengthLabel, modelStrength.bar, clipStrength.bar);
+
+    // Linked-by-default toggle. Initial state: linked when the entry was
+    // saved with model == clip (or pre-v0.41 mirroring), unlinked when
+    // they differ. Clicking the button flips state; entering linked mode
+    // immediately syncs CLIP to the current MODEL value.
+    const linkBtn = document.createElement("button");
+    linkBtn.type = "button";
+    linkBtn.className = "pl-lora-strength-link";
+    let strengthLinked = (initial?.strength_clip === undefined)
+      || (initial?.strength_model === initial?.strength_clip);
+    const renderLink = () => {
+      linkBtn.textContent = strengthLinked ? "🔗" : "🔓";
+      linkBtn.title = strengthLinked
+        ? "Linked — CLIP follows MODEL. Click to unlink."
+        : "Unlinked — set CLIP independently. Click to relink (CLIP snaps "
+          + "back to MODEL value).";
+      linkBtn.classList.toggle("linked", strengthLinked);
+    };
+    renderLink();
+    linkBtn.onclick = () => {
+      strengthLinked = !strengthLinked;
+      if (strengthLinked) clipStrength.setValue(modelStrength.read());
+      renderLink();
+    };
+
+    // While linked, dragging either slider updates the other so the user
+    // sees the "they're moving together" affordance. The mutex flag
+    // breaks the otherwise-infinite recursion (slider.input → setValue →
+    // implicit input event).
+    let _strengthMutex = false;
+    const linkSync = (src, dst) => () => {
+      if (!strengthLinked || _strengthMutex) return;
+      _strengthMutex = true;
+      try { dst.setValue(src.read()); } finally { _strengthMutex = false; }
+    };
+    modelStrength.slider.addEventListener("input", linkSync(modelStrength, clipStrength));
+    modelStrength.num.addEventListener("input", linkSync(modelStrength, clipStrength));
+    clipStrength.slider.addEventListener("input", linkSync(clipStrength, modelStrength));
+    clipStrength.num.addEventListener("input", linkSync(clipStrength, modelStrength));
+
+    const strengthHeader = document.createElement("div");
+    strengthHeader.className = "pl-lora-strength-header";
+    strengthHeader.append(strengthLabel, linkBtn);
+    strengthCell.append(strengthHeader, modelStrength.bar, clipStrength.bar);
 
     const triggersCell = document.createElement("div");
     triggersCell.style.display = "flex";
@@ -865,6 +936,22 @@ function buildLoraSection(initialLoras) {
 }
 
 function openPromptModal({ existing, onSave, onDelete }) {
+  try {
+    return _openPromptModalInner({ existing, onSave, onDelete });
+  } catch (e) {
+    // The modal builder constructs hundreds of DOM nodes synchronously and
+    // attaches a half-dozen event listeners. A throw mid-construction would
+    // leave a half-built DOM in document.body and the gallery in a
+    // half-disabled state (modal listeners on document still firing). Catch,
+    // surface as a toast, and let the caller continue.
+    console.error("[PromptLibrary] openPromptModal failed:", e);
+    document.querySelectorAll(".pl-modal").forEach(el => el.remove());
+    toast(`Could not open Edit Prompt modal: ${e?.message || e}`, "error", 6000);
+    return null;
+  }
+}
+
+function _openPromptModalInner({ existing, onSave, onDelete }) {
   const modal = document.createElement("div");
   modal.className = "pl-modal";
 
@@ -1453,6 +1540,11 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   let prompts = [];
   let lastVisible = [];
   let focusedIndex = -1;        // for keyboard nav
+  // Bumped on every render() call. The chunked-render path captures the
+  // current value and bails out before each chunk if it sees a newer
+  // token — prevents a fresh filter-change from interleaving with stale
+  // tiles from the previous render's still-pending chunks.
+  let _renderToken = 0;
   const activeTags = new Set(Array.isArray(initialState.activeTags) ? initialState.activeTags : []);
   let tagFilterMode = initialState.tagFilterMode === "all" ? "all" : "any";
   if (initialState.filter) filter.value = initialState.filter;
@@ -1957,20 +2049,14 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
     }
     const isManual = sortSelect.value === "manual";
 
-    // Batch every tile's appendChild into a single DocumentFragment so the
-    // grid only reflows once instead of once per tile. Critical for libraries
-    // with hundreds of entries — without this, a 700-entry render does 700
-    // separate layout passes and the search-input feels sluggish per
-    // keystroke.
-    const fragment = document.createDocumentFragment();
-
-    visible.forEach((p, idx) => {
+    // Build a single tile element. Extracted from the inline forEach so
+    // the chunked-render scheduler below can call it from a deferred
+    // callback without duplicating the construction code.
+    const buildTile = (p, idx) => {
       const tile = document.createElement("div");
       tile.className = "pl-tile"
         + (checkedIds.has(p.id) ? " selected" : "")
         + (idx === focusedIndex ? " focused" : "");
-      // Tooltip composes name + rating stars + notes excerpt so the user can
-      // scan content without opening the modal.
       const tipParts = [p.name];
       if (p.rating) tipParts.push("★".repeat(p.rating) + "☆".repeat(5 - p.rating));
       if (p.notes) {
@@ -2008,8 +2094,6 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       checkbox.className = "pl-tile-check";
       checkbox.textContent = checkedIds.has(p.id) ? "✓" : "";
       checkbox.title = "Toggle selection";
-      // No per-checkbox onclick — the grid-level click handler routes
-      // checkbox clicks via target.closest('.pl-tile-check').
       tileImg.appendChild(checkbox);
       if (p.rating) {
         const ratingBadge = document.createElement("div");
@@ -2025,24 +2109,60 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       nm.className = "pl-name";
       nm.textContent = p.name;
       tile.appendChild(nm);
+      return tile;
+    };
 
-      // Click / contextmenu / dragstart / dragend / dragover / dragleave /
-      // drop are all routed by grid-level delegation (set up once at gallery
-      // construction). Per-tile creation no longer attaches handlers — for
-      // a 700-tile library that's ~4900 closures NOT created per render.
-      fragment.appendChild(tile);
-    });
+    const buildAddTile = () => {
+      const t = document.createElement("div");
+      t.className = "pl-tile pl-add";
+      t.textContent = "+";
+      t.title = "Add prompt";
+      return t;
+    };
 
-    const addTile = document.createElement("div");
-    addTile.className = "pl-tile pl-add";
-    addTile.textContent = "+";
-    addTile.title = "Add prompt";
-    // No onclick — grid-level handler dispatches add-tile clicks via the
-    // .pl-add class check.
-    fragment.appendChild(addTile);
-    // Single appendChild moves every tile in the fragment into the grid in
-    // one DOM operation — one reflow, regardless of tile count.
-    grid.appendChild(fragment);
+    // Bump the render token. Any in-flight chunked render from a previous
+    // render() call sees a token mismatch and exits before touching the
+    // grid — prevents stale tiles being appended on top of a fresh render.
+    _renderToken++;
+    const myToken = _renderToken;
+
+    // Synchronous render path: small libraries (< chunk threshold) build
+    // every tile in one frame as before. Above the threshold, render the
+    // first chunk synchronously (so the above-fold tiles paint instantly)
+    // and stream the rest via requestIdleCallback so the browser stays
+    // responsive during the long render. For a 1000-tile library this
+    // brings the first-paint hitch from ~100 ms to ~10 ms.
+    if (visible.length < _CHUNKED_RENDER_THRESHOLD) {
+      const fragment = document.createDocumentFragment();
+      visible.forEach((p, idx) => fragment.appendChild(buildTile(p, idx)));
+      fragment.appendChild(buildAddTile());
+      grid.appendChild(fragment);
+      return;
+    }
+
+    // Above-threshold path. First chunk synchronous, rest deferred.
+    const firstChunk = document.createDocumentFragment();
+    const initial = Math.min(_TILES_PER_CHUNK, visible.length);
+    for (let i = 0; i < initial; i++) firstChunk.appendChild(buildTile(visible[i], i));
+    grid.appendChild(firstChunk);
+
+    let nextIdx = initial;
+    const renderChunk = () => {
+      if (myToken !== _renderToken) return;  // a fresher render is in flight
+      const stop = Math.min(nextIdx + _TILES_PER_CHUNK, visible.length);
+      const chunk = document.createDocumentFragment();
+      for (let i = nextIdx; i < stop; i++) chunk.appendChild(buildTile(visible[i], i));
+      grid.appendChild(chunk);
+      nextIdx = stop;
+      if (nextIdx < visible.length) {
+        _scheduleIdle(renderChunk);
+      } else {
+        // All real tiles in. The + add-tile sits at the very end so it's
+        // not interleaved between chunks during the streaming render.
+        if (myToken === _renderToken) grid.appendChild(buildAddTile());
+      }
+    };
+    _scheduleIdle(renderChunk);
   };
 
   const refresh = async () => {
