@@ -24,6 +24,8 @@ VAE encode/decode, the upscale-with-model tiling logic).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 
 import comfy.sample
@@ -32,6 +34,68 @@ import comfy.sd
 import comfy.utils
 import folder_paths
 import nodes  # for common_ksampler
+
+
+# Shared iteration math + UI feedback for any HiResFix variant. Both the
+# SDXL and Anima samplers consume one of these per stage; the dataclass
+# centralises the per_iter computation (geometric distribution of scale
+# across N iterations), the no-op-when-unity flag, and the ProgressBar so
+# the same iteration loop has identical bookkeeping in both nodes.
+@dataclass
+class _HiresIterPlan:
+    iterations: int
+    per_iter: float
+    skip_upscale: bool
+    pbar: object
+
+    @classmethod
+    def build(cls, *, total_scale: float, iterations: int,
+              total_steps: int | None = None) -> "_HiresIterPlan":
+        per_iter = total_scale ** (1.0 / iterations) if iterations > 1 else total_scale
+        return cls(
+            iterations=iterations,
+            per_iter=per_iter,
+            skip_upscale=abs(per_iter - 1.0) < 1e-6,
+            pbar=comfy.utils.ProgressBar(total_steps if total_steps is not None else iterations),
+        )
+
+
+def _unpack_sdxl_tuple(sdxl_tuple) -> tuple:
+    """Validate + normalise an SDXL_TUPLE into a guaranteed 8-tuple of
+    (base_model, base_clip, base_pos, base_neg, refiner_model, refiner_clip,
+    refiner_pos, refiner_neg). Raises ValueError on a malformed base half;
+    logs + zeros-out the refiner half on a partial fill (efficiency-nodes'
+    tuple sometimes carries a partial refiner — we mirror Pack's all-or-
+    nothing rule here so downstream code can trust the shape)."""
+    if not isinstance(sdxl_tuple, tuple) or len(sdxl_tuple) < 4:
+        raise ValueError("SDXL Sampler: sdxl_tuple must be an 8-tuple from Pack SDXL Tuple "
+                         "or efficiency-nodes' SDXL_TUPLE.")
+    base_model, base_clip, base_pos, base_neg, *rest = sdxl_tuple
+    if base_model is None or base_clip is None or base_pos is None or base_neg is None:
+        raise ValueError("SDXL Sampler: sdxl_tuple has None values in required slots. "
+                         "Pack with valid base_model / base_clip / base_positive / base_negative.")
+    refiner = list(rest)[:4] + [None] * max(0, 4 - len(rest))
+    filled = sum(1 for s in refiner if s is not None)
+    if 0 < filled < 4:
+        print(f"[GrimmRibbitySamplerSDXL] partial refiner in input tuple "
+              f"({filled}/4 slots filled); ignoring refiner half.")
+        refiner = [None] * 4
+    return (base_model, base_clip, base_pos, base_neg, *refiner)
+
+
+def _preflight_size_warning(latent: dict, total_scale: float, *, sampler: str) -> None:
+    """Estimate the final pixel size after HiResFix and warn if it will be
+    big enough that decode is likely to OOM on common (16-24 GB) GPUs.
+    Just a print — doesn't block, doesn't change behaviour. Lets users see
+    the predicted output size before they wait through several iterations."""
+    samples = latent.get("samples")
+    if samples is None or not hasattr(samples, "shape"):
+        return
+    final_long_edge = round(max(samples.shape[-1], samples.shape[-2]) * total_scale * 8)
+    if final_long_edge >= 4096:
+        print(f"[{sampler}] HiResFix will produce ~{final_long_edge}px on the long edge. "
+              f"Auto-tile decode kicks in at >1536px; >4096px may still OOM on 16GB VRAM. "
+              f"Consider lowering upscale_by or splitting into two HiResFix runs.")
 
 
 GRIMM_SDXL_SCRIPT_TYPE = "GRIMM_SDXL_SCRIPT"
@@ -405,6 +469,23 @@ class GrimmRibbityPackSDXLTuple:
     def pack(self, base_model, base_clip, base_positive, base_negative,
              refiner_model=None, refiner_clip=None, refiner_positive=None,
              refiner_negative=None):
+        # Refiner slots are all-or-nothing for any downstream consumer
+        # (efficiency-nodes' refiner sampler, our chained Sampler call).
+        # If the user wired some but not all four, a downstream node sees
+        # a refiner-shaped tuple with Nones in random slots and either
+        # silently no-ops or crashes. Detect partial fills, warn, and
+        # zero-out the whole refiner half so the tuple is unambiguous.
+        refiner_slots = (refiner_model, refiner_clip,
+                          refiner_positive, refiner_negative)
+        filled = sum(1 for s in refiner_slots if s is not None)
+        if 0 < filled < 4:
+            missing = [name for name, val in zip(
+                ("refiner_model", "refiner_clip", "refiner_positive", "refiner_negative"),
+                refiner_slots) if val is None]
+            print(f"[GrimmRibbityPackSDXLTuple] partial refiner — only {filled}/4 slots "
+                  f"wired (missing: {', '.join(missing)}). Treating refiner as unwired so "
+                  "downstream samplers don't get a half-tuple.")
+            refiner_model = refiner_clip = refiner_positive = refiner_negative = None
         return ((base_model, base_clip, base_positive, base_negative,
                  refiner_model, refiner_clip, refiner_positive, refiner_negative),)
 
@@ -658,44 +739,48 @@ def _apply_hires_fix(script: dict, *,
     base_seed = primary_seed if script["use_same_seed"] else script["seed"]
     cur = latent
 
-    # Total iteration count drives the ProgressBar — 'both' mode runs each
-    # stage's iterations sequentially (latent then pixel), so the bar walks
-    # 2*iterations steps. Each iteration's increment fires after its sample
-    # completes, so the user sees per-iteration progress instead of one
-    # silent stretch of waiting.
+    # Pre-flight: warn if the final cumulative size will be big enough to
+    # risk OOM. Just a print — doesn't change behaviour.
+    _preflight_size_warning(latent, total_scale, sampler="GrimmRibbitySamplerSDXL")
+
+    # 'both' mode runs each stage's iterations sequentially (latent then
+    # pixel), so the shared ProgressBar walks 2*iterations steps. Single-
+    # mode plans walk `iterations`. The plan also carries per_iter and
+    # the skip_upscale flag (true when per_iter ≈ 1.0, i.e. refinement-
+    # only run via total_scale=1.0).
     total_iters = iterations * (2 if upscale_type == "both" else 1)
-    pbar = comfy.utils.ProgressBar(total_iters)
 
     try:
         if upscale_type == "both":
             # Half the scale per stage so cumulative = total_scale across both.
-            # Each stage runs `iterations` passes at the appropriate fraction.
             half_scale = total_scale ** 0.5
-            per_iter = half_scale ** (1.0 / iterations) if iterations > 1 else half_scale
+            plan = _HiresIterPlan.build(total_scale=half_scale, iterations=iterations,
+                                         total_steps=total_iters)
             for stage_idx, stage_mode in enumerate(("both_latent", "both_pixel")):
-                for i in range(iterations):
-                    seed = base_seed + stage_idx * iterations + i
+                for i in range(plan.iterations):
+                    seed = base_seed + stage_idx * plan.iterations + i
                     cur = _hires_one_iteration(
                         model=sampling_model, clip=sampling_clip, vae=sampling_vae,
                         positive=positive, negative=negative, latent=cur,
-                        per_scale=per_iter, mode=stage_mode, script=script,
+                        per_scale=plan.per_iter, mode=stage_mode, script=script,
                         sampler_name=primary_sampler_name, scheduler=primary_scheduler,
                         seed=seed, upscale_model=upscale_model,
                         control_net=control_net,
                     )
-                    pbar.update(1)
+                    plan.pbar.update(1)
         else:
-            per_iter = total_scale ** (1.0 / iterations) if iterations > 1 else total_scale
-            for i in range(iterations):
+            plan = _HiresIterPlan.build(total_scale=total_scale, iterations=iterations,
+                                         total_steps=total_iters)
+            for i in range(plan.iterations):
                 cur = _hires_one_iteration(
                     model=sampling_model, clip=sampling_clip, vae=sampling_vae,
                     positive=positive, negative=negative, latent=cur,
-                    per_scale=per_iter, mode=upscale_type, script=script,
+                    per_scale=plan.per_iter, mode=upscale_type, script=script,
                     sampler_name=primary_sampler_name, scheduler=primary_scheduler,
                     seed=base_seed + i, upscale_model=upscale_model,
                     control_net=control_net,
                 )
-                pbar.update(1)
+                plan.pbar.update(1)
     finally:
         # Offload the pixel upscale model now that all iterations are done.
         # _pixel_upscale_with_model leaves it on-device per iteration with
@@ -835,13 +920,11 @@ class GrimmRibbitySamplerSDXL:
             print(f"[GrimmRibbitySamplerSDXL] ignoring unknown legacy inputs: "
                   f"{list(legacy_kwargs.keys())}")
 
-        if not isinstance(sdxl_tuple, tuple) or len(sdxl_tuple) < 4:
-            raise ValueError("SDXL Sampler: sdxl_tuple must be an 8-tuple from Pack SDXL Tuple "
-                             "or efficiency-nodes' SDXL_TUPLE.")
-        base_model, base_clip, positive_cond, negative_cond, *rest = sdxl_tuple
-        if base_model is None or base_clip is None or positive_cond is None or negative_cond is None:
-            raise ValueError("SDXL Sampler: sdxl_tuple has None values in required slots. "
-                             "Pack with valid base_model / base_clip / base_positive / base_negative.")
+        # _unpack_sdxl_tuple validates the base slots, normalises the refiner
+        # half (warns on partial fills), and always returns 8 elements so
+        # the out_tuple construction below is straight indexing.
+        (base_model, base_clip, positive_cond, negative_cond,
+         refiner_model, refiner_clip, refiner_pos, refiner_neg) = _unpack_sdxl_tuple(sdxl_tuple)
 
         if optional_vae is None:
             raise ValueError("SDXL Sampler: optional_vae is not wired. The SDXL_TUPLE doesn't "
@@ -881,7 +964,7 @@ class GrimmRibbitySamplerSDXL:
             image_out = torch.zeros((1, 1, 1, 3))
 
         out_tuple = (base_model, base_clip, positive_cond, negative_cond,
-                     *(rest + [None] * (4 - len(rest)))[:4])
+                     refiner_model, refiner_clip, refiner_pos, refiner_neg)
 
         if save_prompt_log:
             try:

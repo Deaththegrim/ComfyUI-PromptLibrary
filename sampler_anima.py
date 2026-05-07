@@ -145,23 +145,26 @@ def _apply_anima_hires_fix(script: dict, *,
                             model, positive, negative, latent,
                             primary_seed: int, primary_sampler_name: str,
                             primary_scheduler: str):
-    """Run the Anima HiResFix passes. Returns the final latent. Drives a
-    per-iteration ProgressBar so the user sees movement during a 2× / 4×
-    upscale instead of a silent stretch of waiting. Skips the latent
-    upscale step entirely when per_scale ≈ 1.0 (lets users run pure
-    refinement passes via total_scale=1.0 + denoise<1.0)."""
-    iterations = script["iterations"]
-    total_scale = script["upscale_by"]
-    per_iter = total_scale ** (1.0 / iterations) if iterations > 1 else total_scale
+    """Run the Anima HiResFix passes. Returns the final latent. Uses the
+    shared _HiresIterPlan for per-iter scale, no-op-skip flag, and the
+    progress bar — same bookkeeping as the SDXL HiResFix so behaviour
+    stays consistent."""
+    # Cross-module borrow for the shared plan + pre-flight warning. SDXL is
+    # always present (no torch fallback path on this side either, since
+    # this whole function only runs at sample time when torch is loaded).
+    from .sampler_sdxl import _HiresIterPlan, _preflight_size_warning
+
     base_seed = primary_seed if script["use_same_seed"] else script["seed"]
 
-    pbar = comfy.utils.ProgressBar(iterations)
-    skip_upscale = abs(per_iter - 1.0) < 1e-6
+    _preflight_size_warning(latent, script["upscale_by"], sampler="GrimmRibbityAnimaSampler")
+
+    plan = _HiresIterPlan.build(
+        total_scale=script["upscale_by"], iterations=script["iterations"])
 
     cur = latent
-    for i in range(iterations):
-        if not skip_upscale:
-            cur = _interpolation_upscale(cur, per_iter, script["upscale_method"])
+    for i in range(plan.iterations):
+        if not plan.skip_upscale:
+            cur = _interpolation_upscale(cur, plan.per_iter, script["upscale_method"])
         sampled = nodes.common_ksampler(
             model, base_seed + i,
             script["hires_steps"], script["hires_cfg"],
@@ -170,7 +173,7 @@ def _apply_anima_hires_fix(script: dict, *,
             denoise=script["hires_denoise"],
         )
         cur = sampled[0]
-        pbar.update(1)
+        plan.pbar.update(1)
     return cur
 
 
