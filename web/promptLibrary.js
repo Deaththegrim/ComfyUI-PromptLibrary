@@ -1507,6 +1507,174 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
     _refreshFocusedTile();
     updateBulkBar();
   };
+
+  // -------------------------------------------------------------------------
+  // Event delegation — one set of handlers on the grid instead of per-tile
+  // closures. For a 700-tile library in Manual sort, the previous per-tile
+  // approach attached ~7 handler closures per tile (~4900 closures total),
+  // each capturing checkedIds / syncWidget / render / refresh / etc. via
+  // the closure scope. Delegated handlers below resolve the affected tile +
+  // entry on demand via target.closest + dataset.promptId, so render only
+  // creates the tile DOM (no per-tile closure construction) and selection /
+  // context / drag actions stay routed correctly.
+  // -------------------------------------------------------------------------
+
+  const _entryFromTile = (tile) =>
+    tile ? prompts.find(p => p.id === tile.dataset.promptId) : null;
+
+  const _indexFromTile = (tile) =>
+    tile ? lastVisible.findIndex(p => p.id === tile.dataset.promptId) : -1;
+
+  const _toggleSelectionAt = (id, idx, e) => {
+    if (e.shiftKey && lastVisible.length) {
+      const anchor = focusedIndex >= 0 ? focusedIndex : idx;
+      const i0 = Math.min(anchor, idx);
+      const i1 = Math.max(anchor, idx);
+      const affected = [];
+      for (let i = i0; i <= i1; i++) {
+        const rid = lastVisible[i].id;
+        checkedIds.add(rid);
+        affected.push(rid);
+      }
+      focusedIndex = idx;
+      applySelectionChange(affected);
+      return;
+    }
+    if (checkedIds.has(id)) checkedIds.delete(id);
+    else checkedIds.add(id);
+    focusedIndex = idx;
+    applySelectionChange([id]);
+  };
+
+  const _openAddPrompt = () => openPromptModal({
+    onSave: async (payload) => {
+      const created = await upsert(payload);
+      checkedIds.add(created.id);
+      syncWidget();
+      await refresh();
+    },
+  });
+
+  const _openTileContextMenu = (e, p) => {
+    e.preventDefault();
+    openContextMenu(e.clientX, e.clientY, [
+      { kind: "stars", label: "Rate", current: p.rating || 0,
+        action: async (n) => {
+          try {
+            await upsert({
+              id: p.id, name: p.name, text: p.text || "",
+              tags: (p.tags || []).join(", "),
+              rating: n, notes: p.notes || "",
+            });
+            await refresh();
+          } catch (err) { toast(`Rating failed: ${err.message}`, "error"); }
+        } },
+      "sep",
+      { label: "Edit...", action: () => openPromptModal({
+          existing: p,
+          onSave: async (payload) => { await upsert(payload); await refresh(); },
+          onDelete: async (id) => {
+            await deletePrompt(id);
+            if (checkedIds.delete(id)) syncWidget();
+            await refresh();
+          },
+        }) },
+      { label: "Duplicate", action: async () => {
+          try { await duplicatePrompt(p.id); await refresh(); }
+          catch (err) { toast(`Duplicate failed: ${err.message}`, "error"); }
+        } },
+      { label: "Export this", action: async () => {
+          try {
+            const { blob } = await exportZip([p.id]);
+            const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+            downloadBlob(blob, `ribbity-${p.id}-${stamp}.zip`);
+          } catch (err) { toast(`Export failed: ${err.message}`, "error"); }
+        } },
+      "sep",
+      { label: "Delete", danger: true, action: async () => {
+          if (!await confirmDestructive(`Delete "${p.name}"?`)) return;
+          try {
+            await deletePrompt(p.id);
+            if (checkedIds.delete(p.id)) syncWidget();
+            await refresh();
+          } catch (err) { toast(`Delete failed: ${err.message}`, "error"); }
+        } },
+    ]);
+  };
+
+  // Single click handler routes: + tile (add), checkbox (toggle), tile (toggle/range).
+  grid.addEventListener("click", (e) => {
+    const tile = e.target.closest(".pl-tile");
+    if (!tile) return;
+    if (tile.classList.contains("pl-add")) {
+      _openAddPrompt();
+      return;
+    }
+    const id = tile.dataset.promptId;
+    if (!id) return;
+    const idx = _indexFromTile(tile);
+    if (e.target.closest(".pl-tile-check")) {
+      e.stopPropagation();
+      if (checkedIds.has(id)) checkedIds.delete(id);
+      else checkedIds.add(id);
+      focusedIndex = idx;
+      applySelectionChange([id]);
+      return;
+    }
+    _toggleSelectionAt(id, idx, e);
+  });
+
+  grid.addEventListener("contextmenu", (e) => {
+    const tile = e.target.closest(".pl-tile");
+    if (!tile || tile.classList.contains("pl-add")) return;
+    const p = _entryFromTile(tile);
+    if (!p) return;
+    _openTileContextMenu(e, p);
+  });
+
+  // Drag handlers — fire only in Manual sort mode. dataTransfer carries the
+  // dragged id; the drop handler reorders against lastVisible's id list.
+  grid.addEventListener("dragstart", (e) => {
+    if (sortSelect.value !== "manual") return;
+    const tile = e.target.closest(".pl-tile");
+    if (!tile || tile.classList.contains("pl-add")) return;
+    tile.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", tile.dataset.promptId || "");
+  });
+  grid.addEventListener("dragend", (e) => {
+    e.target.closest(".pl-tile")?.classList.remove("dragging");
+  });
+  grid.addEventListener("dragover", (e) => {
+    if (sortSelect.value !== "manual") return;
+    const tile = e.target.closest(".pl-tile");
+    if (!tile || tile.classList.contains("pl-add")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    tile.classList.add("drag-over");
+  });
+  grid.addEventListener("dragleave", (e) => {
+    e.target.closest(".pl-tile")?.classList.remove("drag-over");
+  });
+  grid.addEventListener("drop", async (e) => {
+    if (sortSelect.value !== "manual") return;
+    const tile = e.target.closest(".pl-tile");
+    if (!tile) return;
+    e.preventDefault();
+    tile.classList.remove("drag-over");
+    const draggedId = e.dataTransfer.getData("text/plain");
+    const targetId = tile.dataset.promptId;
+    if (!draggedId || draggedId === targetId) return;
+    const ids = lastVisible.map(v => v.id);
+    const from = ids.indexOf(draggedId);
+    const to = ids.indexOf(targetId);
+    if (from < 0 || to < 0) return;
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    try {
+      await reorderPrompts(ids);
+      await refresh();
+    } catch (err) { toast(`Reorder failed: ${err.message}`, "error"); }
+  });
   bulkExportBtn.onclick = withBusy(bulkExportBtn, "Exporting…", async () => {
     const ids = [...checkedIds];
     if (!ids.length) return;
@@ -1795,13 +1963,8 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       checkbox.className = "pl-tile-check";
       checkbox.textContent = checkedIds.has(p.id) ? "✓" : "";
       checkbox.title = "Toggle selection";
-      checkbox.onclick = (e) => {
-        e.stopPropagation();
-        if (checkedIds.has(p.id)) checkedIds.delete(p.id);
-        else checkedIds.add(p.id);
-        focusedIndex = idx;
-        applySelectionChange([p.id]);
-      };
+      // No per-checkbox onclick — the grid-level click handler routes
+      // checkbox clicks via target.closest('.pl-tile-check').
       tileImg.appendChild(checkbox);
       if (p.rating) {
         const ratingBadge = document.createElement("div");
@@ -1818,103 +1981,10 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       nm.textContent = p.name;
       tile.appendChild(nm);
 
-      tile.onclick = (e) => {
-        // Shift-click: range-extend the selection from the focused anchor to here.
-        if (e.shiftKey && lastVisible.length) {
-          const anchor = focusedIndex >= 0 ? focusedIndex : idx;
-          const i0 = Math.min(anchor, idx);
-          const i1 = Math.max(anchor, idx);
-          const affected = [];
-          for (let i = i0; i <= i1; i++) {
-            const rid = lastVisible[i].id;
-            checkedIds.add(rid);
-            affected.push(rid);
-          }
-          focusedIndex = idx;
-          applySelectionChange(affected);
-          return;
-        }
-        // Plain or Ctrl/Cmd click: toggle this tile's selection.
-        if (checkedIds.has(p.id)) checkedIds.delete(p.id);
-        else checkedIds.add(p.id);
-        focusedIndex = idx;
-        applySelectionChange([p.id]);
-      };
-
-      tile.oncontextmenu = (e) => {
-        e.preventDefault();
-        openContextMenu(e.clientX, e.clientY, [
-          { kind: "stars", label: "Rate", current: p.rating || 0,
-            action: async (n) => {
-              try {
-                await upsert({
-                  id: p.id, name: p.name, text: p.text || "",
-                  tags: (p.tags || []).join(", "),
-                  rating: n, notes: p.notes || "",
-                });
-                await refresh();
-              } catch (err) { toast(`Rating failed: ${err.message}`, "error"); }
-            } },
-          "sep",
-          { label: "Edit...", action: () => openPromptModal({
-              existing: p,
-              onSave: async (payload) => { await upsert(payload); await refresh(); },
-              onDelete: async (id) => {
-                await deletePrompt(id);
-                if (checkedIds.delete(id)) syncWidget();
-                await refresh();
-              },
-            }) },
-          { label: "Duplicate", action: async () => {
-              try { await duplicatePrompt(p.id); await refresh(); }
-              catch (err) { toast(`Duplicate failed: ${err.message}`, "error"); }
-            } },
-          { label: "Export this", action: async () => {
-              try {
-                const { blob } = await exportZip([p.id]);
-                const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-                downloadBlob(blob, `ribbity-${p.id}-${stamp}.zip`);
-              } catch (err) { toast(`Export failed: ${err.message}`, "error"); }
-            } },
-          "sep",
-          { label: "Delete", danger: true, action: async () => {
-              if (!await confirmDestructive(`Delete "${p.name}"?`)) return;
-              try {
-                await deletePrompt(p.id);
-                if (checkedIds.delete(p.id)) syncWidget();
-                await refresh();
-              } catch (err) { toast(`Delete failed: ${err.message}`, "error"); }
-            } },
-        ]);
-      };
-
-      // Drag-and-drop reorder (Manual sort mode only).
-      if (isManual) {
-        tile.ondragstart = (e) => {
-          tile.classList.add("dragging");
-          e.dataTransfer.effectAllowed = "move";
-          e.dataTransfer.setData("text/plain", p.id);
-        };
-        tile.ondragend = () => tile.classList.remove("dragging");
-        tile.ondragover = (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; tile.classList.add("drag-over"); };
-        tile.ondragleave = () => tile.classList.remove("drag-over");
-        tile.ondrop = async (e) => {
-          e.preventDefault();
-          tile.classList.remove("drag-over");
-          const draggedId = e.dataTransfer.getData("text/plain");
-          if (!draggedId || draggedId === p.id) return;
-          const ids = visible.map(v => v.id);
-          const from = ids.indexOf(draggedId);
-          const to = ids.indexOf(p.id);
-          if (from < 0 || to < 0) return;
-          ids.splice(to, 0, ids.splice(from, 1)[0]);
-          try {
-            await reorderPrompts(ids);
-            await refresh();
-          } catch (err) { toast(`Reorder failed: ${err.message}`, "error"); }
-        };
-      }
-
+      // Click / contextmenu / dragstart / dragend / dragover / dragleave /
+      // drop are all routed by grid-level delegation (set up once at gallery
+      // construction). Per-tile creation no longer attaches handlers — for
+      // a 700-tile library that's ~4900 closures NOT created per render.
       fragment.appendChild(tile);
     });
 
@@ -1922,16 +1992,8 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
     addTile.className = "pl-tile pl-add";
     addTile.textContent = "+";
     addTile.title = "Add prompt";
-    addTile.onclick = () => {
-      openPromptModal({
-        onSave: async (payload) => {
-          const created = await upsert(payload);
-          checkedIds.add(created.id);
-          syncWidget();
-          await refresh();
-        },
-      });
-    };
+    // No onclick — grid-level handler dispatches add-tile clicks via the
+    // .pl-add class check.
     fragment.appendChild(addTile);
     // Single appendChild moves every tile in the fragment into the grid in
     // one DOM operation — one reflow, regardless of tile count.
