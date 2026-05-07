@@ -2209,8 +2209,26 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
     }
   }, { passive: false, capture: true });
 
+  // Thorough teardown — runs from the node's onRemoved hook so deleting a
+  // Library node leaves no residual state. Without this, deleted nodes
+  // briefly showed stale 'selected' tiles in the DOM until GC, and the
+  // hidden idWidget retained its prior comma-separated id list, which
+  // Comfy's undo/restore path could re-read into a fresh instance.
   const cleanup = () => {
     window.removeEventListener("prompt-library-updated", onExternal);
+    checkedIds.clear();
+    activeTags.clear();
+    // Clear the rendered grid + tag chips + bulk bar so the DOM is empty
+    // before GC. Anything still holding a reference to the container sees
+    // a clean slate instead of last-known-selection.
+    try {
+      grid.replaceChildren();
+      tagsRow?.replaceChildren?.();
+      bulkBar.style.display = "none";
+    } catch (_e) {}
+    // Reset the underlying widget value too — a future undo/redo or
+    // workflow re-paste should NOT inherit the deleted node's selection.
+    if (idWidget) idWidget.value = "";
   };
   container._promptLibraryCleanup = cleanup;
 
@@ -2712,7 +2730,16 @@ app.registerExtension({
     const onRemoved = nodeType.prototype.onRemoved;
     nodeType.prototype.onRemoved = function () {
       this._promptLibraryCleanup?.();
+      // Null out every callback ref so the deleted node object doesn't keep
+      // the gallery DOM / closure alive. Comfy's undo stack can resurrect
+      // a removed node, but onConfigure rebuilds the gallery from scratch
+      // (onNodeCreated runs again on resurrect), so dropping the old refs
+      // here is safe and prevents stale state from leaking into the new
+      // gallery instance.
       this._promptLibraryCleanup = null;
+      this._promptLibraryRender = null;
+      this._promptLibrarySyncFromWidget = null;
+      this._promptLibraryGalleryWidget = null;
       return onRemoved?.apply(this, arguments);
     };
   },
