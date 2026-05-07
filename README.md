@@ -73,15 +73,17 @@ After install, find them under **GrimmRibbity/** sub-menus in the node picker:
 - **GrimmRibbity — Scene** — per-frame scene knobs (camera_angle, mood, lighting, framing) + free-text extras
 - **GrimmRibbity — Background (locked)** — locked background preset for series consistency
 - **GrimmRibbity — Character Anchor** — wraps IPAdapter Plus's UnifiedLoader + Apply pair into a single MODEL→MODEL transform. Pin a character's face/style across comic panels with one node instead of three. Includes a `bypass` toggle and an `attn_mask` input for regional workflows. **Requires [ComfyUI_IPAdapter_plus](https://github.com/cubiq/ComfyUI_IPAdapter_plus).**
-- **GrimmRibbity — Comic Page (Regional)** — single-gen multi-panel conditioning. Take a color-coded panel-layout mask + per-panel prompts (up to 6 panels) and emit one CONDITIONING constrained per region. Pair with Character Anchor upstream for character lock across panels. **No third-party node packs required** — uses only ComfyUI's core CLIPTextEncode + ConditioningSetMask.
+- **GrimmRibbity — Comic Page (Regional)** — single-gen multi-panel conditioning. Take a color-coded panel-layout mask + per-panel prompts (up to 6 panels) and emit one CONDITIONING constrained per region. Optional `panel_strengths` CSV override (`"1.0, , 1.5"`) lets one panel dominate without changing every panel's binding. Pair with Character Anchor upstream for character lock across panels. **No third-party node packs required** — uses only ComfyUI's core CLIPTextEncode + ConditioningSetMask.
 
 **Output**
 - **GrimmRibbity — Save Image (Civitai)** — SaveImage replacement that writes A1111/Civitai-compatible PNG metadata. Auto-detects model, LoRAs, positive/negative, seed, sampler, scheduler from the workflow trace. Override any field if auto-detect picks the wrong sampler in multi-KSampler workflows
 - **GrimmRibbity — Thumbnail Saver** — writes library thumbnails on workflow runs
 
 **Sampling (optional, requires torch)**
-- **GrimmRibbity — SDXL Sampler** + **Pack SDXL Tuple** — SDXL sampler with optional refiner + HiResFix script
-- **GrimmRibbity — Anima Sampler** — KSampler-shaped sampler with HiResFix script support
+- **GrimmRibbity — SDXL Sampler** + **Pack SDXL Tuple** — SDXL_TUPLE-driven sampler. Wires the way efficiency-nodes' SDXL_TUPLE does (drop-in compatible). Exposes `denoise` for img2img, optional `script` input for HiResFix.
+- **GrimmRibbity — Anima Sampler** — KSampler-shaped sampler for Qwen / Flux / SD3 / any flow-matching base. Pre-encoded CONDITIONING + MODEL + LATENT directly, no SDXL-specific tuple.
+- **GrimmRibbity — HiResFix Script** (SDXL) — latent / pixel / both upscale, optional checkpoint swap, per-iteration ControlNet anchoring, per-field hires prompt overrides, 1–5 iterations. Pixel upscale model + ControlNet load **once per run** instead of once per iteration; hires checkpoint cached across workflow re-runs (1-slot LRU). Auto-tiles VAE decode for outputs >1536px.
+- **GrimmRibbity — Anima HiResFix Script** — shape-agnostic latent upscale (works on 5D Qwen latents). Per-iteration ProgressBar, refinement-only mode at scale=1.0, same auto-tile decode.
 
 Both samplers have an opt-in `save_prompt_log` toggle (default off) — when enabled, every queued sample appends one JSONL line to `prompt_log_path` (empty = `<output>/prompt_logs/prompts.jsonl`) with the positive + negative prompts, the LoRA stack walked from the workflow trace, the model, and the sampler params (seed/steps/cfg/sampler_name/scheduler). One growing file per overnight batch — `jq`-friendly, no per-image directory pollution.
 
@@ -112,12 +114,19 @@ The Library node embeds a full gallery in the node body:
 
 | Control | What it does |
 |---|---|
-| Search | Matches name, text, tags, and id |
+| Search | Matches name, text, **negative**, tags, id, **notes**, **LoRA names + trigger words**. Multi-term AND, debounced 80 ms. |
 | Model dropdown | Lifts `model:*` tags into a top-level filter (Anima, SDXL, Pony, …) |
 | Sort | Manual (drag-reorder) / Name A-Z / Z-A / Newest / Oldest / Recent edit |
+| ★ favorites | Filter to entries with rating ≥ 4 |
 | Tile size slider | 60–200 px, persisted per browser |
+| ▦ / ≡ view toggle | Thumbnail grid vs single-column list |
+| ⚠ N (health badge) | Library validator findings; click for the modal — appears only when there are unhealed issues |
 | Import | Auto-detects `.csv` (columns: `name, text, tags, id` — tags use `;` inside cell) or GrimmRibbity `.zip` |
+| Undo Import | Restores the snapshot taken right before the last bulk import |
 | Export | Packs currently visible prompts + thumbnails into a zip download |
+| Scan LoRAs | Bulk-imports every file in `models/loras/` as a tagged library entry |
+| Import BG | Bulk-imports the curated background presets |
+| Queue All ▶▶ | Queues the current workflow once per selected (or visible) entry |
 | Refresh | Reload from disk |
 
 ### Tag chips
@@ -134,13 +143,27 @@ Right-click → Edit, or click the `+` tile to add. The modal is non-blocking �
 - **ID** — auto-derived from the name (`Cyberpunk Style` → `cyberpunk_style`); override only if you want a specific filesystem name. Collisions auto-append `_2`, `_3`, …
 - **Tags** — comma-separated; autocompletes from existing tags via a `<datalist>`
 - **Prompt text** — the actual prompt string
-- **Reference image** — optional thumbnail; PNG/JPG/WebP/GIF/BMP, capped at 16 MB
-- **LoRAs** — up to 10 per entry. Click `+ Add LoRA` to attach a row (Model dropdown / Strength slider / Trigger words / Delete). Consumed by the **Library** node (since v0.32, when MODEL+CLIP are wired) and the **Style** node (which also encodes prompts on the patched CLIP). Trigger words are appended after the prompt before encoding.
+- **Negative prompt** — optional, flowed on the second STRING output of the loader nodes
+- **Rating** — 0-5 stars, drives the favorites filter
+- **Notes** — private; not used in generation; searchable
+- **Reference image** — optional thumbnail; PNG/JPG/WebP/GIF/BMP, capped at 16 MB. Paste an image with Ctrl+V while the modal is focused.
+- **LoRAs** — up to 10 per entry. Click `+ Add LoRA` to attach a row (Model dropdown / **M+C strength sliders with link toggle** / Trigger words / Delete). Each row has independent `strength_model` and `strength_clip` controls; the 🔗 / 🔓 button locks them to move together. Soft-delete: the Delete button toggles to **Restore** until you Save the modal. Missing LoRA files are flagged with a visible warning row above the dropdown. Consumed by the **Library** node (when MODEL+CLIP are wired) and the **Style** node (which also encodes prompts on the patched CLIP). Trigger words are appended after the prompt before encoding.
 
   ![LoRA section in the Edit Prompt modal](docs/screenshots/edit-prompt-modal-loras.png)
 - **History** — disclosure showing every prior version of this entry (max 20). Click any row to revert. Tracks LoRA-only changes too.
 
   ![History disclosure](docs/screenshots/modal-history.png)
+
+### Library health
+
+A toolbar `⚠ N` badge appears when the validator finds unhealed issues. Click it for a categorised modal:
+
+- **Broken LoRA references** — entries whose `loras` list points at a `.safetensors` no longer in `models/loras/`. Per-row Edit jumps into the entry.
+- **Orphan thumbnails** — image files in `data/images/` with no matching entry. One-click bulk cleanup.
+- **Invalid entry IDs** — would refuse to upsert.
+- **Empty-text entries** — half-completed saves.
+
+The badge auto-refreshes after every gallery refresh; clean libraries get no UI clutter (badge hidden at zero issues).
 
 ## Wildcards & overnight loops
 
@@ -198,6 +221,41 @@ For seeding from a spreadsheet, save as CSV with these columns (header row requi
 - `tags` use `;` as the in-cell separator (because `,` is the CSV delimiter)
 - `id` is optional; blank means auto-derive from name
 
+## Standalone CLI tools
+
+Three scripts in `tools/` run independently of a live ComfyUI server. Useful for batch maintenance over an SSH session or as cron jobs.
+
+```sh
+# Diagnose library issues — reports broken LoRA refs / orphan thumbnails /
+# invalid ids / empty-text entries. Read-only by default; --fix-orphans
+# bulk-deletes the stray thumbnails.
+python3 tools/library_validate.py [--fix-orphans] [--quiet]
+
+# Backfill A1111/Civitai-compatible 'Hashes:' metadata on PNGs from before
+# the Civitai Save node was wired in. Walks a folder, reads each PNG's
+# embedded workflow trace, computes SHA256s for the model + LoRAs, and
+# rewrites the parameters chunk. Idempotent — already-tagged PNGs skip.
+python3 tools/civitai_backfill.py /path/to/output [--recursive] [--dry-run]
+
+# Capture deterministic gallery + modal screenshots via headless Firefox
+# (useful for refreshing the docs after a UI change).
+python3 tools/screenshots/run.py
+```
+
+## HTTP routes
+
+The ComfyUI server gains 17 routes under `/prompt_library/*`. Highlights:
+
+- `GET /list` / `POST /upsert` / `POST /delete` / `POST /bulk_delete` — CRUD over entries
+- `POST /export` / `POST /import_zip` / `POST /import_csv` — bulk transfer
+- `GET /validate` / `POST /fix_orphans` — library health check
+- `GET /loras` — installed LoRA filenames (drives the modal dropdown)
+- `GET /history/{id}` / `POST /revert` — per-entry history
+- `POST /scan_loras` — bulk-import LoRAs as library entries
+- `POST /restore_snapshot` / `GET /snapshots` — recover from a destructive bulk op
+
+Bodies are validated; size caps applied (16 MB image, 50 MB CSV, 500 MB ZIP compressed / 2 GB uncompressed). All POST routes accept JSON; all return JSON. The export route returns a zip body with `Content-Disposition: attachment`.
+
 ## Compatibility & deps
 
 - ComfyUI any reasonably recent version (tested with 0.19.x, frontend 1.42.x)
@@ -214,7 +272,7 @@ python3 -m venv .testenv
 .testenv/bin/python -m unittest discover tests
 ```
 
-100+ tests, runs in ~0.13 s.
+261 tests, runs in ~1.7 s. The Comic Page tests + the Style node helper tests skip without `torch` installed (`.testenv` doesn't ship it).
 
 ## Credits
 
