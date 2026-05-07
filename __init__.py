@@ -57,7 +57,17 @@ _THUMBNAIL_JPEG_QUALITY = 80
 _EXPORT_THUMBNAIL_MAX_EDGE = 384
 _EXPORT_THUMBNAIL_JPEG_QUALITY = 75
 # Import / export
-_MAX_IMPORT_ZIP_BYTES = 500 * 1024 * 1024      # protects against zip-bomb-y uploads
+_MAX_IMPORT_ZIP_BYTES = 500 * 1024 * 1024      # compressed size cap on the upload
+# Uncompressed-size cap on import_zip. A small zip can claim to expand
+# to GB; checked against the sum of ZipInfo.file_size BEFORE any member
+# is read. 2 GB swallows reasonable libraries (10k entries × ~150 KB
+# thumbnails) while refusing the obvious zip-bomb shapes.
+_MAX_IMPORT_ZIP_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
+# CSV import cap. Image and zip uploads were capped, csv was not — a
+# multi-GB CSV would parse into Python memory unchecked. 50 MB fits a
+# library of ~200k single-line entries (the tag-pack imports are at
+# this scale at the high end).
+_MAX_IMPORT_CSV_BYTES = 50 * 1024 * 1024
 # Per-entry history (revert disclosure in the modal)
 _HISTORY_CAP = 20
 # Pre-import snapshots — bulk imports save prompts.json under data/snapshots/
@@ -1623,10 +1633,59 @@ else:
     routes = web.RouteTableDef()
 
 
+async def _json_payload(request) -> tuple[dict, web.Response | None]:
+    """Read a JSON POST body, returning (payload, error_response_or_None).
+
+    Centralises the pattern that was inconsistent across routes: some
+    routes called `await request.json()` raw (raises 500 on a malformed
+    body), some checked `request.body_exists` first. The standard now is:
+    no body → empty dict (no error); malformed JSON → 400 with a clear
+    message. Callers either get a usable dict or a Response to return
+    directly."""
+    if not request.body_exists:
+        return {}, None
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, ValueError) as e:
+        return {}, web.json_response(
+            {"error": f"invalid JSON body: {e}"}, status=400)
+    if not isinstance(payload, dict):
+        return {}, web.json_response(
+            {"error": "request body must be a JSON object"}, status=400)
+    return payload, None
+
+
+def _scan_image_ids() -> set[str]:
+    """Build a set of every prompt_id that has a thumbnail file in
+    IMAGES_DIR. One os.scandir replaces N × (extensions) Path.exists()
+    syscalls. Only used by the /list route — the per-id _image_path_for
+    is fine for the 1-2 callers that actually need the path itself.
+
+    For a 700-entry library, this turns 700 * 7 = 4900 stat() syscalls
+    per /list response into a single readdir(). Critical when the
+    gallery refreshes every websocket event."""
+    valid_exts = _ALLOWED_IMAGE_EXT
+    found: set[str] = set()
+    try:
+        with os.scandir(IMAGES_DIR) as it:
+            for entry in it:
+                name = entry.name
+                dot = name.rfind(".")
+                if dot < 1:
+                    continue
+                if name[dot:].lower() not in valid_exts:
+                    continue
+                found.add(name[:dot])
+    except OSError:
+        pass
+    return found
+
+
 @routes.get("/prompt_library/list")
 async def list_prompts(_request):
     with _lock:
         items = _load()
+    image_ids = _scan_image_ids()
     out = []
     for idx, item in enumerate(items):
         pid = item.get("id", "")
@@ -1642,7 +1701,7 @@ async def list_prompts(_request):
             "created_at": item.get("created_at", 0),
             "updated_at": item.get("updated_at", 0),
             "order": item.get("order", idx),
-            "has_image": _image_path_for(pid) is not None,
+            "has_image": pid in image_ids,
         })
     return web.json_response({"prompts": out})
 
@@ -1858,9 +1917,19 @@ async def import_csv_route(request):
     reader = await request.post()
     field = reader.get("file")
     if field is not None and hasattr(field, "file"):
-        body = field.file.read().decode("utf-8", errors="replace")
+        raw = field.file.read()
     else:
-        body = reader.get("csv") or ""
+        raw_str = reader.get("csv") or ""
+        raw = raw_str.encode("utf-8") if isinstance(raw_str, str) else b""
+    # Size cap before decode + parse — a multi-GB CSV would otherwise
+    # parse into Python memory unchecked. Image and zip uploads were
+    # already capped; CSV is now consistent with them.
+    if len(raw) > _MAX_IMPORT_CSV_BYTES:
+        return web.json_response({
+            "error": f"CSV too large: {len(raw) // (1024 * 1024)} MB > "
+                     f"{_MAX_IMPORT_CSV_BYTES // (1024 * 1024)} MB cap"
+        }, status=400)
+    body = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
     if not body.strip():
         return web.json_response({"error": "no CSV body provided"}, status=400)
     mode = (reader.get("mode") or "add_only").strip()
@@ -1889,7 +1958,9 @@ async def get_history(request):
 
 @routes.post("/prompt_library/revert")
 async def revert_prompt(request):
-    payload = await request.json()
+    payload, err = await _json_payload(request)
+    if err is not None:
+        return err
     pid = _safe_id((payload.get("id") or "").strip())
     ts = payload.get("ts")
     if not pid or ts is None:
@@ -2015,8 +2086,14 @@ def _build_export_zip(items: list[dict], version: str) -> bytes:
 
 @routes.post("/prompt_library/export")
 async def export_zip(request):
-    payload = await request.json() if request.body_exists else {}
+    payload, err = await _json_payload(request)
+    if err is not None:
+        return err
     requested = payload.get("ids") or []
+    if not isinstance(requested, list):
+        return web.json_response(
+            {"error": "ids must be a list (or omit to export everything)"},
+            status=400)
     with _lock:
         items = _load()
     if requested:
@@ -2049,6 +2126,21 @@ def _import_zip(zip_bytes: bytes, *, mode: str = "add_only") -> tuple[int, int, 
         zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
     except zipfile.BadZipFile:
         return 0, 0, 0, ["not a valid zip file"]
+    # Zip-bomb defence: sum the uncompressed sizes from each member's
+    # ZipInfo header BEFORE decompressing anything. A zip can be ~500 MB
+    # on disk and expand to dozens of GB; without this, _import_zip would
+    # happily read every member into memory and OOM the process.
+    try:
+        total_uncompressed = sum(getattr(info, "file_size", 0) or 0
+                                   for info in zf.infolist())
+    except Exception:
+        total_uncompressed = 0
+    if total_uncompressed > _MAX_IMPORT_ZIP_UNCOMPRESSED_BYTES:
+        zf.close()
+        return 0, 0, 0, [
+            f"zip uncompressed size {total_uncompressed // (1024 * 1024)} MB exceeds "
+            f"cap {_MAX_IMPORT_ZIP_UNCOMPRESSED_BYTES // (1024 * 1024)} MB — refusing "
+            f"to decompress (zip-bomb guard)"]
 
     with zf:
         try:
@@ -2627,7 +2719,9 @@ async def import_tag_packs_route(request):
 
 @routes.post("/prompt_library/delete")
 async def delete_prompt(request):
-    payload = await request.json()
+    payload, err = await _json_payload(request)
+    if err is not None:
+        return err
     pid = _safe_id((payload.get("id") or "").strip())
     if not pid:
         return web.json_response({"error": "invalid id"}, status=400)
@@ -2641,8 +2735,12 @@ async def delete_prompt(request):
 
 @routes.post("/prompt_library/bulk_delete")
 async def bulk_delete(request):
-    payload = await request.json()
+    payload, err = await _json_payload(request)
+    if err is not None:
+        return err
     ids_raw = payload.get("ids") or []
+    if not isinstance(ids_raw, list):
+        return web.json_response({"error": "ids must be a list"}, status=400)
     valid = {i for i in (_safe_id(str(x).strip()) for x in ids_raw) if i}
     if not valid:
         return web.json_response({"error": "no valid ids"}, status=400)
@@ -2657,7 +2755,9 @@ async def bulk_delete(request):
 
 @routes.post("/prompt_library/duplicate")
 async def duplicate_prompt(request):
-    payload = await request.json()
+    payload, err = await _json_payload(request)
+    if err is not None:
+        return err
     pid = _safe_id((payload.get("id") or "").strip())
     if not pid:
         return web.json_response({"error": "invalid id"}, status=400)
@@ -2693,7 +2793,9 @@ async def duplicate_prompt(request):
 
 @routes.post("/prompt_library/reorder")
 async def reorder_prompts(request):
-    payload = await request.json()
+    payload, err = await _json_payload(request)
+    if err is not None:
+        return err
     order_ids = payload.get("ids") or []
     if not isinstance(order_ids, list):
         return web.json_response({"error": "ids must be a list"}, status=400)
@@ -2719,7 +2821,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.39.0"
+__version__ = "0.40.0"
 
 
 def _autobackup_on_version_change() -> None:

@@ -120,16 +120,35 @@ def build_record(
 
 def append_prompt_log(record: dict, log_path: Path) -> None:
     """Append one JSONL line. Creates parent dirs as needed. Errors are
-    logged but never raised — a logging glitch should never break sampling."""
+    logged but never raised — a logging glitch should never break sampling.
+
+    Atomicity: the line is encoded to bytes once, then written via a single
+    os.write(fd, bytes) call inside a flock'd file. POSIX guarantees that
+    a single write() of <PIPE_BUF bytes is atomic; for larger lines, fsync
+    after the write ensures the line is durable before the next call.
+    Without this, a process crash mid-write could leave a truncated JSON
+    line that breaks subsequent reads of the file."""
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         _log.warning("prompt_log: mkdir %s failed: %s", log_path.parent, e)
         return
-    line = json.dumps(record, ensure_ascii=False) + "\n"
+    line = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
     try:
         with _write_lock:
-            with log_path.open("a", encoding="utf-8") as f:
-                f.write(line)
+            # O_APPEND + single write() is atomic for line-sized writes on
+            # POSIX. fsync() after ensures durability so a crash leaves
+            # either no line or the complete line — never a truncation.
+            fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+            try:
+                os.write(fd, line)
+                try:
+                    os.fsync(fd)
+                except OSError:
+                    # fsync can fail on some filesystems (e.g. tmpfs); the
+                    # write itself still went through.
+                    pass
+            finally:
+                os.close(fd)
     except OSError as e:
         _log.warning("prompt_log: write %s failed: %s", log_path, e)

@@ -77,6 +77,9 @@ class FakeRequest:
         self._post_data = post_data or {}
         self._json_data = json_data or {}
         self.match_info = match_info or {}
+        # Mirror aiohttp's body_exists attribute — used by the route's
+        # _json_payload helper to short-circuit empty POSTs.
+        self.body_exists = bool(self._post_data) or bool(self._json_data)
 
     async def post(self):
         return self._post_data
