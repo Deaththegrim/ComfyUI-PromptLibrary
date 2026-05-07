@@ -44,6 +44,21 @@ _PREFIX_SEP = "::"  # "checkpoints::anima_v4.safetensors"
 
 _cache_lock = threading.Lock()
 
+# Cap on the on-disk hash cache so a user with hundreds of historical
+# model swaps doesn't grow this file unbounded. Each entry is ~80 bytes
+# (key + sha256 hex), so 4096 entries ≈ 320 KB on disk — covers years
+# of normal use while still pruning long-stale entries via LRU eviction
+# on overflow. Eviction order is by oldest insertion in the on-disk
+# JSON, which is preserved as Python dict insertion order on save.
+_HASH_CACHE_MAX_ENTRIES = 4096
+
+# Recursion caps on workflow-trace walking. Prompts that legitimately
+# chain text or pipe nodes typically need 2-3 hops; higher caps cover
+# unusual third-party node packs without risking a stack-overflow on a
+# pathological graph (which Comfy would have already refused to execute).
+_TEXT_LINK_MAX_DEPTH = 4
+_PIPE_TRACE_MAX_DEPTH = 8
+
 
 # --------------------------------------------------------------------------
 # Hash cache
@@ -60,6 +75,12 @@ def _load_hash_cache() -> dict:
 
 def _save_hash_cache(cache: dict) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # LRU eviction when the cache exceeds the cap — drop the oldest
+    # entries (insertion order). Python dicts preserve insertion order
+    # since 3.7, so we don't need a separate ordering structure.
+    if len(cache) > _HASH_CACHE_MAX_ENTRIES:
+        keep = list(cache.items())[-_HASH_CACHE_MAX_ENTRIES:]
+        cache = dict(keep)
     tmp = HASH_CACHE_PATH.with_suffix(".json.tmp")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(cache, f, indent=2)
@@ -401,7 +422,7 @@ def _resolve_text_link(prompt: dict, link_value, depth: int = 0) -> str:
     return the prompt text. Tolerates a few levels of indirection — primitive
     Text nodes feeding encoders, Searge prompt nodes, etc.
     """
-    if depth > 4:
+    if depth > _TEXT_LINK_MAX_DEPTH:
         return ""
     src = _link_source(link_value)
     if not src or src not in prompt:
@@ -475,7 +496,7 @@ def _trace_pipe_to_loader(prompt: dict, pipe_link, depth: int = 0):
     """Follow a `pipe` link back to the originating Easy-Use loader. Easy-Use
     samplers may chain through intermediate pipe-routing nodes (e.g. branch,
     edit), all of which expose a `pipe` input pointing upstream."""
-    if depth > 8:
+    if depth > _PIPE_TRACE_MAX_DEPTH:
         return None
     src = _link_source(pipe_link)
     if not src or src not in prompt:

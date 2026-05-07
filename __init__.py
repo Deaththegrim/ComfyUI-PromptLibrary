@@ -1,3 +1,4 @@
+import copy
 import csv
 import io
 import json
@@ -2779,7 +2780,10 @@ async def duplicate_prompt(request):
         if src.get("notes"):
             clone["notes"] = src["notes"]
         if src.get("loras"):
-            clone["loras"] = [dict(l) for l in src["loras"]]
+            # Deep copy per-row so a future schema change with a nested
+            # value (e.g. triggers becoming a list) doesn't make a clone
+            # share state with its source. dict(l) was a shallow copy.
+            clone["loras"] = [copy.deepcopy(l) for l in src["loras"]]
         _touch(clone, created=True)
         items.append(clone)
         # Copy thumbnail if present.
@@ -2821,7 +2825,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.40.0"
+__version__ = "0.40.1"
 
 
 def _autobackup_on_version_change() -> None:
