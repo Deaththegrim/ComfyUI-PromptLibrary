@@ -70,7 +70,18 @@ const CSS = `
 .pl-tile.selected, .pl-tile.selected:hover { border-color: var(--pl-accent); }
 .pl-tile.focused { box-shadow: 0 0 0 2px var(--pl-focus-outline) inset; }
 .pl-tile.dragging { opacity: 0.4; }
-.pl-tile.drag-over { outline: 2px dashed var(--pl-accent); outline-offset: -4px; }
+/* Drop-target indicator — a 3px accent-coloured line on the LEFT edge
+   of the target tile, conveying "the dragged tile will land before this
+   one". Cleaner than outlining the entire tile (the previous behaviour),
+   which made it ambiguous whether the drop replaces or sits next to. */
+.pl-tile.drag-over { position: relative; }
+.pl-tile.drag-over::before { content: ""; position: absolute;
+  left: -4px; top: 0; bottom: 0; width: 3px; background: var(--pl-accent);
+  border-radius: 2px; pointer-events: none; }
+/* List view stacks tiles vertically, so the indicator becomes a top-edge
+   horizontal line instead. */
+.pl-grid.list-view .pl-tile.drag-over::before { left: 0; right: 0; bottom: auto;
+  top: -2px; width: auto; height: 3px; }
 .pl-tile-img { position: relative; width: 100%; height: 0; padding-bottom: 100%;
   overflow: hidden; background: var(--pl-bg-deep); flex: 0 0 auto; }
 .pl-tile-img > img, .pl-tile-img > .pl-placeholder {

@@ -2908,7 +2908,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.45.0"
+__version__ = "0.45.1"
 
 
 def _autobackup_on_version_change() -> None:
