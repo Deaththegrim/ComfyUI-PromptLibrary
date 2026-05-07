@@ -644,15 +644,24 @@ def _enhance_one_pass(
 
     # If 2+ uncached bboxes via SAM2, batched predict: ~Nx faster than the
     # per-bbox loop. Falls back to per-bbox when batching returns None
-    # (SAM v1, batch failure).
+    # (SAM v1, batch failure) or mixed-None (partial-success defensive
+    # path for any future predict implementation that can return per-row
+    # failure instead of raising).
     if sam_ready and len(needs_sam) > 1:
         batch_results = _sam_predict_batch(sam_handle, needs_sam)
-        if batch_results is not None:
-            for bbox, mask in zip(needs_sam, batch_results):
-                sam_mask_cache[bbox] = mask
-        else:
+        if batch_results is None:
             for bbox in needs_sam:
                 sam_mask_cache[bbox] = _sam_predict(sam_handle, bbox)
+        else:
+            for bbox, mask in zip(needs_sam, batch_results):
+                if mask is None:
+                    # Defensive: per-row fallback when batch reported success
+                    # overall but a specific row came back empty. Current
+                    # _sam_predict_batch raises rather than returning None
+                    # entries, but cheap to handle in case that changes.
+                    sam_mask_cache[bbox] = _sam_predict(sam_handle, bbox)
+                else:
+                    sam_mask_cache[bbox] = mask
     elif sam_ready and len(needs_sam) == 1:
         sam_mask_cache[needs_sam[0]] = _sam_predict(sam_handle, needs_sam[0])
 
