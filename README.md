@@ -2,9 +2,16 @@
 
 [![tests](https://github.com/Deaththegrim/ComfyUI-PromptLibrary/actions/workflows/tests.yml/badge.svg)](https://github.com/Deaththegrim/ComfyUI-PromptLibrary/actions/workflows/tests.yml)
 
-A visual prompt manager for ComfyUI (formerly *Ribbity — ComfyUI Prompt Library*). Browse a thumbnail grid of saved prompts, tag them, attach a per-entry LoRA stack, and drop the whole bundle into your workflow with one click. Filesystem-backed — your library survives browser clears and syncs cleanly across machines.
+A visual prompt manager + detailer + sampler suite for ComfyUI (formerly *Ribbity — ComfyUI Prompt Library*). Browse a thumbnail grid of saved prompts, tag them, attach a per-entry LoRA stack, and drop the whole bundle into your workflow with one click. Filesystem-backed — your library survives browser clears and syncs cleanly across machines.
 
-A dozen+ nodes (Library, Style, Save, Random, Wildcard Expand, Multi, Comic Frame / Scene / Background, Comic Page Regional, Character Anchor, Save Image (Civitai), SDXL + Anima samplers, LoRA Picker), one shared library, mostly zero third-party dependencies — the Character Anchor node optionally pulls in IPAdapter Plus.
+**~20 nodes**, one shared library, **zero ComfyUI custom-node dependencies** — every node imports only PyPI packages (torch, ultralytics, sam2, etc.) and ComfyUI core. Nodes that can leverage IPAdapter Plus (Character Anchor) lazy-import it at call time so the rest of the suite loads cleanly without it.
+
+Highlights:
+- **Library / Style / Multi** — visual prompt picker with per-entry LoRA stacks; selection persists across page refreshes via three-tier mirroring (widget value → node properties → localStorage)
+- **Smart Detailer** — one node replaces the 3-node FaceDetailer chain. 6 detail targets (face / eyes / mouth / hands / feet / skin), SAM mask refinement, per-target threshold/denoise/max/steps/crop_factor overrides, color-coded detection-preview output. **No Impact Pack required** — uses `ultralytics` directly.
+- **SDXL + Anima samplers** — SDXL_TUPLE-driven (efficiency-nodes wire-compatible) plus a flow-matching sampler for Qwen/Flux/SD3, both with a HiResFix script pipe (5 rounds of caching/perf optimization)
+- **Save Image (Civitai)** — SaveImage replacement that writes A1111/Civitai-compatible PNG metadata; auto-detects model/LoRAs/seed from the workflow trace
+- **Comic Page (Regional)** — single-gen multi-panel conditioning via a color-coded layout mask
 
 ## Screenshots
 
@@ -73,7 +80,9 @@ After install, find them under **GrimmRibbity/** sub-menus in the node picker:
 - **GrimmRibbity — Scene** — per-frame scene knobs (camera_angle, mood, lighting, framing) + free-text extras
 - **GrimmRibbity — Background (locked)** — locked background preset for series consistency
 - **GrimmRibbity — Character Anchor** — wraps IPAdapter Plus's UnifiedLoader + Apply pair into a single MODEL→MODEL transform. Pin a character's face/style across comic panels with one node instead of three. Includes a `bypass` toggle and an `attn_mask` input for regional workflows. **Requires [ComfyUI_IPAdapter_plus](https://github.com/cubiq/ComfyUI_IPAdapter_plus).**
-- **GrimmRibbity — Smart Detailer** — collapses the 3-node FaceDetailer chain (face → eyes → hands) into one node with target toggles. Detector models load by filename string (no UltralyticsDetectorProvider/SAMLoader to wire), and `tiled_decode` defaults ON to prevent host-RAM OOM on long batches. Per-target presets (denoise/feather/crop/wildcard) tuned for SDXL; ride a global `denoise` slider to scale them all together. **Requires [ComfyUI-Impact-Pack](https://github.com/ltdrdata/ComfyUI-Impact-Pack) + Impact-Subpack.**
+- **GrimmRibbity — Smart Detailer** — one node replaces the 3-node FaceDetailer chain. **Six detail targets** (face / eyes / mouth / hands / feet / skin), each with its own enable toggle, bbox-detector dropdown, and a per-target column in the in-node grid for `threshold` / `denoise` / `max N` / `steps` / `crop_factor` overrides. Optional SAM mask refinement so blends follow the actual region outline instead of a rectangular feather. Tiled VAE decode defaults ON for OOM safety, conditional tile policy avoids the overhead on small crops, NaN-scrubbed output. Color-coded `detections_preview` IMAGE output draws labelled bboxes per target — wire to a SaveImage to debug detection without queueing sample work. **No ComfyUI custom-node dependencies** — uses `ultralytics` (and optionally `sam2` / `segment_anything`) directly.
+
+  Drop YOLO detector .pt files into `models/ultralytics/bbox/`. Recommended set: [Anzhc/Anzhcs_YOLOs](https://huggingface.co/Anzhc/Anzhcs_YOLOs) for face + eyes (YOLO11n), [Civitai #329458](https://civitai.com/models/329458) for hands (YOLOv9c — catches partial / off-angle hands the v8s misses), [Civitai #1306938](https://civitai.com/models/1306938) for mouth, [Civitai #2511165](https://civitai.com/models/2511165) for feet/shoes.
 - **GrimmRibbity — Comic Page (Regional)** — single-gen multi-panel conditioning. Take a color-coded panel-layout mask + per-panel prompts (up to 6 panels) and emit one CONDITIONING constrained per region. Optional `panel_strengths` CSV override (`"1.0, , 1.5"`) lets one panel dominate without changing every panel's binding. Pair with Character Anchor upstream for character lock across panels. **No third-party node packs required** — uses only ComfyUI's core CLIPTextEncode + ConditioningSetMask.
 
 **Output**
@@ -224,7 +233,7 @@ For seeding from a spreadsheet, save as CSV with these columns (header row requi
 
 ## Standalone CLI tools
 
-Three scripts in `tools/` run independently of a live ComfyUI server. Useful for batch maintenance over an SSH session or as cron jobs.
+Five scripts in `tools/` run independently of a live ComfyUI server. Useful for batch maintenance over an SSH session or as cron jobs.
 
 ```sh
 # Diagnose library issues — reports broken LoRA refs / orphan thumbnails /
@@ -237,6 +246,18 @@ python3 tools/library_validate.py [--fix-orphans] [--quiet]
 # embedded workflow trace, computes SHA256s for the model + LoRAs, and
 # rewrites the parameters chunk. Idempotent — already-tagged PNGs skip.
 python3 tools/civitai_backfill.py /path/to/output [--recursive] [--dry-run]
+
+# Repair Smart Detailer widget-value shifts in workflow JSONs saved against
+# an older version of the node. Walks every GrimmRibbitySmartDetailer node,
+# type-coerces salvageable values into the current widget order, and falls
+# back to defaults for unrecoverable slots. Original kept as <file>.bak.
+python3 tools/fix_workflow_widgets.py <workflow.json> [-o]
+
+# Live monitor for ComfyUI process — polls /queue, samples RSS / CPU / VRAM
+# / GPU temp every 0.5s, prints per-run summary with peak RSS delta and
+# VRAM peak when the queue empties. Run alongside ComfyUI for the bug-and-
+# monitor matrix on long Smart Detailer batches.
+python3 tools/detailer_monitor.py [--interval 0.5] [--port 8188]
 
 # Capture deterministic gallery + modal screenshots via headless Firefox
 # (useful for refreshing the docs after a UI change).
@@ -273,7 +294,7 @@ python3 -m venv .testenv
 .testenv/bin/python -m unittest discover tests
 ```
 
-278 tests, runs in ~2.5 s. The Comic Page tests + the Style node helper tests skip without `torch` installed (`.testenv` doesn't ship it).
+322 tests, runs in ~3 s. The Comic Page tests + the Smart Detailer + Style node helper tests skip without `torch` installed (`.testenv` doesn't ship it). The Set/Get compatibility tests skip when `comfy.*` isn't on `PYTHONPATH`.
 
 ## Troubleshooting
 
@@ -305,6 +326,20 @@ Wire the matching socket or unwire both.
 ### "I have a half-set-up library and want to spot the bad rows"
 
 Click the ⚠ N badge in the gallery toolbar (or run `python3 tools/library_validate.py` from the shell). Lists broken LoRA refs / orphan thumbnails / invalid ids / empty-text rows.
+
+### "Smart Detailer fails validation after I update the suite"
+
+ComfyUI loads workflow widget values by position. When new required widgets are added to a node across versions, saved values shift and end up in the wrong widget — symptom: validation errors saying things like `sampler_name='karras'` (a scheduler value) or `max_size=1` (was a boolean).
+
+Two fixes:
+- **Re-add the node**: right-click the Smart Detailer → Remove → re-add fresh. The new node has correct defaults.
+- **Migrate the saved workflow JSON**: `python3 tools/fix_workflow_widgets.py <workflow.json> -o`. Walks every Smart Detailer node, type-coerces salvageable values into the current widget order, falls back to defaults for unrecoverable slots. Original is preserved as `<workflow.json>.bak`.
+
+Going forward, new widgets land in `optional` so they don't shift required-widget positions — saved workflows from v0.53.1+ should remain stable.
+
+### "Smart Detailer output is black / has weird color artifacts"
+
+The detail pass pipeline used to skip a NaN scrub between VAE decode and the alpha-blend composite, so a sample-time NaN propagated into the final image and downstream `clip(0,1).astype(uint8)` casts produced black pixels. Fixed in v0.49.0 — `nan_to_num` runs after every refined-image path. If you still see this on v0.49.0+, share the console log; there's a different bug.
 
 ## Credits
 
