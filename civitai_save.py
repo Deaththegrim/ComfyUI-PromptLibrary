@@ -936,6 +936,33 @@ class CivitaiSaveImage:
             counter = (max(existing) + 1) if existing else 0
             full_prefix, filename, subfolder = output_dir, base, ""
 
+        # Parts of the metadata that DON'T vary per frame in a batch are lifted
+        # out of the loop. Frames in a Comfy batch always share H/W (the
+        # tensor is [B, H, W, C]), so build_a1111_parameters produces the
+        # same string for every frame — building it N times is wasted work.
+        # Same for the PROMPT / EXTRA_PNGINFO JSON encodes.
+        # Width/height come from images.shape since all frames share them;
+        # we sample frame[0]'s dims as the canonical source.
+        if len(images) > 0:
+            sample = images[0]
+            sample_h = int(sample.shape[-3]) if hasattr(sample, "shape") else 0
+            sample_w = int(sample.shape[-2]) if hasattr(sample, "shape") else 0
+        else:
+            sample_h = sample_w = 0
+        params = build_a1111_parameters(
+            positive=positive, negative=negative,
+            width=sample_w, height=sample_h,
+            steps=steps, sampler_name=sampler_name, scheduler=scheduler,
+            cfg=cfg, seed=seed,
+            model_name=model_name, model_sha256=model_sha,
+            loras=loras,
+        )
+        prompt_text = json.dumps(prompt) if prompt is not None else None
+        extra_text: list[tuple[str, str]] = []
+        if extra_pnginfo is not None:
+            for k, v in extra_pnginfo.items():
+                extra_text.append((k, json.dumps(v)))
+
         results = []
         for frame in images:
             arr = frame
@@ -944,28 +971,12 @@ class CivitaiSaveImage:
             arr = (arr.clip(0, 1) * 255).astype(np.uint8)
             pil = Image.fromarray(arr)
 
-            params = build_a1111_parameters(
-                positive=positive,
-                negative=negative,
-                width=pil.width,
-                height=pil.height,
-                steps=steps,
-                sampler_name=sampler_name,
-                scheduler=scheduler,
-                cfg=cfg,
-                seed=seed,
-                model_name=model_name,
-                model_sha256=model_sha,
-                loras=loras,
-            )
-
             png_info = PngImagePlugin.PngInfo()
             png_info.add_text("parameters", params)
-            if prompt is not None:
-                png_info.add_text("prompt", json.dumps(prompt))
-            if extra_pnginfo is not None:
-                for k, v in extra_pnginfo.items():
-                    png_info.add_text(k, json.dumps(v))
+            if prompt_text is not None:
+                png_info.add_text("prompt", prompt_text)
+            for k, v in extra_text:
+                png_info.add_text(k, v)
 
             file_name = f"{filename}_{counter:05d}_.png"
             counter += 1

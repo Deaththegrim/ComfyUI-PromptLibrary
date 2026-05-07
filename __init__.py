@@ -1230,7 +1230,19 @@ class PromptLibraryWildcard:
 
     @classmethod
     def IS_CHANGED(cls, text, seed, expand_choices=True, expand_named_refs=True):
-        return f"{seed}|{expand_choices}|{expand_named_refs}|{text}"
+        # When expand_named_refs is on, the result depends on the live
+        # library content (which entries match a __name__ reference),
+        # so editing a referenced entry mid-session must invalidate the
+        # cache. Folds the prompts.json mtime into the hash on that
+        # branch only — pure {a|b|c} expansion that doesn't touch the
+        # library doesn't pay the cache invalidation cost.
+        lib_sig = ""
+        if expand_named_refs:
+            try:
+                lib_sig = str(STORE_PATH.stat().st_mtime if STORE_PATH.exists() else 0.0)
+            except OSError:
+                lib_sig = ""
+        return f"{seed}|{expand_choices}|{expand_named_refs}|{lib_sig}|{text}"
 
     def expand(self, text, seed, expand_choices=True, expand_named_refs=True):
         with _lock:
@@ -3037,7 +3049,7 @@ async def fix_orphans(request):
     return web.json_response({"removed": removed, "errors": errors})
 
 
-__version__ = "0.47.0"
+__version__ = "0.47.1"
 
 
 def _autobackup_on_version_change() -> None:
