@@ -321,7 +321,8 @@ const CSS = `
 /* Smart Detailer per-target grid — 4 columns (face/eyes/hands/skin) ×
    N rows (enable / threshold / denoise / max / steps). Replaces the
    ugly long stack of 16+4 hidden widgets with a compact grid. */
-.pl-det-grid { display: grid; grid-template-columns: 78px 1fr 1fr 1fr 1fr;
+.pl-det-grid { display: grid;
+  grid-template-columns: 70px repeat(6, 1fr);
   gap: 4px; padding: 8px 6px; background: #1a1a1a; border-radius: 4px;
   font-size: 11px; box-sizing: border-box; }
 .pl-det-corner { background: transparent; }
@@ -330,7 +331,9 @@ const CSS = `
   font-size: 11px; text-transform: uppercase; }
 .pl-det-h.face  { background: #4cd866; }
 .pl-det-h.skin  { background: #f1e64c; }
+.pl-det-h.mouth { background: #f1764c; }
 .pl-det-h.eyes  { background: #4cd8f1; }
+.pl-det-h.feet  { background: #9c4cf1; color: #fff; }
 .pl-det-h.hands { background: #f14cd8; }
 .pl-det-l { color: #aaa; align-self: center; padding-right: 6px;
   text-align: right; font-variant-numeric: tabular-nums; }
@@ -3217,7 +3220,7 @@ function registerComicFrameNode(nodeType) {
 const SMART_DETAILER_NAME = "GrimmRibbitySmartDetailer";
 
 function _buildSmartDetailerGrid(node) {
-  const TARGETS = ["face", "eyes", "hands", "skin"];
+  const TARGETS = ["face", "skin", "mouth", "eyes", "feet", "hands"];
   const ROWS = [
     { key: "enable",    label: "enable",    pat: "enable_X",     kind: "bool" },
     { key: "threshold", label: "threshold", pat: "X_threshold", kind: "float", step: 0.01, min: -1, max: 1 },
@@ -3341,9 +3344,9 @@ function registerSmartDetailerNode(nodeType) {
       setValue: () => {},
     });
     this._smartDetailerRefresh = built.refresh;
-    // Bump default node width so the 5 grid columns fit comfortably.
-    if (Array.isArray(this.size) && this.size[0] < 380) {
-      this.size = [380, this.size[1] || 720];
+    // Bump default node width so the 7 grid columns (label + 6 targets) fit.
+    if (Array.isArray(this.size) && this.size[0] < 480) {
+      this.size = [480, this.size[1] || 720];
       this.setSize?.(this.size);
     }
     return r;

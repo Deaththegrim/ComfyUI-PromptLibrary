@@ -162,6 +162,9 @@ class _DetailerMatrix(unittest.TestCase):
             bbox_threshold=0.45, max_per_target=0,
             tiled_decode=True, tiled_encode=False,
             mask_strength=1.0, same_seed_per_target=False,
+            enable_mouth=False, enable_feet=False,
+            bbox_mouth=detailer_node._NONE,
+            bbox_feet=detailer_node._NONE,
             bypass=False,
         )
         defaults.update(overrides)

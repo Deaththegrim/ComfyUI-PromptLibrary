@@ -73,7 +73,7 @@ def _resolve_comfy_helpers() -> None:
         _PROGRESS_BAR_CLS = None
 
 
-_TARGET_ORDER = ("face", "skin", "eyes", "hands")
+_TARGET_ORDER = ("face", "skin", "mouth", "eyes", "feet", "hands")
 
 _PRESETS: dict[str, dict[str, Any]] = {
     "face":  {"denoise": 0.40, "feather": 12, "crop_factor": 3.0,
@@ -82,9 +82,15 @@ _PRESETS: dict[str, dict[str, Any]] = {
     "skin":  {"denoise": 0.30, "feather": 20, "crop_factor": 2.5,
               "wildcard": "smooth skin texture, natural pores,",
               "color": (0.95, 0.90, 0.30)},   # yellow
+    "mouth": {"denoise": 0.40, "feather": 12, "crop_factor": 2.5,
+              "wildcard": "detailed mouth, clean teeth, sharp lips,",
+              "color": (0.95, 0.46, 0.30)},   # coral / red-orange
     "eyes":  {"denoise": 0.40, "feather": 15, "crop_factor": 1.5,
               "wildcard": "detailed eyes, highly detailed,",
               "color": (0.30, 0.85, 0.95)},   # cyan
+    "feet":  {"denoise": 0.40, "feather": 12, "crop_factor": 2.5,
+              "wildcard": "detailed feet, sharp shoe details, clean stitching,",
+              "color": (0.61, 0.30, 0.95)},   # violet
     "hands": {"denoise": 0.45, "feather": 10, "crop_factor": 2.0,
               "wildcard": "detailed hands, anatomically correct fingers,",
               "color": (0.95, 0.30, 0.85)},   # magenta
@@ -963,6 +969,22 @@ class GrimmRibbitySmartDetailer:
                     "target_index*1000). Default False = each bbox gets seed + bbox_index, "
                     "giving variety across multiple faces. Turn ON for repeatable A/B "
                     "comparisons or when one detection per target is the norm."}),
+                # Two extra targets — appended at end of required so saved
+                # workflows from v0.52.x don't widget-shift on load.
+                "enable_mouth": ("BOOLEAN", {"default": False, "tooltip":
+                    "Run the mouth/teeth pass: tight crop on the mouth region, sharpens "
+                    "teeth and lip detail. Off by default — needs a mouth detector "
+                    "(e.g. Anzhc's Mouth+Teeth YOLO from huggingface) in models/ultralytics/bbox/."}),
+                "enable_feet": ("BOOLEAN", {"default": False, "tooltip":
+                    "Run the feet/shoes pass: cleans up shoe stitching, sole detail, ankle "
+                    "boundary. Off by default — needs a foot detector (foot_yolov8s.pt or "
+                    "similar) in models/ultralytics/bbox/."}),
+                "bbox_mouth": (bbox_models, {"default": _NONE, "tooltip":
+                    "YOLO bbox model for the mouth pass. Required when enable_mouth=True. "
+                    "Anzhc's 'Mouth(closed)+Teeth.pt' is a good pick for cartoon/anime."}),
+                "bbox_feet": (bbox_models, {"default": _NONE, "tooltip":
+                    "YOLO bbox model for the feet pass. Required when enable_feet=True. "
+                    "foot_yolov8s.pt is the standard Adetailer foot model."}),
                 "bypass": ("BOOLEAN", {"default": False, "tooltip":
                     "When True, the node passes the input image through unchanged (and emits "
                     "the input as the preview, plus an empty mask). Use to A/B compare with vs "
@@ -991,6 +1013,14 @@ class GrimmRibbitySmartDetailer:
                 "skin_denoise":    den("skin",  "0.30 (= global - 0.10)"),
                 "skin_max":        maxn("skin"),
                 "skin_steps":      stp("skin"),
+                "mouth_threshold": thr("mouth"),
+                "mouth_denoise":   den("mouth", "0.40"),
+                "mouth_max":       maxn("mouth"),
+                "mouth_steps":     stp("mouth"),
+                "feet_threshold":  thr("feet"),
+                "feet_denoise":    den("feet",  "0.40"),
+                "feet_max":        maxn("feet"),
+                "feet_steps":      stp("feet"),
                 "force_inpaint": ("BOOLEAN", {"default": True, "tooltip":
                     "When True, every detection runs the sample pass even if the bbox is "
                     "already larger than guide_size. When False, large/clean detections are "
@@ -1055,14 +1085,18 @@ class GrimmRibbitySmartDetailer:
                seed, steps, cfg, sampler_name, scheduler,
                denoise, guide_size, max_size, bbox_threshold, max_per_target,
                tiled_decode, tiled_encode, mask_strength, same_seed_per_target,
-               bypass,
+               enable_mouth=False, enable_feet=False,
+               bbox_mouth=_NONE, bbox_feet=_NONE,
+               bypass=False,
                wildcard_prefix="",
                face_threshold=-1.0, face_denoise=-1.0, face_max=0, face_steps=0,
                eyes_threshold=-1.0, eyes_denoise=-1.0, eyes_max=0, eyes_steps=0,
                hands_threshold=-1.0, hands_denoise=-1.0, hands_max=0, hands_steps=0,
                skin_threshold=-1.0, skin_denoise=-1.0, skin_max=0, skin_steps=0,
+               mouth_threshold=-1.0, mouth_denoise=-1.0, mouth_max=0, mouth_steps=0,
+               feet_threshold=-1.0, feet_denoise=-1.0, feet_max=0, feet_steps=0,
                force_inpaint=True, drop_size=10,
-               nms_iou=0.5, yolo_imgsz=640,
+               nms_iou=0.5, yolo_imgsz=960,
                max_bbox_area_pct=0.95, draw_preview=True):
 
         device = image.device
@@ -1078,19 +1112,25 @@ class GrimmRibbitySmartDetailer:
         ovr = {
             "face":  (face_threshold,  face_denoise,  face_max,  face_steps),
             "skin":  (skin_threshold,  skin_denoise,  skin_max,  skin_steps),
+            "mouth": (mouth_threshold, mouth_denoise, mouth_max, mouth_steps),
             "eyes":  (eyes_threshold,  eyes_denoise,  eyes_max,  eyes_steps),
+            "feet":  (feet_threshold,  feet_denoise,  feet_max,  feet_steps),
             "hands": (hands_threshold, hands_denoise, hands_max, hands_steps),
         }
         enables = {
             "face":  enable_face,
             "skin":  enable_skin,
+            "mouth": enable_mouth,
             "eyes":  enable_eyes,
+            "feet":  enable_feet,
             "hands": enable_hands,
         }
         bbox_pick = {
             "face":  bbox_face,
             "skin":  bbox_face,
+            "mouth": bbox_mouth,
             "eyes":  bbox_eyes if bbox_eyes != _NONE else bbox_face,
+            "feet":  bbox_feet,
             "hands": bbox_hands,
         }
 

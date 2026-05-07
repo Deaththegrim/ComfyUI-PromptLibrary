@@ -243,7 +243,9 @@ class InputTypesShapeTests(unittest.TestCase):
                   "denoise", "guide_size", "max_size",
                   "bbox_threshold", "max_per_target",
                   "tiled_decode", "tiled_encode", "mask_strength",
-                  "same_seed_per_target", "bypass"):
+                  "same_seed_per_target",
+                  "enable_mouth", "enable_feet", "bbox_mouth", "bbox_feet",
+                  "bypass"):
             self.assertIn(k, spec["required"], f"missing required: {k}")
         for k in ("wildcard_prefix", "force_inpaint", "drop_size",
                   "nms_iou", "yolo_imgsz",
@@ -251,7 +253,9 @@ class InputTypesShapeTests(unittest.TestCase):
                   "face_threshold", "face_denoise", "face_max", "face_steps",
                   "eyes_threshold", "eyes_denoise", "eyes_max", "eyes_steps",
                   "hands_threshold", "hands_denoise", "hands_max", "hands_steps",
-                  "skin_threshold", "skin_denoise", "skin_max", "skin_steps"):
+                  "skin_threshold", "skin_denoise", "skin_max", "skin_steps",
+                  "mouth_threshold", "mouth_denoise", "mouth_max", "mouth_steps",
+                  "feet_threshold", "feet_denoise", "feet_max", "feet_steps"):
             self.assertIn(k, spec["optional"], f"missing optional: {k}")
 
     def test_per_target_overrides_default_to_minus_one(self):
