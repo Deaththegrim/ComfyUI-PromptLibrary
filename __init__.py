@@ -904,6 +904,13 @@ class PromptLibrarySave:
                 "overwrite_by_name": ("BOOLEAN", {"default": False,
                     "tooltip": "When prompt_id is unset and an entry with this name already exists, "
                                "update that entry instead of inserting a new one."}),
+                "loras_json": ("STRING", {"default": "", "multiline": False,
+                    "placeholder": "[] — leave blank to leave loras untouched",
+                    "tooltip": "Optional JSON-encoded LoRA stack to attach to the saved entry. "
+                               "Same shape as the modal's loras list: [{\"name\": \"path/to.safetensors\", "
+                               "\"strength_model\": 1.0, \"strength_clip\": 1.0, \"triggers\": \"...\", "
+                               "\"enabled\": true}]. Leave blank to keep whatever loras the entry "
+                               "already has (or none, for a brand-new entry). Capped at 10 rows."}),
             },
         }
 
@@ -917,7 +924,8 @@ class PromptLibrarySave:
     CATEGORY = "GrimmRibbity/Library"
     OUTPUT_NODE = True
 
-    def save(self, name, text, thumbnail=None, negative="", tags="", prompt_id="", overwrite_by_name=False):
+    def save(self, name, text, thumbnail=None, negative="", tags="", prompt_id="",
+              overwrite_by_name=False, loras_json=""):
         name = (name or "").strip()
         if not name:
             raise ValueError("PromptLibrarySave: name is required")
@@ -927,6 +935,12 @@ class PromptLibrarySave:
         if prompt_id and not _safe_id(prompt_id):
             raise ValueError(f"PromptLibrarySave: invalid prompt_id {prompt_id!r}")
         parsed_tags = _parse_tags(tags)
+        # Parse loras_json with the same normaliser the upsert route uses,
+        # so the workflow-side JSON shape matches what the modal stores.
+        # Empty string ⇒ untouched (None signals "don't write the field");
+        # an explicit "[]" ⇒ clear the entry's loras list.
+        loras_provided = bool((loras_json or "").strip())
+        loras = _parse_loras(loras_json) if loras_provided else None
 
         with _lock:
             items = _load()
@@ -943,13 +957,20 @@ class PromptLibrarySave:
                 items.append(existing)
             else:
                 _maybe_push_history(existing, name, text or "", parsed_tags,
-                                      new_negative=negative or "")
+                                      new_negative=negative or "",
+                                      new_loras=loras if loras_provided
+                                                else existing.get("loras"))
 
             existing["name"] = name
             existing["text"] = text or ""
             existing["tags"] = parsed_tags
             if negative or "negative" in existing:
                 existing["negative"] = negative or ""
+            if loras_provided:
+                if loras:
+                    existing["loras"] = loras
+                elif "loras" in existing:
+                    existing["loras"] = []
             _touch(existing, created=created)
 
             if thumbnail is not None:
@@ -2887,7 +2908,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.44.0"
+__version__ = "0.45.0"
 
 
 def _autobackup_on_version_change() -> None:

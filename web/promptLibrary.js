@@ -198,6 +198,9 @@ const CSS = `
   font-size: 11px; cursor: pointer; line-height: 1; }
 .pl-lora-strength-link:hover { color: var(--pl-fg-strong); border-color: var(--pl-fg-muted); }
 .pl-lora-strength-link.linked { color: var(--pl-accent); border-color: var(--pl-accent); }
+.pl-lora-missing-warn { font-size: 10px; color: var(--pl-danger); padding: 2px 4px;
+  background: rgba(255, 100, 100, 0.08); border-left: 2px solid var(--pl-danger);
+  border-radius: 0 2px 2px 0; line-height: 1.3; }
 /* Custom-styled range input — the browser default is a near-invisible thin
    line. Track is a 4px green-on-grey bar; thumb is a 14px green disc. */
 .pl-lora-strength-bar input[type=range] { flex: 1 1 0; min-width: 0; -webkit-appearance: none;
@@ -722,6 +725,14 @@ function buildLoraSection(initialLoras) {
     const modelLabel = document.createElement("label");
     modelLabel.textContent = "Model";
     const modelSelect = document.createElement("select");
+    // Visible warning row that appears above the dropdown when the saved
+    // value isn't in the loaded LoRA list. Without this, the user only
+    // notices the (missing) marker when they click the dropdown — a row
+    // wired to a renamed/moved file looks fine at a glance and silently
+    // contributes nothing at run time.
+    const missingWarn = document.createElement("div");
+    missingWarn.className = "pl-lora-missing-warn";
+    missingWarn.style.display = "none";
     const refreshOptions = (names) => {
       const current = modelSelect.value || initial?.name || "";
       modelSelect.replaceChildren();
@@ -735,18 +746,27 @@ function buildLoraSection(initialLoras) {
         opt.textContent = n;
         modelSelect.appendChild(opt);
       }
-      // Preserve a value that's no longer in the list (LoRA removed from disk)
-      // so the user can see + delete it rather than silently losing it.
-      if (current && !names.includes(current)) {
+      // Preserve a value that's no longer in the list (LoRA removed from
+      // disk) so the user can see + delete it rather than silently losing
+      // it. Surface a visible warning above the dropdown too, so the row
+      // doesn't quietly contribute nothing at run time.
+      const isMissing = current && !names.includes(current);
+      if (isMissing) {
         const opt = document.createElement("option");
         opt.value = current;
         opt.textContent = `${current}  (missing)`;
         modelSelect.appendChild(opt);
+        missingWarn.textContent = `⚠ '${current}' not found in models/loras/. ` +
+          "Re-pick a LoRA above, or delete this row.";
+        missingWarn.style.display = "";
+      } else {
+        missingWarn.style.display = "none";
+        missingWarn.textContent = "";
       }
       modelSelect.value = current;
     };
     refreshOptions(loraNames);
-    modelCell.append(modelLabel, modelSelect);
+    modelCell.append(modelLabel, modelSelect, missingWarn);
 
     const strengthCell = document.createElement("div");
     strengthCell.className = "pl-lora-strength";
@@ -1996,11 +2016,22 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
     }
     if (terms.length) {
       visible = visible.filter(p => {
+        // Search reaches into LoRA fields too — file paths and trigger
+        // words are part of an entry's identity once you've curated a
+        // stack. Without this, a query like 'turbo' or 'green eyes' that
+        // only appears in the loras list misses entries that legitimately
+        // match. Disabled rows still match (the user might re-enable them
+        // later); their text is still authored on the entry.
+        const loraText = (p.loras || []).map(l =>
+          `${l.name || ""} ${l.triggers || ""}`).join(" ");
         const haystacks = [
           p.name.toLowerCase(),
           (p.text || "").toLowerCase(),
+          (p.negative || "").toLowerCase(),
           (p.tags || []).join(" ").toLowerCase(),
           (p.id || "").toLowerCase(),
+          (p.notes || "").toLowerCase(),
+          loraText.toLowerCase(),
         ];
         return terms.every(term => haystacks.some(h => h.includes(term)));
       });

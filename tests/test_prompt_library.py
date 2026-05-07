@@ -1829,6 +1829,48 @@ class PromptLibraryTests(unittest.TestCase):
             sys.modules.pop(f"{pkg_name}.style_node", None)
             sys.modules.pop(pkg_name, None)
 
+    def test_save_node_persists_loras_json(self):
+        """PromptLibrarySave grew a loras_json input — when set, the saved
+        entry carries the LoRA stack just as if it had been edited via
+        the modal. Empty string leaves the entry's loras untouched."""
+        node = self.mod.PromptLibrarySave()
+        loras_json = json.dumps([
+            {"name": "Anima/Anima.safetensors", "strength_model": 0.85,
+             "strength_clip": 0.85, "triggers": "anime", "enabled": True},
+        ])
+        text_out, eid = node.save(name="Saved with loras",
+                                    text="masterpiece",
+                                    loras_json=loras_json)
+        items = self.mod._load()
+        e = next(i for i in items if i["id"] == eid)
+        self.assertEqual(len(e["loras"]), 1)
+        self.assertEqual(e["loras"][0]["name"], "Anima/Anima.safetensors")
+
+    def test_save_node_empty_loras_json_leaves_existing_alone(self):
+        # Pre-seed an entry with loras.
+        self.mod._save([{"id": "k1", "name": "K", "text": "v",
+                          "loras": [{"name": "x.safetensors",
+                                       "strength_model": 1.0,
+                                       "strength_clip": 1.0,
+                                       "triggers": "", "enabled": True}]}])
+        node = self.mod.PromptLibrarySave()
+        # Empty loras_json: must NOT clear the existing list.
+        node.save(name="K", text="v2", prompt_id="k1", loras_json="")
+        items = self.mod._load()
+        self.assertEqual(len(items[0]["loras"]), 1)
+        self.assertEqual(items[0]["loras"][0]["name"], "x.safetensors")
+
+    def test_save_node_explicit_empty_list_clears_loras(self):
+        self.mod._save([{"id": "k1", "name": "K", "text": "v",
+                          "loras": [{"name": "x.safetensors",
+                                       "strength_model": 1.0,
+                                       "strength_clip": 1.0,
+                                       "triggers": "", "enabled": True}]}])
+        node = self.mod.PromptLibrarySave()
+        node.save(name="K", text="v2", prompt_id="k1", loras_json="[]")
+        items = self.mod._load()
+        self.assertEqual(items[0]["loras"], [])
+
     # ---- end-to-end round-trip: save → export zip → import zip --------
 
     def test_export_import_roundtrip_preserves_full_entry(self):
