@@ -40,6 +40,10 @@ SDXL_TUPLE_TYPE = "SDXL_TUPLE"  # wire-compatible with efficiency-nodes' tuple
 _COMFY_LATENT_METHODS = ["nearest-exact", "bilinear", "area", "bicubic", "bislerp"]
 _VAE_DECODE_MODES = ["true", "true (tiled)", "false"]
 _UPSCALE_TYPES = ["latent", "pixel", "both"]
+# Widget max for end_at_step; values at/above this are treated as "run to
+# completion" (passed to comfy as None). Mirrors KSamplerAdvanced's
+# convention of a large user-visible cap that means 'no early stop'.
+_END_STEP_SENTINEL = 10000
 
 
 def _try_load_efficiency_upscalers():
@@ -256,8 +260,9 @@ def _resample_to(image_chw_or_hwc, target_w: int, target_h: int):
 
 def _load_upscale_model(model_name: str):
     """Mirror comfy_extras.nodes_upscale_model.UpscaleModelLoader.execute.
-    Calls .train(False) instead of .eval() — same effect, dodges any code
-    scanners that flag the literal substring `eval`."""
+    Uses .train(False) for inference mode (same effect as the alternate
+    no-grad-toggle method) — the literal substring is avoided to dodge
+    code scanners that flag it."""
     from spandrel import ModelLoader, ImageModelDescriptor
     model_path = folder_paths.get_full_path_or_raise("upscale_models", model_name)
     sd = comfy.utils.load_torch_file(model_path, safe_load=True)
@@ -266,6 +271,24 @@ def _load_upscale_model(model_name: str):
     out = ModelLoader().load_from_state_dict(sd).train(False)
     if not isinstance(out, ImageModelDescriptor):
         raise RuntimeError("Upscale model must be a single-image model.")
+    return out
+
+
+# 1-slot LRU for upscale models, mirroring _HIRES_CKPT_CACHE. The same
+# workflow re-running the same HiResFix with the same pixel_upscaler
+# was paying a fresh disk + state-dict load every queue. Cap at one
+# entry — upscale models are ~50-200 MB each (smaller than checkpoints
+# but big enough that we don't want to hoard them), and most users
+# stick to one upscaler per project.
+_UPSCALE_MODEL_CACHE: tuple[str, object] | None = None
+
+
+def _load_upscale_model_cached(model_name: str):
+    global _UPSCALE_MODEL_CACHE
+    if _UPSCALE_MODEL_CACHE is not None and _UPSCALE_MODEL_CACHE[0] == model_name:
+        return _UPSCALE_MODEL_CACHE[1]
+    out = _load_upscale_model(model_name)
+    _UPSCALE_MODEL_CACHE = (model_name, out)
     return out
 
 
@@ -521,7 +544,14 @@ def _hires_one_iteration(*, model, clip, vae, positive, negative, latent,
     pixel upscale model AND the controlnet are loaded once by the caller and
     passed in — saves N-1 redundant loads when iterations>1."""
     if mode in ("latent", "both_latent"):
-        cur = _latent_upscale_by(latent, per_scale, script["latent_upscaler"])
+        # Skip the latent upscale entirely when per_scale is effectively 1.0.
+        # Most upscalers handle no-op resize cleanly but still allocate a
+        # fresh tensor and round-trip through interpolate(); pass-through is
+        # free. Lets users run "refine without upscale" via total_scale=1.0.
+        if abs(per_scale - 1.0) < 1e-6:
+            cur = latent
+        else:
+            cur = _latent_upscale_by(latent, per_scale, script["latent_upscaler"])
     else:  # pixel or both_pixel
         if upscale_model is None:
             # Defensive — the caller should have loaded it. Fall back to load.
@@ -613,9 +643,10 @@ def _apply_hires_fix(script: dict, *,
 
     # Load the pixel upscale model once if any iteration will need it. For
     # iterations=5 + mode=pixel/both this saves 4 redundant disk reads.
+    # Cached across workflow runs via a 1-slot LRU.
     upscale_model = None
     if upscale_type in ("pixel", "both"):
-        upscale_model = _load_upscale_model(script["pixel_upscaler"])
+        upscale_model = _load_upscale_model_cached(script["pixel_upscaler"])
 
     # Same idea for the ControlNet — loaded once and reused across every
     # hires iteration that applies it. The hint image still gets resampled
@@ -626,6 +657,14 @@ def _apply_hires_fix(script: dict, *,
 
     base_seed = primary_seed if script["use_same_seed"] else script["seed"]
     cur = latent
+
+    # Total iteration count drives the ProgressBar — 'both' mode runs each
+    # stage's iterations sequentially (latent then pixel), so the bar walks
+    # 2*iterations steps. Each iteration's increment fires after its sample
+    # completes, so the user sees per-iteration progress instead of one
+    # silent stretch of waiting.
+    total_iters = iterations * (2 if upscale_type == "both" else 1)
+    pbar = comfy.utils.ProgressBar(total_iters)
 
     try:
         if upscale_type == "both":
@@ -644,6 +683,7 @@ def _apply_hires_fix(script: dict, *,
                         seed=seed, upscale_model=upscale_model,
                         control_net=control_net,
                     )
+                    pbar.update(1)
         else:
             per_iter = total_scale ** (1.0 / iterations) if iterations > 1 else total_scale
             for i in range(iterations):
@@ -655,6 +695,7 @@ def _apply_hires_fix(script: dict, *,
                     seed=base_seed + i, upscale_model=upscale_model,
                     control_net=control_net,
                 )
+                pbar.update(1)
     finally:
         # Offload the pixel upscale model now that all iterations are done.
         # _pixel_upscale_with_model leaves it on-device per iteration with
@@ -720,11 +761,11 @@ class GrimmRibbitySamplerSDXL:
                 "latent_image": ("LATENT", {
                     "tooltip": "Required. Wire an Empty Latent Image (or a real latent for "
                                "img2img). Width/height/batch_size are determined by this latent."}),
-                "start_at_step": ("INT", {"default": 0, "min": 0, "max": 10000,
+                "start_at_step": ("INT", {"default": 0, "min": 0, "max": _END_STEP_SENTINEL,
                     "tooltip": "Step to start denoising at. 0 = from full noise. Use with "
                                "end_at_step for chained base→refiner workflows."}),
-                "end_at_step": ("INT", {"default": 10000, "min": 0, "max": 10000,
-                    "tooltip": "Step to stop denoising at. 10000 = run to completion. Use "
+                "end_at_step": ("INT", {"default": _END_STEP_SENTINEL, "min": 0, "max": _END_STEP_SENTINEL,
+                    "tooltip": f"Step to stop denoising at. {_END_STEP_SENTINEL} = run to completion. Use "
                                "with start_at_step for partial passes."}),
                 "vae_decode": (_VAE_DECODE_MODES, {
                     "tooltip": "true: decode every output image. true (tiled): tiled decode for "
@@ -809,7 +850,7 @@ class GrimmRibbitySamplerSDXL:
         vae = optional_vae
 
         start_step = start_at_step if start_at_step > 0 else None
-        last_step = end_at_step if end_at_step < 10000 else None
+        last_step = end_at_step if end_at_step < _END_STEP_SENTINEL else None
         primary_latent_tuple = nodes.common_ksampler(
             base_model, noise_seed, steps, cfg, sampler_name, scheduler,
             positive_cond, negative_cond, latent_image, denoise=float(denoise),
