@@ -64,7 +64,7 @@ After install, find them under **GrimmRibbity/** sub-menus in the node picker:
 
   ![Style node](docs/screenshots/style-node-with-sockets.png)
 - **GrimmRibbity — Multi Library (3 panels)** — three independent gallery panels in one node, replaces 3× Library + 2× Join Strings spaghetti
-- **GrimmRibbity — Save** — write prompts to the library during workflow runs (inputs: name, text, optional `negative`, optional `IMAGE` thumbnail, optional tags)
+- **GrimmRibbity — Save** — write prompts to the library during workflow runs. Inputs: `name`, `text`, optional `negative`, optional `IMAGE` thumbnail, optional `tags`, optional `prompt_id` (override target id), `overwrite_by_name` (when set, updates the most-recently-edited entry sharing the typed name instead of appending a new one), `loras_json` (programmatic LoRA stack as JSON). Logs the lookup path on every save (`via=prompt_id` / `via=overwrite_by_name` / `via=new`) so a sticky widget value is visible in the console.
 - **GrimmRibbity — Random by Tag** — pick a random library entry by tag filter (outputs text, id, negative). Built for overnight loops
 - **GrimmRibbity — Wildcard Expand** — expand `{a|b|c}` alternatives and `__name__` library refs in any string
 
@@ -272,7 +272,38 @@ python3 -m venv .testenv
 .testenv/bin/python -m unittest discover tests
 ```
 
-261 tests, runs in ~1.7 s. The Comic Page tests + the Style node helper tests skip without `torch` installed (`.testenv` doesn't ship it).
+263 tests, runs in ~1.7 s. The Comic Page tests + the Style node helper tests skip without `torch` installed (`.testenv` doesn't ship it).
+
+## Troubleshooting
+
+### "Save node is overwriting the wrong entry"
+
+Both `PromptLibrarySave` and `PromptLibraryThumbnailSaver` log their target on every run:
+
+```
+[PromptLibrary] saved id='X' name='X' via=prompt_id ...        ← targeting by stuck id
+[PromptLibrary] saved id='X' name='X' via=overwrite_by_name ... ← name-match fired
+[PromptLibrary] saved id='X' name='X' via=new ...              ← new entry created
+[ThumbnailSaver] wrote thumbnail to id='X' name='Y'
+```
+
+If `via=prompt_id` fires when you expected `overwrite_by_name`, the Save node has a `prompt_id` widget value pinned in the workflow JSON (a one-time test value, an accidental wire, etc.) — clear that field and `overwrite_by_name` will fire.
+
+When multiple entries share a name, `overwrite_by_name` targets the most-recently-edited match (since v0.46.1).
+
+### "Library node is wired but not applying LoRAs"
+
+The Library node's MODEL + CLIP inputs are both-or-neither for LoRA application. Wiring just one logs:
+
+```
+[PromptLibrary] WARNING: only one of MODEL / CLIP is wired — LoRA application requires BOTH.
+```
+
+Wire the matching socket or unwire both.
+
+### "I have a half-set-up library and want to spot the bad rows"
+
+Click the ⚠ N badge in the gallery toolbar (or run `python3 tools/library_validate.py` from the shell). Lists broken LoRA refs / orphan thumbnails / invalid ids / empty-text rows.
 
 ## Credits
 
