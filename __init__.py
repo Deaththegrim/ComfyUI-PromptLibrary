@@ -1294,6 +1294,14 @@ class PromptLibraryScene:
             if not text or text == _SCENE_NONE:
                 continue
             parts.append(text)
+        if not parts:
+            # All knobs at "(none)" + empty extra — silently emitting "" is
+            # confusing when the user expected scene context. Log so the
+            # workflow author can tell the Scene node ran but contributed
+            # nothing to the prompt.
+            print("[PromptLibraryScene] all knobs are (none) and extra is empty — "
+                  "emitting empty string. Set a knob (or extra) to contribute scene "
+                  "context.")
         return (separator.join(parts),)
 
 
@@ -2830,7 +2838,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.40.2"
+__version__ = "0.41.0"
 
 
 def _autobackup_on_version_change() -> None:

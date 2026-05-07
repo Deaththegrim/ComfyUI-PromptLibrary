@@ -189,6 +189,9 @@ const CSS = `
 .pl-lora-row select:disabled { opacity: 0.6; }
 .pl-lora-strength { display: flex; flex-direction: column; gap: 3px; }
 .pl-lora-strength-bar { display: flex; align-items: center; gap: 4px; }
+.pl-lora-strength-tag { display: inline-block; width: 14px; min-width: 14px;
+  font-size: 10px; font-weight: 600; color: var(--pl-fg-muted); text-align: center;
+  font-family: monospace; }
 /* Custom-styled range input — the browser default is a near-invisible thin
    line. Track is a 4px green-on-grey bar; thumb is a 14px green disc. */
 .pl-lora-strength-bar input[type=range] { flex: 1 1 0; min-width: 0; -webkit-appearance: none;
@@ -206,6 +209,14 @@ const CSS = `
   border: 1px solid var(--pl-border); padding: 4px 10px; font-size: 11px;
   border-radius: 3px; cursor: pointer; align-self: end; }
 .pl-lora-row .pl-lora-delete:hover { color: var(--pl-danger); border-color: var(--pl-danger); }
+/* Soft-delete state: row stays visible but greyed + struck through until
+   Save commits or Restore reverses. */
+.pl-lora-row-deleted { opacity: 0.4; }
+.pl-lora-row-deleted .pl-lora-num,
+.pl-lora-row-deleted select, .pl-lora-row-deleted input[type=text],
+.pl-lora-row-deleted input[type=number] { text-decoration: line-through; }
+.pl-lora-row-deleted .pl-lora-delete { color: var(--pl-accent);
+  border-color: var(--pl-accent); }
 .pl-lora-disabled-toggle { display: flex; align-items: center; gap: 4px; font-size: 11px;
   color: var(--pl-fg-muted); }
 .pl-lora-disabled-toggle input { accent-color: #6cae3e; }
@@ -718,33 +729,57 @@ function buildLoraSection(initialLoras) {
     const strengthCell = document.createElement("div");
     strengthCell.className = "pl-lora-strength";
     const strengthLabel = document.createElement("label");
-    strengthLabel.textContent = "Strength";
-    const strengthBar = document.createElement("div");
-    strengthBar.className = "pl-lora-strength-bar";
-    const slider = document.createElement("input");
-    slider.type = "range";
-    slider.min = "-2";
-    slider.max = "2";
-    slider.step = "0.05";
+    strengthLabel.textContent = "Strength (M / C)";
+    strengthLabel.title = "Top slider = MODEL strength, bottom = CLIP strength. "
+      + "The Style node passes each independently to comfy.sd.load_lora_for_models — "
+      + "matches stock LoraLoader semantics. Defaults to mirrored (both 1.0).";
+
     // Round to 2dp on the way in too — float math would otherwise show e.g.
     // 0.8500000000000001 in the number input and look broken.
     const roundStrength = (v) => Math.round(v * 100) / 100;
-    slider.value = String(roundStrength(initial?.strength_model ?? 1.0));
-    const num = document.createElement("input");
-    num.type = "number";
-    num.min = "-2";
-    num.max = "2";
-    num.step = "0.05";
-    num.value = slider.value;
-    slider.addEventListener("input", () => {
-      num.value = String(roundStrength(Number(slider.value)));
-    });
-    num.addEventListener("input", () => {
-      const v = Math.max(-2, Math.min(2, Number(num.value) || 0));
-      slider.value = String(v);
-    });
-    strengthBar.append(slider, num);
-    strengthCell.append(strengthLabel, strengthBar);
+
+    // Build one slider+number pair for either model or clip strength. Same
+    // shape repeated twice so model and clip get independent controls; the
+    // backend has always tracked them as separate fields, the UI was just
+    // mirroring them silently.
+    const buildStrengthPair = (initialValue, prefix) => {
+      const bar = document.createElement("div");
+      bar.className = "pl-lora-strength-bar";
+      const tag = document.createElement("span");
+      tag.className = "pl-lora-strength-tag";
+      tag.textContent = prefix;
+      const slider = document.createElement("input");
+      slider.type = "range";
+      slider.min = "-2";
+      slider.max = "2";
+      slider.step = "0.05";
+      slider.value = String(roundStrength(initialValue ?? 1.0));
+      const num = document.createElement("input");
+      num.type = "number";
+      num.min = "-2";
+      num.max = "2";
+      num.step = "0.05";
+      num.value = slider.value;
+      slider.addEventListener("input", () => {
+        num.value = String(roundStrength(Number(slider.value)));
+      });
+      num.addEventListener("input", () => {
+        const v = Math.max(-2, Math.min(2, Number(num.value) || 0));
+        slider.value = String(v);
+      });
+      bar.append(tag, slider, num);
+      return { bar, slider, num,
+        read: () => Math.max(-2, Math.min(2, Number(num.value) || 0)) };
+    };
+
+    const modelStrength = buildStrengthPair(
+      initial?.strength_model ?? 1.0, "M");
+    // strength_clip falls back to strength_model when an entry was saved
+    // before the dual-slider UI existed (everything pre-v0.40.3 mirrored
+    // the two values).
+    const clipStrength = buildStrengthPair(
+      initial?.strength_clip ?? initial?.strength_model ?? 1.0, "C");
+    strengthCell.append(strengthLabel, modelStrength.bar, clipStrength.bar);
 
     const triggersCell = document.createElement("div");
     triggersCell.style.display = "flex";
@@ -762,13 +797,23 @@ function buildLoraSection(initialLoras) {
     deleteBtn.type = "button";
     deleteBtn.className = "pl-lora-delete";
     deleteBtn.textContent = "Delete";
-    deleteBtn.title = "Remove this LoRA from the entry";
-    deleteBtn.onclick = () => {
-      row.remove();
-      const idx = rows.indexOf(rowApi);
-      if (idx !== -1) rows.splice(idx, 1);
-      renumber();
+    deleteBtn.title = "Mark this LoRA as removed. Click Restore to put it back, "
+      + "or Save the modal to commit the deletion.";
+    // Soft-delete pattern: the row stays visible (greyed out + struck through)
+    // until Save commits, and the delete button toggles to Restore. A misclick
+    // is reversible without abandoning all the other edits in the modal —
+    // matches the soft-delete UX in the gallery's bulk actions.
+    let pendingDelete = false;
+    const setPendingDelete = (flag) => {
+      pendingDelete = flag;
+      row.classList.toggle("pl-lora-row-deleted", flag);
+      deleteBtn.textContent = flag ? "Restore" : "Delete";
+      deleteBtn.title = flag
+        ? "Restore this LoRA — undo the pending deletion."
+        : "Mark this LoRA as removed. Click Restore to put it back, "
+          + "or Save the modal to commit the deletion.";
     };
+    deleteBtn.onclick = () => setPendingDelete(!pendingDelete);
 
     row.append(numCell, modelCell, strengthCell, triggersCell, deleteBtn);
 
@@ -777,13 +822,13 @@ function buildLoraSection(initialLoras) {
       setIndex(n) { numCell.textContent = `LoRA ${n}`; },
       refreshOptions,
       getValue() {
+        if (pendingDelete) return null;
         const name = (modelSelect.value || "").trim();
         if (!name) return null;
-        const s = Math.max(-2, Math.min(2, Number(num.value) || 0));
         return {
           name,
-          strength_model: s,
-          strength_clip: s,
+          strength_model: modelStrength.read(),
+          strength_clip: clipStrength.read(),
           triggers: triggersInput.value.trim(),
           enabled: true,
         };
