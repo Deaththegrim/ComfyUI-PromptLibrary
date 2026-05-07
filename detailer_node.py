@@ -342,8 +342,15 @@ def _detect_bboxes_with_conf(yolo, image_hwc_uint8, threshold: float,
     (lower = stricter merge, fewer duplicates).
     `imgsz` is YOLO's inference resolution — higher catches smaller faces
     at proportional cost; 640 is the YOLO default."""
-    results = yolo(image_hwc_uint8, conf=threshold, iou=nms_iou,
-                    imgsz=imgsz, verbose=False)
+    # half=True puts ultralytics in fp16 inference mode — typically 1.5-2x
+    # faster on GPU with negligible accuracy hit for these small bbox models.
+    # Falls back gracefully if the model doesn't support fp16 (CPU-only setup).
+    try:
+        results = yolo(image_hwc_uint8, conf=threshold, iou=nms_iou,
+                        imgsz=imgsz, half=True, verbose=False)
+    except Exception:
+        results = yolo(image_hwc_uint8, conf=threshold, iou=nms_iou,
+                        imgsz=imgsz, verbose=False)
     detections: list[tuple[tuple[int, int, int, int], float]] = []
     for result in results:
         if result.boxes is None or result.boxes.xyxy is None:

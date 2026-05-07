@@ -81,18 +81,43 @@ _SNAPSHOT_CAP = 10
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
+# Memoize parsed prompts.json by mtime+size — every API endpoint
+# (/list, /upsert, /random, IS_CHANGED hashes, etc.) hits _load(), and
+# at 700+ prompts the json.load + JSON validation is ~15ms a pop. With
+# the cache, an unchanged store costs a single stat() call.
+_LOAD_CACHE: tuple[float, int, list[dict]] | None = None
+
+
 def _load() -> list[dict]:
+    global _LOAD_CACHE
     if not STORE_PATH.exists():
+        _LOAD_CACHE = None
         return []
+    try:
+        st = STORE_PATH.stat()
+        mtime, size = st.st_mtime, st.st_size
+    except OSError:
+        st = None
+        mtime, size = 0.0, 0
+    if _LOAD_CACHE is not None and st is not None:
+        cached_mtime, cached_size, cached_data = _LOAD_CACHE
+        if cached_mtime == mtime and cached_size == size:
+            # Return a shallow copy — callers occasionally mutate (e.g. sort
+            # or filter in-place) and we don't want stomping the cache.
+            return list(cached_data)
     try:
         with STORE_PATH.open("r", encoding="utf-8") as f:
             data = json.load(f)
     except json.JSONDecodeError as e:
+        _LOAD_CACHE = None
         return _recover_corrupt_store(e)
     except OSError as e:
         print(f"[PromptLibrary] failed to read {STORE_PATH}: {e}; treating as empty")
+        _LOAD_CACHE = None
         return []
     if isinstance(data, list):
+        if st is not None:
+            _LOAD_CACHE = (mtime, size, list(data))
         return data
     if isinstance(data, dict) and isinstance(data.get("prompts"), list):
         items = data["prompts"]
@@ -102,7 +127,9 @@ def _load() -> list[dict]:
             _save(items)
         except OSError as e:
             print(f"[PromptLibrary] could not rewrite {STORE_PATH}: {e}")
+        # Cache invalidates on next call via the mtime/size check after _save.
         return items
+    _LOAD_CACHE = None
     return []
 
 
