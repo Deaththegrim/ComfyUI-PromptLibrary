@@ -83,6 +83,21 @@ def _unpack_sdxl_tuple(sdxl_tuple) -> tuple:
     return (base_model, base_clip, base_pos, base_neg, *refiner)
 
 
+def _between_iterations_cleanup() -> None:
+    """Soft-empty the CUDA cache between hires-fix iterations. Long
+    iteration loops without an explicit empty_cache() can accumulate
+    fragmented allocator state — by iteration 5 the next
+    sample/encode allocates around the fragmentation instead of into
+    it. Comfy provides soft_empty_cache() which is gentler than
+    torch.cuda.empty_cache() (it only fires when memory is actually
+    constrained). No-op when CUDA isn't available."""
+    try:
+        import comfy.model_management
+        comfy.model_management.soft_empty_cache()
+    except Exception:
+        pass
+
+
 def _preflight_size_warning(latent: dict, total_scale: float, *, sampler: str) -> None:
     """Estimate the final pixel size after HiResFix and warn if it will be
     big enough that decode is likely to OOM on common (16-24 GB) GPUs.
@@ -569,6 +584,14 @@ class GrimmRibbityHiResFixScript:
                     "tooltip": "Override positive L for hires. Empty = reuse primary."}),
                 "negative_override": ("STRING", {"default": "", "multiline": True,
                     "tooltip": "Override negative for hires. Empty = reuse primary."}),
+                "hires_sampler": (["(same as primary)"] + list(comfy.samplers.KSampler.SAMPLERS), {
+                    "tooltip": "Sampler for the hires passes. '(same as primary)' inherits from "
+                               "the primary call. Override when primary is a high-step "
+                               "exotic (e.g. dpmpp_3m_sde) but you want the hires passes on "
+                               "something cheaper / more stable like euler."}),
+                "hires_scheduler": (["(same as primary)"] + list(comfy.samplers.KSampler.SCHEDULERS), {
+                    "tooltip": "Scheduler for the hires passes. '(same as primary)' inherits "
+                               "from the primary call."}),
             },
         }
 
@@ -582,7 +605,9 @@ class GrimmRibbityHiResFixScript:
               upscale_by, use_same_seed, seed, hires_steps, hires_denoise, hires_cfg,
               iterations, use_controlnet, control_net_name, controlnet_strength,
               control_image=None, positive_g_override="", positive_l_override="",
-              negative_override=""):
+              negative_override="",
+              hires_sampler="(same as primary)",
+              hires_scheduler="(same as primary)"):
         if upscale_type in ("pixel", "both") and pixel_upscaler == "(none installed)":
             raise ValueError(f"HiResFix: upscale_type='{upscale_type}' requires an installed "
                              f"upscale model in ComfyUI/models/upscale_models. Switch to 'latent' "
@@ -613,6 +638,8 @@ class GrimmRibbityHiResFixScript:
             "positive_g_override": positive_g_override,
             "positive_l_override": positive_l_override,
             "negative_override": negative_override,
+            "hires_sampler": hires_sampler,
+            "hires_scheduler": hires_scheduler,
         },)
 
 
@@ -690,10 +717,27 @@ def _hires_one_iteration(*, model, clip, vae, positive, negative, latent,
         pos, neg = _apply_controlnet(pos, neg, cn, ctl_img,
                                        script["controlnet_strength"], vae=vae)
 
+    # denoise=0 means "no sampling, just emit the upscaled latent as-is".
+    # common_ksampler at denoise=0 still runs the noise+step setup ritual
+    # (~1s overhead per call); skipping the call entirely is correct
+    # because the latent has already been upscaled this iteration.
+    if script["hires_denoise"] <= 0.0:
+        return cur
+
+    # Per-iteration sampler/scheduler override: '(same as primary)'
+    # inherits the call-site values; otherwise the script's override
+    # wins. Lets a workflow use dpmpp_3m_sde primary + euler hires.
+    iter_sampler = (script.get("hires_sampler") or "(same as primary)")
+    iter_sched = (script.get("hires_scheduler") or "(same as primary)")
+    if iter_sampler == "(same as primary)":
+        iter_sampler = sampler_name
+    if iter_sched == "(same as primary)":
+        iter_sched = scheduler
+
     sampled = nodes.common_ksampler(
         model, seed,
         script["hires_steps"], script["hires_cfg"],
-        sampler_name, scheduler, pos, neg, cur,
+        iter_sampler, iter_sched, pos, neg, cur,
         denoise=script["hires_denoise"],
     )
     return sampled[0]
@@ -768,6 +812,7 @@ def _apply_hires_fix(script: dict, *,
                         control_net=control_net,
                     )
                     plan.pbar.update(1)
+                    _between_iterations_cleanup()
         else:
             plan = _HiresIterPlan.build(total_scale=total_scale, iterations=iterations,
                                          total_steps=total_iters)
@@ -781,6 +826,7 @@ def _apply_hires_fix(script: dict, *,
                     control_net=control_net,
                 )
                 plan.pbar.update(1)
+                _between_iterations_cleanup()
     finally:
         # Offload the pixel upscale model now that all iterations are done.
         # _pixel_upscale_with_model leaves it on-device per iteration with

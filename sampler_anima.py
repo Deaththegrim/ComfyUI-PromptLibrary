@@ -149,10 +149,13 @@ def _apply_anima_hires_fix(script: dict, *,
     shared _HiresIterPlan for per-iter scale, no-op-skip flag, and the
     progress bar — same bookkeeping as the SDXL HiResFix so behaviour
     stays consistent."""
-    # Cross-module borrow for the shared plan + pre-flight warning. SDXL is
-    # always present (no torch fallback path on this side either, since
-    # this whole function only runs at sample time when torch is loaded).
-    from .sampler_sdxl import _HiresIterPlan, _preflight_size_warning
+    # Cross-module borrow for the shared plan + pre-flight warning + the
+    # between-iteration GPU cleanup. SDXL is always present (no torch
+    # fallback path on this side either, since this whole function only
+    # runs at sample time when torch is loaded).
+    from .sampler_sdxl import (
+        _HiresIterPlan, _preflight_size_warning, _between_iterations_cleanup,
+    )
 
     base_seed = primary_seed if script["use_same_seed"] else script["seed"]
 
@@ -162,18 +165,23 @@ def _apply_anima_hires_fix(script: dict, *,
         total_scale=script["upscale_by"], iterations=script["iterations"])
 
     cur = latent
+    denoise = script["hires_denoise"]
     for i in range(plan.iterations):
         if not plan.skip_upscale:
             cur = _interpolation_upscale(cur, plan.per_iter, script["upscale_method"])
-        sampled = nodes.common_ksampler(
-            model, base_seed + i,
-            script["hires_steps"], script["hires_cfg"],
-            primary_sampler_name, primary_scheduler,
-            positive, negative, cur,
-            denoise=script["hires_denoise"],
-        )
-        cur = sampled[0]
+        # denoise=0 short-circuit: skip the noise+step ritual when the
+        # iteration is purely an upscale pass with no sampling refinement.
+        if denoise > 0.0:
+            sampled = nodes.common_ksampler(
+                model, base_seed + i,
+                script["hires_steps"], script["hires_cfg"],
+                primary_sampler_name, primary_scheduler,
+                positive, negative, cur,
+                denoise=denoise,
+            )
+            cur = sampled[0]
         plan.pbar.update(1)
+        _between_iterations_cleanup()
     return cur
 
 
