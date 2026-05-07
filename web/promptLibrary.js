@@ -1697,6 +1697,13 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
     }
     const isManual = sortSelect.value === "manual";
 
+    // Batch every tile's appendChild into a single DocumentFragment so the
+    // grid only reflows once instead of once per tile. Critical for libraries
+    // with hundreds of entries — without this, a 700-entry render does 700
+    // separate layout passes and the search-input feels sluggish per
+    // keystroke.
+    const fragment = document.createDocumentFragment();
+
     visible.forEach((p, idx) => {
       const tile = document.createElement("div");
       tile.className = "pl-tile"
@@ -1859,7 +1866,7 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
         };
       }
 
-      grid.appendChild(tile);
+      fragment.appendChild(tile);
     });
 
     const addTile = document.createElement("div");
@@ -1876,7 +1883,10 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
         },
       });
     };
-    grid.appendChild(addTile);
+    fragment.appendChild(addTile);
+    // Single appendChild moves every tile in the fragment into the grid in
+    // one DOM operation — one reflow, regardless of tile count.
+    grid.appendChild(fragment);
   };
 
   const refresh = async () => {
@@ -1892,7 +1902,19 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
     }
   };
 
-  filter.addEventListener("input", render);
+  // Debounce search input — every keystroke would otherwise trigger a full
+  // grid rebuild (700+ tile DOM nodes for big libraries). 80 ms feels
+  // instant when you stop typing but coalesces a burst of keystrokes into
+  // one render. The clear-search button still calls render() directly so
+  // clicking × is immediate.
+  let _filterDebounce = null;
+  filter.addEventListener("input", () => {
+    if (_filterDebounce) clearTimeout(_filterDebounce);
+    _filterDebounce = setTimeout(() => {
+      _filterDebounce = null;
+      render();
+    }, 80);
+  });
   refreshBtn.onclick = withBusy(refreshBtn, "…", refresh);
   applySize();
   applyView();
@@ -2216,6 +2238,10 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   // Comfy's undo/restore path could re-read into a fresh instance.
   const cleanup = () => {
     window.removeEventListener("prompt-library-updated", onExternal);
+    if (_filterDebounce) {
+      clearTimeout(_filterDebounce);
+      _filterDebounce = null;
+    }
     checkedIds.clear();
     activeTags.clear();
     // Clear the rendered grid + tag chips + bulk bar so the DOM is empty
