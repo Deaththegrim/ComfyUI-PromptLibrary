@@ -593,7 +593,8 @@ class _Pass:
     threshold: float
     denoise: float
     max_n: int
-    steps: int = 0  # 0 = use the global steps value
+    steps: int = 0      # 0 = use the global steps value
+    crop_factor: float = 0.0  # 0 = use the preset's crop_factor
     detections: list[tuple[tuple[int, int, int, int], float]] = field(default_factory=list)
 
 
@@ -635,7 +636,9 @@ def _enhance_one_pass(
         return image, torch.zeros((1, H, W), device=device, dtype=image.dtype)
 
     feather = int(_PRESETS[plan.name]["feather"])
-    crop_factor = float(_PRESETS[plan.name]["crop_factor"])
+    # Per-target override wins; 0.0 sentinel falls back to the preset value.
+    crop_factor = (plan.crop_factor if plan.crop_factor > 0
+                    else float(_PRESETS[plan.name]["crop_factor"]))
 
     positive_with_wc = _encode_wildcard_cached(clip, wildcard_text, positive)
     running = image.clone()
@@ -827,6 +830,17 @@ class GrimmRibbitySmartDetailer:
                     f"0 = use the global steps value. "
                     f"Useful for cheap eyes/skin passes (10-15 steps) paired with a "
                     f"thorough face pass (20-30 steps), or vice versa. Cost scales linearly.")})
+
+        def crop(target, preset_val):
+            return ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.05,
+                "tooltip": (
+                    f"Per-target crop_factor for the {target} pass. "
+                    f"0.0 (default) = use preset value ({preset_val}). "
+                    f"Higher = more context around the detection (the model sees more of the "
+                    f"surrounding region) — useful for stylised characters where the canonical "
+                    f"shape needs more context to anchor on. Lower = tighter crop (faster, "
+                    f"sharper detail but riskier on stylised art). Sweet spot for cartoon "
+                    f"characters: face=4.0, eyes=2.5, mouth=3.5, hands=2.5.")})
 
         return {
             "required": {
@@ -1027,6 +1041,14 @@ class GrimmRibbitySmartDetailer:
                 "feet_denoise":    den("feet",  "0.40"),
                 "feet_max":        maxn("feet"),
                 "feet_steps":      stp("feet"),
+                # Per-target crop_factor overrides — appended at end of optional
+                # so widget positions stay stable for v0.53.x saved workflows.
+                "face_crop_factor":  crop("face",  "3.0"),
+                "eyes_crop_factor":  crop("eyes",  "1.5"),
+                "mouth_crop_factor": crop("mouth", "2.5"),
+                "hands_crop_factor": crop("hands", "2.0"),
+                "feet_crop_factor":  crop("feet",  "2.5"),
+                "skin_crop_factor":  crop("skin",  "2.5"),
                 "force_inpaint": ("BOOLEAN", {"default": True, "tooltip":
                     "When True, every detection runs the sample pass even if the bbox is "
                     "already larger than guide_size. When False, large/clean detections are "
@@ -1101,6 +1123,8 @@ class GrimmRibbitySmartDetailer:
                skin_threshold=-1.0, skin_denoise=-1.0, skin_max=0, skin_steps=0,
                mouth_threshold=-1.0, mouth_denoise=-1.0, mouth_max=0, mouth_steps=0,
                feet_threshold=-1.0, feet_denoise=-1.0, feet_max=0, feet_steps=0,
+               face_crop_factor=0.0, eyes_crop_factor=0.0, mouth_crop_factor=0.0,
+               hands_crop_factor=0.0, feet_crop_factor=0.0, skin_crop_factor=0.0,
                force_inpaint=True, drop_size=10,
                nms_iou=0.5, yolo_imgsz=960,
                max_bbox_area_pct=0.95, draw_preview=True):
@@ -1116,12 +1140,12 @@ class GrimmRibbitySmartDetailer:
         # Build the plan: ordered list of (target, bbox_model_name, threshold,
         # denoise_override, max_override). Order is face → skin → eyes → hands.
         ovr = {
-            "face":  (face_threshold,  face_denoise,  face_max,  face_steps),
-            "skin":  (skin_threshold,  skin_denoise,  skin_max,  skin_steps),
-            "mouth": (mouth_threshold, mouth_denoise, mouth_max, mouth_steps),
-            "eyes":  (eyes_threshold,  eyes_denoise,  eyes_max,  eyes_steps),
-            "feet":  (feet_threshold,  feet_denoise,  feet_max,  feet_steps),
-            "hands": (hands_threshold, hands_denoise, hands_max, hands_steps),
+            "face":  (face_threshold,  face_denoise,  face_max,  face_steps,  face_crop_factor),
+            "skin":  (skin_threshold,  skin_denoise,  skin_max,  skin_steps,  skin_crop_factor),
+            "mouth": (mouth_threshold, mouth_denoise, mouth_max, mouth_steps, mouth_crop_factor),
+            "eyes":  (eyes_threshold,  eyes_denoise,  eyes_max,  eyes_steps,  eyes_crop_factor),
+            "feet":  (feet_threshold,  feet_denoise,  feet_max,  feet_steps,  feet_crop_factor),
+            "hands": (hands_threshold, hands_denoise, hands_max, hands_steps, hands_crop_factor),
         }
         enables = {
             "face":  enable_face,
@@ -1155,7 +1179,7 @@ class GrimmRibbitySmartDetailer:
                 logging.warning("[SmartDetailer] '%s' detector load failed: %s",
                                 name, exc)
                 continue
-            t_ovr, d_ovr, m_ovr, s_ovr = ovr[name]
+            t_ovr, d_ovr, m_ovr, s_ovr, c_ovr = ovr[name]
             threshold = t_ovr if t_ovr >= 0.0 else float(bbox_threshold)
             preset_d = _PRESETS[name]["denoise"]
             base_d = float(denoise)
@@ -1163,10 +1187,11 @@ class GrimmRibbitySmartDetailer:
                                   else max(0.01, min(1.0, base_d + (preset_d - 0.40))))
             max_n = int(m_ovr) if m_ovr > 0 else int(max_per_target)
             target_steps = int(s_ovr) if s_ovr > 0 else int(steps)
+            target_crop = float(c_ovr) if c_ovr > 0.0 else 0.0
             passes.append(_Pass(
                 name=name, yolo=yolo, yolo_key=model_name,
                 threshold=threshold, denoise=target_denoise, max_n=max_n,
-                steps=target_steps,
+                steps=target_steps, crop_factor=target_crop,
             ))
 
         if not passes:

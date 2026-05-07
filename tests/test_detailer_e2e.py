@@ -165,6 +165,8 @@ class _DetailerMatrix(unittest.TestCase):
             enable_mouth=False, enable_feet=False,
             bbox_mouth=detailer_node._NONE,
             bbox_feet=detailer_node._NONE,
+            face_crop_factor=0.0, eyes_crop_factor=0.0, mouth_crop_factor=0.0,
+            hands_crop_factor=0.0, feet_crop_factor=0.0, skin_crop_factor=0.0,
             bypass=False,
         )
         defaults.update(overrides)

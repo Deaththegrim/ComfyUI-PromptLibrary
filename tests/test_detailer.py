@@ -255,7 +255,9 @@ class InputTypesShapeTests(unittest.TestCase):
                   "hands_threshold", "hands_denoise", "hands_max", "hands_steps",
                   "skin_threshold", "skin_denoise", "skin_max", "skin_steps",
                   "mouth_threshold", "mouth_denoise", "mouth_max", "mouth_steps",
-                  "feet_threshold", "feet_denoise", "feet_max", "feet_steps"):
+                  "feet_threshold", "feet_denoise", "feet_max", "feet_steps",
+                  "face_crop_factor", "eyes_crop_factor", "mouth_crop_factor",
+                  "hands_crop_factor", "feet_crop_factor", "skin_crop_factor"):
             self.assertIn(k, spec["optional"], f"missing optional: {k}")
 
     def test_per_target_overrides_default_to_minus_one(self):

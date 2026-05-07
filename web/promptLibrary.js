@@ -1068,22 +1068,125 @@ function _openPromptModalInner({ existing, onSave, onDelete, nameExists }) {
 
   const tagsLabel = document.createElement("label");
   tagsLabel.textContent = "Tags (comma-separated; supports category:value)";
+  const tagsWrap = document.createElement("div");
+  tagsWrap.style.position = "relative";
   const tagsInput = document.createElement("input");
   tagsInput.type = "text";
   tagsInput.value = (existing?.tags || []).join(", ");
   tagsInput.placeholder = "character, style:cyberpunk, model:anima";
-  // Datalist suggests existing tags as the user types — populated lazily.
-  const tagsDataList = document.createElement("datalist");
-  tagsDataList.id = `pl-tags-${Math.random().toString(36).slice(2, 9)}`;
-  tagsInput.setAttribute("list", tagsDataList.id);
-  tagsLabel.append(tagsInput, tagsDataList);
+  tagsInput.autocomplete = "off";
+  tagsInput.style.width = "100%";
+  tagsWrap.appendChild(tagsInput);
+  // Custom per-token autocomplete — datalist replaces the whole input
+  // value when you click a suggestion, which breaks comma-separated lists.
+  // This drop-down completes only the trailing token (text after the last
+  // comma), preserving the preceding tags.
+  const tagsDropdown = document.createElement("div");
+  tagsDropdown.style.cssText = "position:absolute;left:0;right:0;top:100%;"
+      + "background:#2a2a2a;border:1px solid #444;border-radius:3px;"
+      + "max-height:200px;overflow-y:auto;z-index:1000;display:none;"
+      + "box-shadow:0 4px 12px rgba(0,0,0,0.5);font-size:12px;";
+  tagsWrap.appendChild(tagsDropdown);
+  tagsLabel.appendChild(tagsWrap);
+  let _allTags = [];
   api.fetchApi("/prompt_library/tags").then(r => r.json()).then(d => {
-    for (const t of d.tags || []) {
-      const opt = document.createElement("option");
-      opt.value = t;
-      tagsDataList.appendChild(opt);
-    }
+    _allTags = d.tags || [];
   }).catch(() => {});
+
+  const _activeToken = () => {
+    // The trailing comma-separated token (substring after last comma).
+    // What the user is currently typing.
+    const v = tagsInput.value;
+    const cursor = tagsInput.selectionStart ?? v.length;
+    const before = v.slice(0, cursor);
+    const lastComma = before.lastIndexOf(",");
+    return {
+      token: before.slice(lastComma + 1).trimStart().toLowerCase(),
+      tokenStart: lastComma + 1,
+      cursor,
+    };
+  };
+  let _tagsHighlight = -1;
+  const _renderTagSuggestions = () => {
+    const { token } = _activeToken();
+    tagsDropdown.replaceChildren();
+    if (!token) {
+      tagsDropdown.style.display = "none";
+      return;
+    }
+    const existing = new Set(
+      tagsInput.value.split(",").map(s => s.trim().toLowerCase()).filter(Boolean)
+    );
+    const matches = _allTags
+      .filter(t => t.toLowerCase().includes(token) && !existing.has(t.toLowerCase()))
+      .slice(0, 8);
+    if (matches.length === 0) {
+      tagsDropdown.style.display = "none";
+      _tagsHighlight = -1;
+      return;
+    }
+    matches.forEach((t, i) => {
+      const item = document.createElement("div");
+      item.textContent = t;
+      item.style.cssText = "padding:5px 8px;cursor:pointer;color:#ddd;"
+          + (i === _tagsHighlight ? "background:#3a3a3a;color:#fff;" : "");
+      item.onmousedown = (e) => {
+        e.preventDefault();  // Prevent input-blur before we read selection
+        _insertTagSuggestion(t);
+      };
+      item.onmouseenter = () => {
+        _tagsHighlight = i;
+        for (const sib of tagsDropdown.children) sib.style.background = "";
+        item.style.background = "#3a3a3a";
+        item.style.color = "#fff";
+      };
+      tagsDropdown.appendChild(item);
+    });
+    tagsDropdown.style.display = "block";
+  };
+  const _insertTagSuggestion = (suggestion) => {
+    const { tokenStart, cursor } = _activeToken();
+    const before = tagsInput.value.slice(0, tokenStart);
+    const after = tagsInput.value.slice(cursor);
+    // Add a leading space if the prior char isn't whitespace, and a trailing
+    // ", " so the user can keep typing the next tag without manual punctuation.
+    const sep = (before && !before.endsWith(", ") && !before.endsWith(" "))
+        ? (before.endsWith(",") ? " " : ", ") : "";
+    tagsInput.value = before + sep + suggestion + ", " + after.replace(/^[\s,]+/, "");
+    tagsDropdown.style.display = "none";
+    _tagsHighlight = -1;
+    tagsInput.focus();
+    const newCursor = (before + sep + suggestion + ", ").length;
+    tagsInput.setSelectionRange(newCursor, newCursor);
+  };
+  tagsInput.addEventListener("input", _renderTagSuggestions);
+  tagsInput.addEventListener("focus", _renderTagSuggestions);
+  tagsInput.addEventListener("blur", () => {
+    // Delay so an mousedown on a suggestion can fire first.
+    setTimeout(() => { tagsDropdown.style.display = "none"; }, 100);
+  });
+  tagsInput.addEventListener("keydown", (e) => {
+    if (tagsDropdown.style.display === "none") return;
+    const items = [...tagsDropdown.children];
+    if (!items.length) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      _tagsHighlight = (_tagsHighlight + 1) % items.length;
+      _renderTagSuggestions();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      _tagsHighlight = (_tagsHighlight - 1 + items.length) % items.length;
+      _renderTagSuggestions();
+    } else if (e.key === "Enter" || e.key === "Tab") {
+      if (_tagsHighlight >= 0 && _tagsHighlight < items.length) {
+        e.preventDefault();
+        _insertTagSuggestion(items[_tagsHighlight].textContent);
+      }
+    } else if (e.key === "Escape") {
+      tagsDropdown.style.display = "none";
+      _tagsHighlight = -1;
+    }
+  });
 
   const idLabel = document.createElement("label");
   idLabel.textContent = existing ? "ID (read-only)" : "ID (optional — auto from name)";
@@ -1790,11 +1893,15 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   const bulkTagBtn = document.createElement("button");
   bulkTagBtn.className = "pl-btn";
   bulkTagBtn.textContent = "Tag";
+  const bulkDuplicateBtn = document.createElement("button");
+  bulkDuplicateBtn.className = "pl-btn";
+  bulkDuplicateBtn.textContent = "Duplicate";
+  bulkDuplicateBtn.title = "Duplicate every selected entry (a copy with '-copy' suffix is created for each)";
   const bulkDeleteBtn = document.createElement("button");
   bulkDeleteBtn.className = "pl-btn";
   bulkDeleteBtn.style.color = "#f88";
   bulkDeleteBtn.textContent = "Delete";
-  bulkBar.append(bulkCount, bulkClearBtn, bulkTagBtn, bulkExportBtn, bulkDeleteBtn);
+  bulkBar.append(bulkCount, bulkClearBtn, bulkTagBtn, bulkDuplicateBtn, bulkExportBtn, bulkDeleteBtn);
 
   container.append(toolbar, tagsRow, bulkBar, grid);
 
@@ -2266,6 +2373,24 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       await refresh();
       toast(`Deleted ${ids.length} prompt${ids.length === 1 ? "" : "s"}.`, "success");
     } catch (e) { toast(`Delete failed: ${e.message}`, "error"); }
+  });
+  bulkDuplicateBtn.onclick = withBusy(bulkDuplicateBtn, "Duplicating…", async () => {
+    const ids = [...checkedIds];
+    if (!ids.length) return;
+    let dupes = 0;
+    let fails = 0;
+    for (const id of ids) {
+      try {
+        await duplicatePrompt(id);
+        dupes++;
+      } catch (e) { fails++; }
+    }
+    await refresh();
+    if (fails === 0) {
+      toast(`Duplicated ${dupes} prompt${dupes === 1 ? "" : "s"}.`, "success");
+    } else {
+      toast(`Duplicated ${dupes}; ${fails} failed (see console).`, fails === ids.length ? "error" : "warning");
+    }
   });
   bulkTagBtn.onclick = withBusy(bulkTagBtn, "Tagging…", async () => {
     const ids = [...checkedIds];
@@ -3293,12 +3418,17 @@ const SMART_DETAILER_NAME = "GrimmRibbitySmartDetailer";
 
 function _buildSmartDetailerGrid(node) {
   const TARGETS = ["face", "skin", "mouth", "eyes", "feet", "hands"];
+  // sentinel: the "use global / preset value" placeholder. Cells holding
+  // the sentinel render dimmed-italic so override status is visible at a
+  // glance. -1 for the global-fallback floats; 0 for max/steps; 0 for
+  // crop_factor (uses preset). Booleans don't dim.
   const ROWS = [
-    { key: "enable",    label: "enable",    pat: "enable_X",     kind: "bool" },
-    { key: "threshold", label: "threshold", pat: "X_threshold", kind: "float", step: 0.01, min: -1, max: 1 },
-    { key: "denoise",   label: "denoise",   pat: "X_denoise",   kind: "float", step: 0.01, min: -1, max: 1 },
-    { key: "max",       label: "max N",     pat: "X_max",       kind: "int",   step: 1, min: 0, max: 64 },
-    { key: "steps",     label: "steps",     pat: "X_steps",     kind: "int",   step: 1, min: 0, max: 200 },
+    { key: "enable",    label: "enable",    pat: "enable_X",      kind: "bool" },
+    { key: "threshold", label: "threshold", pat: "X_threshold",   kind: "float", step: 0.01, min: -1, max: 1, sentinel: -1 },
+    { key: "denoise",   label: "denoise",   pat: "X_denoise",     kind: "float", step: 0.01, min: -1, max: 1, sentinel: -1 },
+    { key: "max",       label: "max N",     pat: "X_max",         kind: "int",   step: 1, min: 0, max: 64,    sentinel: 0  },
+    { key: "steps",     label: "steps",     pat: "X_steps",       kind: "int",   step: 1, min: 0, max: 200,   sentinel: 0  },
+    { key: "crop",      label: "crop",      pat: "X_crop_factor", kind: "float", step: 0.05, min: 0, max: 10, sentinel: 0  },
   ];
 
   const widgetsByName = {};
@@ -3357,6 +3487,14 @@ function _buildSmartDetailerGrid(node) {
         input.step = String(row.step);
         if (typeof row.min === "number") input.min = String(row.min);
         if (typeof row.max === "number") input.max = String(row.max);
+        const isSentinel = (v) => {
+          if (typeof v !== "number") return false;
+          // Floats with sentinel=-1 dim when negative (covers users who
+          // type values < 0 even though they shouldn't); ints / floats
+          // with sentinel=0 dim only when exactly 0.
+          if (row.sentinel < 0) return v < 0;
+          return v === 0;
+        };
         const writeVal = () => {
           const raw = input.value;
           if (raw === "" || raw === null) return;
@@ -3364,16 +3502,13 @@ function _buildSmartDetailerGrid(node) {
           if (!isNaN(v)) {
             w.value = v;
             node.setDirtyCanvas?.(true, true);
-            // Visually dim "use global" sentinel values (-1 for floats, 0 for max/steps).
-            const dim = (row.kind === "float" && v < 0) || (row.kind === "int" && v === 0);
-            input.classList.toggle("dim", dim);
+            input.classList.toggle("dim", isSentinel(v));
           }
         };
         const refresh = () => {
           const v = w.value;
           input.value = (v === undefined || v === null) ? "" : String(v);
-          const dim = (row.kind === "float" && v < 0) || (row.kind === "int" && v === 0);
-          input.classList.toggle("dim", dim);
+          input.classList.toggle("dim", isSentinel(v));
         };
         refresh();
         input.addEventListener("change", writeVal);
