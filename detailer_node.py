@@ -856,11 +856,19 @@ class GrimmRibbitySmartDetailer:
                     "Run the eyes pass: tight crop (crop_factor 1.5) using bbox_eyes if set, "
                     "else bbox_face. Wildcard 'detailed eyes, highly detailed,'. Best run AFTER "
                     "face — sharpens irises and pupils on the freshly-detailed face."}),
+                "enable_mouth": ("BOOLEAN", {"default": False, "tooltip":
+                    "Run the mouth/teeth pass: tight crop on the mouth region, sharpens "
+                    "teeth and lip detail. Off by default — needs a mouth detector "
+                    "(e.g. adetailer2dMouth_v10.pt) in models/ultralytics/bbox/."}),
                 "enable_hands": ("BOOLEAN", {"default": False, "tooltip":
-                    "Run the hands pass: needs a dedicated hand detector (hand_yolov8s.pt). "
-                    "Highest preset denoise (0.45) since hands often need real geometry "
-                    "rebuilding. Off by default because most workflows don't have a hand model "
-                    "wired in."}),
+                    "Run the hands pass: needs a dedicated hand detector (hand_yolov8s.pt or "
+                    "PitHandDetailer-v2-Test-v9c.pt). Highest preset denoise (0.45) since hands "
+                    "often need real geometry rebuilding. Off by default because most workflows "
+                    "don't have a hand model wired in."}),
+                "enable_feet": ("BOOLEAN", {"default": False, "tooltip":
+                    "Run the feet/shoes pass: cleans up shoe stitching, sole detail, ankle "
+                    "boundary. Off by default — needs a foot detector (footShoeDetailer or "
+                    "foot_yolov8s.pt) in models/ultralytics/bbox/."}),
                 "enable_skin":  ("BOOLEAN", {"default": False, "tooltip":
                     "Run a skin-smoothing pass on the face region (uses bbox_face). Lowest "
                     "denoise (0.30) and largest feather — refines pore texture without changing "
@@ -877,9 +885,16 @@ class GrimmRibbitySmartDetailer:
                     "detector + threshold, YOLO inference runs ONCE and the bboxes are reused. "
                     "A dedicated eye detector finds eye bboxes inside the face region for "
                     "tighter crops than the face detector alone."}),
+                "bbox_mouth": (bbox_models, {"default": _NONE, "tooltip":
+                    "YOLO bbox model for the mouth pass. Required when enable_mouth=True. "
+                    "adetailer2dMouth_v10.pt (YOLO11n, illustration-tuned) is a good pick."}),
                 "bbox_hands": (bbox_models, {"default": _NONE, "tooltip":
-                    "YOLO bbox model for hands (e.g. hand_yolov8s.pt). Required when "
-                    "enable_hands is True; ignored otherwise."}),
+                    "YOLO bbox model for hands (e.g. hand_yolov8s.pt or "
+                    "PitHandDetailer-v2-Test-v9c.pt). Required when enable_hands is True; "
+                    "ignored otherwise."}),
+                "bbox_feet": (bbox_models, {"default": _NONE, "tooltip":
+                    "YOLO bbox model for the feet pass. Required when enable_feet=True. "
+                    "footShoeDetailer_v04Seg.pt is the standard YOLO11n foot+shoe model."}),
                 "sam_model":  (sam_models, {"default": _NONE, "tooltip":
                     "Optional SAM (Segment Anything) model for mask refinement. Without SAM, "
                     "the composite blends the refined crop back using a rectangular feathered "
@@ -969,22 +984,6 @@ class GrimmRibbitySmartDetailer:
                     "target_index*1000). Default False = each bbox gets seed + bbox_index, "
                     "giving variety across multiple faces. Turn ON for repeatable A/B "
                     "comparisons or when one detection per target is the norm."}),
-                # Two extra targets — appended at end of required so saved
-                # workflows from v0.52.x don't widget-shift on load.
-                "enable_mouth": ("BOOLEAN", {"default": False, "tooltip":
-                    "Run the mouth/teeth pass: tight crop on the mouth region, sharpens "
-                    "teeth and lip detail. Off by default — needs a mouth detector "
-                    "(e.g. Anzhc's Mouth+Teeth YOLO from huggingface) in models/ultralytics/bbox/."}),
-                "enable_feet": ("BOOLEAN", {"default": False, "tooltip":
-                    "Run the feet/shoes pass: cleans up shoe stitching, sole detail, ankle "
-                    "boundary. Off by default — needs a foot detector (foot_yolov8s.pt or "
-                    "similar) in models/ultralytics/bbox/."}),
-                "bbox_mouth": (bbox_models, {"default": _NONE, "tooltip":
-                    "YOLO bbox model for the mouth pass. Required when enable_mouth=True. "
-                    "Anzhc's 'Mouth(closed)+Teeth.pt' is a good pick for cartoon/anime."}),
-                "bbox_feet": (bbox_models, {"default": _NONE, "tooltip":
-                    "YOLO bbox model for the feet pass. Required when enable_feet=True. "
-                    "foot_yolov8s.pt is the standard Adetailer foot model."}),
                 "bypass": ("BOOLEAN", {"default": False, "tooltip":
                     "When True, the node passes the input image through unchanged (and emits "
                     "the input as the preview, plus an empty mask). Use to A/B compare with vs "

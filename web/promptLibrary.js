@@ -1487,6 +1487,14 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       sort: sortSelect.value,
       tileSize: sizeInput.value,
       view: viewMode,
+      // Belt-and-suspenders selection persistence. The primary store is
+      // idWidget.value (a comma-joined STRING widget) which ComfyUI auto-
+      // serialises into the workflow JSON. But if a future ComfyUI rev
+      // changes widget-value handling, or if the user opens the workflow
+      // from a different source, the selection can come back empty. Mirror
+      // checkedIds into node.properties[propsKey].selectedIds so we can
+      // restore from either source.
+      selectedIds: [...checkedIds],
     };
   };
   const initialState = readState();
@@ -1694,14 +1702,36 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   // Repopulate checkedIds from the (comma-separated) widget value. Used on
   // workflow load and on Nodes 2.0 setValue, so the gallery highlights match
   // whatever was saved. Tolerates legacy single-id values.
+  //
+  // If idWidget.value is empty (e.g. browser tab reopened, ComfyUI restored
+  // the workflow but the widget value didn't round-trip), fall back to the
+  // selectedIds mirror saved in node.properties — that's the belt-and-
+  // suspenders backup for selection persistence across page refreshes.
   const syncFromWidget = (origin = "syncFromWidget") => {
     const before = new Set(checkedIds);
     checkedIds.clear();
-    for (const raw of (idWidget.value || "").split(",")) {
-      const id = raw.trim();
-      if (id) checkedIds.add(id);
+    const widgetVal = (idWidget.value || "").trim();
+    let source = "widget";
+    if (widgetVal) {
+      for (const raw of widgetVal.split(",")) {
+        const id = raw.trim();
+        if (id) checkedIds.add(id);
+      }
+    } else {
+      // Widget came back empty — try the properties mirror.
+      const stash = (node.properties && node.properties[propsKey]) || {};
+      const stashed = Array.isArray(stash.selectedIds) ? stash.selectedIds : [];
+      for (const id of stashed) {
+        if (id) checkedIds.add(id);
+      }
+      // Mirror back to the widget so downstream nodes see the canonical
+      // comma-joined string immediately.
+      if (checkedIds.size) {
+        idWidget.value = [...checkedIds].join(",");
+        source = "properties";
+      }
     }
-    _logSel(origin, before, checkedIds);
+    _logSel(`${origin}(${source})`, before, checkedIds);
   };
 
   const bulkBar = document.createElement("div");
@@ -1776,6 +1806,11 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
 
   const applySelectionChange = (idsToRefresh) => {
     syncWidget();
+    // Mirror the live selection into node.properties so a page-refresh
+    // restore from the workflow JSON has both the widget value and the
+    // properties stash to choose from. writeState is cheap (a small dict
+    // assign); we already call it on every filter/sort/etc. change.
+    writeState();
     if (idsToRefresh && idsToRefresh.length) {
       for (const id of idsToRefresh) _refreshTileSelection(id);
     }

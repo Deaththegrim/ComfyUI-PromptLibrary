@@ -26,14 +26,18 @@ from pathlib import Path
 # required first, in declaration order; then optional, same. Keep in sync
 # whenever you touch INPUT_TYPES order.
 _CURRENT_WIDGETS = [
-    # required
+    # required — 6 enables, 5 bbox dropdowns, sam_model, then sampler params
     ("enable_face",         "bool",   True),
     ("enable_eyes",         "bool",   True),
+    ("enable_mouth",        "bool",   False),
     ("enable_hands",        "bool",   False),
+    ("enable_feet",         "bool",   False),
     ("enable_skin",         "bool",   False),
     ("bbox_face",           "str",    "(none)"),
     ("bbox_eyes",           "str",    "(none)"),
+    ("bbox_mouth",          "str",    "(none)"),
     ("bbox_hands",          "str",    "(none)"),
+    ("bbox_feet",           "str",    "(none)"),
     ("sam_model",           "str",    "(none)"),
     ("seed",                "int",    0),
     ("steps",               "int",    25),
@@ -49,10 +53,6 @@ _CURRENT_WIDGETS = [
     ("tiled_encode",        "bool",   False),
     ("mask_strength",       "float",  1.0),
     ("same_seed_per_target","bool",   False),
-    ("enable_mouth",        "bool",   False),
-    ("enable_feet",         "bool",   False),
-    ("bbox_mouth",          "str",    "(none)"),
-    ("bbox_feet",           "str",    "(none)"),
     ("bypass",              "bool",   False),
     # optional
     ("wildcard_prefix",     "str",    ""),
