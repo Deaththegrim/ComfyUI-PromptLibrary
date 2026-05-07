@@ -80,7 +80,10 @@ def _unpack_sdxl_tuple(sdxl_tuple) -> tuple:
         print(f"[GrimmRibbitySamplerSDXL] partial refiner in input tuple "
               f"({filled}/4 slots filled); ignoring refiner half.")
         refiner = [None] * 4
-    return (base_model, base_clip, base_pos, base_neg, *refiner)
+    # Explicit 8-tuple construction — clearer than `*refiner` unpacking and
+    # also satisfies static analysers that can't infer star-unpacked lengths.
+    return (base_model, base_clip, base_pos, base_neg,
+            refiner[0], refiner[1], refiner[2], refiner[3])
 
 
 def _between_iterations_cleanup() -> None:
@@ -125,96 +128,27 @@ _UPSCALE_TYPES = ["latent", "pixel", "both"]
 _END_STEP_SENTINEL = 10000
 
 
-def _try_load_efficiency_upscalers():
-    """Pull the city96 + ttl_nn neural latent upscalers in from
-    efficiency-nodes' bundled py/ folder when that pack is installed.
-    Returns (city96_class, ttl_nn_class) — either may be None on failure.
-    Used to extend the latent_upscaler dropdown beyond comfy's default
-    interpolation methods, matching efficiency-nodes' option set."""
-    import importlib.util
-    import os
-    city = ttl = None
-    candidates = (
-        "/home/junie/comfy/ComfyUI/custom_nodes/efficiency-nodes-comfyui/py",
-        os.path.join(os.path.dirname(folder_paths.__file__), "custom_nodes",
-                     "efficiency-nodes-comfyui", "py"),
-    )
-    for base in candidates:
-        if not os.path.isdir(base):
-            continue
-        try:
-            spec_c = importlib.util.spec_from_file_location(
-                "_grimm_city96_latent_upscaler",
-                os.path.join(base, "city96_latent_upscaler.py"))
-            mod_c = importlib.util.module_from_spec(spec_c)
-            spec_c.loader.exec_module(mod_c)
-            city = mod_c.LatentUpscaler
-        except Exception as e:
-            print(f"[GrimmRibbity] city96 latent upscaler unavailable: {e}")
-        try:
-            spec_t = importlib.util.spec_from_file_location(
-                "_grimm_ttl_nn_latent_upscaler",
-                os.path.join(base, "ttl_nn_latent_upscaler.py"))
-            mod_t = importlib.util.module_from_spec(spec_t)
-            spec_t.loader.exec_module(mod_t)
-            ttl = mod_t.NNLatentUpscale
-        except Exception as e:
-            print(f"[GrimmRibbity] ttl_nn latent upscaler unavailable: {e}")
-        if city or ttl:
-            break
-    return city, ttl
-
-
-_CITY96_LATENT_CLS, _TTL_NN_LATENT_CLS = _try_load_efficiency_upscalers()
-_CITY96_VERSIONS = ["v1", "xl"]
-_CITY96_SCALES = [1.25, 1.5, 2.0]
-_TTL_NN_VERSIONS = ["SDXL", "SD 1.x"]
-
-
-def _build_latent_upscaler_choices() -> list[str]:
-    """Comfy interpolation methods + neural upscalers prefixed by source.
-    Picked source/version is parsed back out at apply time."""
-    out = list(_COMFY_LATENT_METHODS)
-    if _CITY96_LATENT_CLS is not None:
-        for v in _CITY96_VERSIONS:
-            out.append(f"city96.{v}")
-    if _TTL_NN_LATENT_CLS is not None:
-        for v in _TTL_NN_VERSIONS:
-            out.append(f"ttl_nn.{v}")
-    return out
-
-
-_LATENT_UPSCALE_METHODS = _build_latent_upscaler_choices()
+# Legacy strings kept for backward-compatibility with workflows saved against
+# pre-0.48.0 versions that listed efficiency-nodes neural upscalers. They're
+# accepted in the dropdown so saved workflows still validate; at runtime they
+# fall through to bicubic with a one-shot console warning. No external pack
+# dependency — pure compatibility shim.
+_LEGACY_NEURAL_UPSCALERS = ("city96.v1", "city96.xl", "ttl_nn.SDXL", "ttl_nn.SD 1.x")
+_LATENT_UPSCALE_METHODS = list(_COMFY_LATENT_METHODS) + list(_LEGACY_NEURAL_UPSCALERS)
+_LEGACY_UPSCALER_WARNED: set[str] = set()
 
 
 def _apply_latent_upscaler_method(latent: dict, scale: float, method: str) -> dict:
-    """Dispatch to the right upscaler based on the method prefix. Comfy
-    interpolation: just pick the method. city96: snap scale to one of its
-    allowed values (1.25/1.5/2.0). ttl_nn: clamp to its 1.0-2.0 range."""
-    if method.startswith("city96."):
-        if _CITY96_LATENT_CLS is None:
-            raise RuntimeError("city96 latent upscaler unavailable — install or "
-                               "keep efficiency-nodes-comfyui present.")
-        version = method.split(".", 1)[1]
-        if version not in _CITY96_VERSIONS:
-            version = "xl"
-        # Snap to nearest valid scale and stringify (city96 takes a string).
-        nearest = min(_CITY96_SCALES, key=lambda x: abs(x - scale))
-        scale_str = f"{nearest:g}" if nearest == int(nearest) else f"{nearest}"
-        # city96's class takes string scale_factor exactly as listed: "1.25" / "1.5" / "2.0"
-        scale_str = {1.25: "1.25", 1.5: "1.5", 2.0: "2.0"}[nearest]
-        result = _CITY96_LATENT_CLS().upscale(latent, version, scale_str)
-        return result[0] if isinstance(result, tuple) else result
-    if method.startswith("ttl_nn."):
-        if _TTL_NN_LATENT_CLS is None:
-            raise RuntimeError("ttl_nn latent upscaler unavailable.")
-        version = method.split(".", 1)[1]
-        if version not in _TTL_NN_VERSIONS:
-            version = "SDXL"
-        clamped = max(1.0, min(2.0, scale))
-        result = _TTL_NN_LATENT_CLS().upscale(latent, version, clamped)
-        return result[0] if isinstance(result, tuple) else result
-    # Comfy default interpolation.
+    """Resize the latent via comfy's built-in interpolation methods. Legacy
+    neural upscaler choices (city96, ttl_nn) are accepted but degraded to
+    bicubic at runtime — kept on the dropdown so old saved workflows load."""
+    if method in _LEGACY_NEURAL_UPSCALERS:
+        if method not in _LEGACY_UPSCALER_WARNED:
+            _LEGACY_UPSCALER_WARNED.add(method)
+            print(f"[GrimmRibbity] '{method}' was dropped to keep this pack "
+                  f"dependency-free — falling back to 'bicubic'. Update the "
+                  f"workflow's latent_upscaler widget to silence this.")
+        method = "bicubic"
     samples = latent["samples"]
     width = round(samples.shape[-1] * scale)
     height = round(samples.shape[-2] * scale)

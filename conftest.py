@@ -28,4 +28,17 @@ def _install_server_stub():
     sys.modules["server"] = fake
 
 
+def _install_folder_paths_stub():
+    if "folder_paths" in sys.modules:
+        return
+    fp = types.ModuleType("folder_paths")
+    fp.get_filename_list = lambda _key: []
+    fp.get_full_path = lambda *_a, **_k: None
+    fp.folder_names_and_paths = {}
+    fp.models_dir = "/tmp"
+    fp.supported_pt_extensions = {".pt", ".pth", ".safetensors"}
+    sys.modules["folder_paths"] = fp
+
+
 _install_server_stub()
+_install_folder_paths_stub()

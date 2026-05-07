@@ -4,20 +4,31 @@ Wraps the 3-node IPAdapter chain (UnifiedLoader → IPAdapter Apply → optional
 LoadImage) into a single MODEL → MODEL transform so workflows don't have to
 spaghetti-wire the same pattern every time.
 
-Hard dependency on ComfyUI_IPAdapter_plus — the wrapping is intentional, we
-defer all the heavy lifting (CLIP-vision, weight curves, attention injection)
-to the upstream pack. If IPAdapter Plus isn't installed, this module raises
-ImportError at load time and __init__.py registers the rest of the suite as
-usual without it.
+Soft dependency on ComfyUI_IPAdapter_plus: the import happens at *call* time
+inside `anchor()`, not at module load. The node always registers and shows
+in the picker; if IPAdapter Plus isn't installed and a user fires the node,
+they get a clear runtime error pointing at how to install it. The rest of
+the GrimmRibbity suite stays free of any third-party-pack dependency.
 """
 from __future__ import annotations
 
-# Lazy import: __init__.py wraps this file's load in try/except so the suite
-# still registers if IPAdapter Plus isn't installed.
-from custom_nodes.ComfyUI_IPAdapter_plus.IPAdapterPlus import (  # type: ignore
-    IPAdapterUnifiedLoader,
-    IPAdapterSimple,
-)
+
+def _import_ipadapter():
+    """Resolve IPAdapter Plus's two classes lazily. Raises a clear error if
+    the pack isn't installed — the rest of the suite has no IPAdapter dep."""
+    try:
+        from custom_nodes.ComfyUI_IPAdapter_plus.IPAdapterPlus import (  # type: ignore
+            IPAdapterUnifiedLoader, IPAdapterSimple,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "GrimmRibbity Character Anchor needs ComfyUI_IPAdapter_plus to be "
+            "installed (clone https://github.com/cubiq/ComfyUI_IPAdapter_plus "
+            "into your custom_nodes folder, or install via ComfyUI-Manager). "
+            "The rest of the GrimmRibbity suite works without it — only this "
+            "node wraps IPAdapter."
+        ) from exc
+    return IPAdapterUnifiedLoader, IPAdapterSimple
 
 
 _PRESETS = (
@@ -104,6 +115,7 @@ class GrimmRibbityCharacterAnchor:
                 "to pass the model through unchanged."
             )
 
+        IPAdapterUnifiedLoader, IPAdapterSimple = _import_ipadapter()
         loader = IPAdapterUnifiedLoader()
         model_with_ipa, ipadapter = loader.load_models(model, preset)
 

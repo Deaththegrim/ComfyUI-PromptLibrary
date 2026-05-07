@@ -1,6 +1,5 @@
 import json
 import unittest
-from pathlib import Path
 
 from civitai_save import build_a1111_parameters
 

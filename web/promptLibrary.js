@@ -1242,7 +1242,11 @@ function _openPromptModalInner({ existing, onSave, onDelete, nameExists }) {
 
   imgInput.onchange = () => {
     const f = imgInput.files[0];
-    if (f) {
+    // Reject non-image MIME types so we don't hand a blob URL of arbitrary
+    // user-supplied data to <img>. Belt-and-suspenders for CodeQL's
+    // js/xss-through-dom alert — img elements can't execute scripts from a
+    // blob URL anyway, but the type check is good defensive practice.
+    if (f && typeof f.type === "string" && f.type.startsWith("image/")) {
       preview.src = URL.createObjectURL(f);
       preview.style.display = "block";
       clearImage = false;
@@ -1640,6 +1644,19 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   // Unified selection: drives both the prompt output (joined into idWidget.value)
   // and bulk actions (Tag/Export/Delete bar).
   const checkedIds = new Set();
+  // Diagnostic: ghost-select bug investigation. Every selection mutation logs
+  // origin so a multi-Library workflow shows which node fired. Cheap when the
+  // user isn't watching the console; turn off via `window._plDebugSelect=false`.
+  if (typeof window._plDebugSelect === "undefined") window._plDebugSelect = true;
+  const _logSel = (origin, before, after) => {
+    if (!window._plDebugSelect) return;
+    const a = [...before].sort().join(",");
+    const b = [...after].sort().join(",");
+    if (a === b) return;
+    const nodeId = (node && (node.id ?? "?"));
+    const nodeType = (node && (node.type || node.comfyClass || "Lib")) || "Lib";
+    console.log(`[PL select] node#${nodeId} (${nodeType}) ${origin}: [${a}] -> [${b}]`);
+  };
   const syncWidget = () => {
     idWidget.value = [...checkedIds].join(",");
     node.setDirtyCanvas(true, true);
@@ -1647,12 +1664,14 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   // Repopulate checkedIds from the (comma-separated) widget value. Used on
   // workflow load and on Nodes 2.0 setValue, so the gallery highlights match
   // whatever was saved. Tolerates legacy single-id values.
-  const syncFromWidget = () => {
+  const syncFromWidget = (origin = "syncFromWidget") => {
+    const before = new Set(checkedIds);
     checkedIds.clear();
     for (const raw of (idWidget.value || "").split(",")) {
       const id = raw.trim();
       if (id) checkedIds.add(id);
     }
+    _logSel(origin, before, checkedIds);
   };
 
   const bulkBar = document.createElement("div");
@@ -2866,7 +2885,7 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   grid.replaceChildren(Object.assign(document.createElement("div"), {
     className: "pl-status", textContent: "loading...",
   }));
-  syncFromWidget();
+  syncFromWidget("buildGallery.init");
   refresh();
 
   return { container, refresh, render, syncFromWidget, cleanup };
@@ -2947,7 +2966,7 @@ function registerMultiNode(nodeType) {
     // Re-sync each panel with its (now-restored-from-workflow) widget values.
     for (const p of this._promptLibraryPanels || []) {
       if (p.labelWidget) p.header.textContent = p.labelWidget.value || p.header.textContent;
-      p.syncFromWidget?.();
+      p.syncFromWidget?.("multi.onConfigure");
       p.render?.();
     }
     return r;
@@ -3200,6 +3219,10 @@ const NODE_COLORS = {
   // Anima sampler / HiResFix — rose / mauve to set apart from teal SDXL
   "GrimmRibbityAnimaSampler": "#c84a7a",
   "GrimmRibbityAnimaHiResFixScript": "#c84a7a",
+  // Detailer — burnt orange, distinct from Scene/Background's brighter orange
+  "GrimmRibbitySmartDetailer": "#d8754a",
+  // Character anchor — olive / muted gold for the IPAdapter wrap
+  "GrimmRibbityCharacterAnchor": "#8eaa3e",
 };
 // Colors used by previous theme revisions. When a saved workflow loads with
 // one of these stuck on a node, we treat it as stale and replace with the
@@ -3330,8 +3353,11 @@ app.registerExtension({
         // these the widget can be treated as malformed and skipped.
         getValue: () => idWidget?.value || "",
         setValue: (v) => {
+          if (window._plDebugSelect) {
+            console.log(`[PL select] node#${this.id ?? "?"} galleryWidget.setValue(${JSON.stringify(v)})`);
+          }
           if (idWidget) idWidget.value = v;
-          syncFromWidget?.();
+          syncFromWidget?.("galleryWidget.setValue");
           render?.();
         },
       });
@@ -3353,7 +3379,7 @@ app.registerExtension({
     nodeType.prototype.onConfigure = function () {
       const r = onConfigure?.apply(this, arguments);
       // Re-render so the tile matching the workflow's saved prompt_id gets highlighted.
-      this._promptLibrarySyncFromWidget?.();
+      this._promptLibrarySyncFromWidget?.("onConfigure");
       this._promptLibraryRender?.();
       return r;
     };

@@ -510,7 +510,6 @@ def _start_watcher() -> None:
         # websocket refresh per change. Wait for the mtime to settle for
         # one full tick before notifying — coalesces the burst into one
         # gallery refresh on every connected client.
-        pending_since: float | None = None
         pending_mtime = 0.0
         while True:
             time.sleep(2)
@@ -525,17 +524,13 @@ def _start_watcher() -> None:
                 except OSError:
                     continue
                 if mtime == _last_known_mtime:
-                    pending_since = None
                     continue
                 if pending_mtime != mtime:
-                    # New change observed — start (or restart) the
-                    # coalescing window.
+                    # New change observed — wait one more tick to coalesce.
                     pending_mtime = mtime
-                    pending_since = time.monotonic()
                     continue
                 # Same mtime as last tick — file has settled, fire.
                 _last_known_mtime = mtime
-                pending_since = None
                 _notify_change()
             except Exception as e:
                 print(f"[PromptLibrary] watcher iteration failed: {e!r}; continuing")
@@ -3049,7 +3044,7 @@ async def fix_orphans(request):
     return web.json_response({"removed": removed, "errors": errors})
 
 
-__version__ = "0.47.1"
+__version__ = "0.52.0"
 
 
 def _autobackup_on_version_change() -> None:
@@ -3146,6 +3141,14 @@ except Exception as _e:
     _anchor_node, _anchor_label = {}, {}
 
 try:
+    from .detailer_node import GrimmRibbitySmartDetailer
+    _detailer_node = {"GrimmRibbitySmartDetailer": GrimmRibbitySmartDetailer}
+    _detailer_label = {"GrimmRibbitySmartDetailer": "GrimmRibbity — Smart Detailer"}
+except Exception as _e:
+    print(f"[PromptLibrary] Smart Detailer unavailable: {_e}")
+    _detailer_node, _detailer_label = {}, {}
+
+try:
     from .comic_page import GrimmRibbityComicPage
     _comic_page_node = {"GrimmRibbityComicPage": GrimmRibbityComicPage}
     _comic_page_label = {"GrimmRibbityComicPage": "GrimmRibbity — Comic Page (Regional)"}
@@ -3179,6 +3182,7 @@ NODE_CLASS_MAPPINGS = {
     **_lora_node,
     **_anima_node,
     **_anchor_node,
+    **_detailer_node,
     **_comic_page_node,
     **_style_node,
 }
@@ -3197,6 +3201,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **_lora_label,
     **_anima_label,
     **_anchor_label,
+    **_detailer_label,
     **_comic_page_label,
     **_style_label,
 }

@@ -12,6 +12,10 @@ data/*
 data/images/*
 !data/images/.gitkeep
 
+# Auto-snapshots created on every __version__ bump
+# (_autobackup_on_version_change in __init__.py).
+data-backup-*/
+
 # Personal dev notes / scratchpads — never ship.
 research/
 

@@ -73,6 +73,7 @@ After install, find them under **GrimmRibbity/** sub-menus in the node picker:
 - **GrimmRibbity — Scene** — per-frame scene knobs (camera_angle, mood, lighting, framing) + free-text extras
 - **GrimmRibbity — Background (locked)** — locked background preset for series consistency
 - **GrimmRibbity — Character Anchor** — wraps IPAdapter Plus's UnifiedLoader + Apply pair into a single MODEL→MODEL transform. Pin a character's face/style across comic panels with one node instead of three. Includes a `bypass` toggle and an `attn_mask` input for regional workflows. **Requires [ComfyUI_IPAdapter_plus](https://github.com/cubiq/ComfyUI_IPAdapter_plus).**
+- **GrimmRibbity — Smart Detailer** — collapses the 3-node FaceDetailer chain (face → eyes → hands) into one node with target toggles. Detector models load by filename string (no UltralyticsDetectorProvider/SAMLoader to wire), and `tiled_decode` defaults ON to prevent host-RAM OOM on long batches. Per-target presets (denoise/feather/crop/wildcard) tuned for SDXL; ride a global `denoise` slider to scale them all together. **Requires [ComfyUI-Impact-Pack](https://github.com/ltdrdata/ComfyUI-Impact-Pack) + Impact-Subpack.**
 - **GrimmRibbity — Comic Page (Regional)** — single-gen multi-panel conditioning. Take a color-coded panel-layout mask + per-panel prompts (up to 6 panels) and emit one CONDITIONING constrained per region. Optional `panel_strengths` CSV override (`"1.0, , 1.5"`) lets one panel dominate without changing every panel's binding. Pair with Character Anchor upstream for character lock across panels. **No third-party node packs required** — uses only ComfyUI's core CLIPTextEncode + ConditioningSetMask.
 
 **Output**
@@ -272,7 +273,7 @@ python3 -m venv .testenv
 .testenv/bin/python -m unittest discover tests
 ```
 
-263 tests, runs in ~1.7 s. The Comic Page tests + the Style node helper tests skip without `torch` installed (`.testenv` doesn't ship it).
+278 tests, runs in ~2.5 s. The Comic Page tests + the Style node helper tests skip without `torch` installed (`.testenv` doesn't ship it).
 
 ## Troubleshooting
 

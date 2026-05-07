@@ -139,7 +139,9 @@ def append_prompt_log(record: dict, log_path: Path) -> None:
             # O_APPEND + single write() is atomic for line-sized writes on
             # POSIX. fsync() after ensures durability so a crash leaves
             # either no line or the complete line — never a truncation.
-            fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+            # Owner-only mode (0o600) — prompt logs may contain sensitive
+            # text. CodeQL py/overly-permissive-file flags 0o644.
+            fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             try:
                 os.write(fd, line)
                 try:
