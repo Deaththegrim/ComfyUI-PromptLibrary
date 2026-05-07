@@ -175,7 +175,37 @@ def _vae_decode(vae, latent, *, mode: str = "true"):
     return vae.decode(samples)
 
 
-def _vae_encode(vae, image):
+# Auto-tile threshold (in latent pixels). Above this, decode falls back to
+# the tiled path even when the user picked 'true' — non-tiled decode of a
+# 256-latent (= 2048px image) often OOMs on 16GB GPUs. SDXL's default
+# 128-latent (= 1024px image) stays on the fast path; HiResFix at 2x or
+# higher promotes itself.
+_AUTO_TILE_LATENT_THRESHOLD = 192
+
+
+def _smart_vae_decode(vae, latent, *, mode: str = "true"):
+    """Like _vae_decode but auto-promotes 'true' → tiled for large latents.
+    Saves the user from picking 'true (tiled)' manually for HiResFix outputs
+    that would OOM the non-tiled path. The user's explicit 'true (tiled)'
+    or 'false' choice is honoured verbatim — promotion only applies to 'true'."""
+    if mode == "false":
+        return None
+    samples = latent["samples"]
+    latent_max = max(samples.shape[-1], samples.shape[-2])
+    if mode == "true" and latent_max > _AUTO_TILE_LATENT_THRESHOLD and hasattr(vae, "decode_tiled"):
+        return vae.decode_tiled(samples, tile_x=512, tile_y=512, overlap=64)
+    if mode == "true (tiled)":
+        return vae.decode_tiled(samples, tile_x=512, tile_y=512, overlap=64)
+    return vae.decode(samples)
+
+
+def _vae_encode(vae, image, *, auto_tile: bool = False):
+    """Encode an HWC image. auto_tile=True falls back to vae.encode_tiled
+    for large images so the inverse of _smart_vae_decode doesn't OOM."""
+    if auto_tile:
+        side_max = max(image.shape[-2], image.shape[-3])
+        if side_max > _AUTO_TILE_LATENT_THRESHOLD * 8 and hasattr(vae, "encode_tiled"):
+            return {"samples": vae.encode_tiled(image)}
     return {"samples": vae.encode(image)}
 
 
@@ -184,8 +214,13 @@ def _latent_upscale_by(latent: dict, scale: float, method: str) -> dict:
     return _apply_latent_upscaler_method(latent, scale, method)
 
 
-def _pixel_upscale_with_model(pixel_image, upscale_model):
-    """Mirror comfy_extras.nodes_upscale_model.ImageUpscaleWithModel.execute."""
+def _pixel_upscale_with_model(pixel_image, upscale_model, *, keep_on_device: bool = False):
+    """Mirror comfy_extras.nodes_upscale_model.ImageUpscaleWithModel.execute.
+
+    keep_on_device=True skips the post-call offload — the caller is responsible
+    for moving the upscale model back to vae_offload_device when it's done.
+    HiResFix's iteration loop sets this so a 5-iteration pixel-mode run pays
+    one device-transfer instead of five."""
     import comfy.model_management
     device = comfy.model_management.get_torch_device()
     memory_required = comfy.model_management.module_size(upscale_model.model)
@@ -205,7 +240,8 @@ def _pixel_upscale_with_model(pixel_image, upscale_model):
         pbar=pbar,
         output_device=comfy.model_management.intermediate_device(),
     )
-    upscale_model.to(comfy.model_management.vae_offload_device())
+    if not keep_on_device:
+        upscale_model.to(comfy.model_management.vae_offload_device())
     return upscaled.movedim(-3, -1)
 
 
@@ -479,23 +515,28 @@ class GrimmRibbityHiResFixScript:
 def _hires_one_iteration(*, model, clip, vae, positive, negative, latent,
                           per_scale: float, mode: str,
                           script: dict, sampler_name: str, scheduler: str,
-                          seed: int, upscale_model=None):
+                          seed: int, upscale_model=None, control_net=None):
     """Run one upscale+sample iteration of HiResFix. mode is 'latent', 'pixel',
     or one of the half-passes for 'both' ('both_latent' / 'both_pixel'). The
-    pixel upscale model is loaded once by the caller and passed in via
-    upscale_model — saves loading the same .pth file N times across iterations."""
+    pixel upscale model AND the controlnet are loaded once by the caller and
+    passed in — saves N-1 redundant loads when iterations>1."""
     if mode in ("latent", "both_latent"):
         cur = _latent_upscale_by(latent, per_scale, script["latent_upscaler"])
     else:  # pixel or both_pixel
         if upscale_model is None:
             # Defensive — the caller should have loaded it. Fall back to load.
             upscale_model = _load_upscale_model(script["pixel_upscaler"])
-        decoded = _vae_decode(vae, latent, mode="true")
-        upscaled = _pixel_upscale_with_model(decoded, upscale_model)
+        # The pixel-path decode happens at every iteration's CURRENT latent
+        # size (not the final size). Auto-tile when the cumulative scale
+        # has pushed the latent past the threshold so iteration N doesn't
+        # OOM where iteration N-1 fit comfortably.
+        decoded = _smart_vae_decode(vae, latent, mode="true")
+        upscaled = _pixel_upscale_with_model(decoded, upscale_model,
+                                              keep_on_device=True)
         target_w = round(decoded.shape[-2] * per_scale)
         target_h = round(decoded.shape[-3] * per_scale)
         upscaled = _resample_to(upscaled, target_w, target_h)
-        cur = _vae_encode(vae, upscaled.clamp(0, 1))
+        cur = _vae_encode(vae, upscaled.clamp(0, 1), auto_tile=True)
 
     # Per-field re-encode: positive and negative are independent. Within
     # the positive pair, an empty override mirrors the other side (so
@@ -526,9 +567,12 @@ def _hires_one_iteration(*, model, clip, vae, positive, negative, latent,
     else:
         neg = negative
 
-    # ControlNet apply if enabled.
+    # ControlNet apply if enabled. The CN model is loaded once by the
+    # caller and passed in via control_net — saves N-1 disk loads when
+    # iterations>1.
     if script["use_controlnet"]:
-        cn = _load_controlnet(script["control_net_name"])
+        cn = control_net if control_net is not None else _load_controlnet(
+            script["control_net_name"])
         ctl_img = script["control_image"]
         # Ensure the control image matches the current latent size.
         ctl_img = _resample_to(ctl_img, cur_w, cur_h)
@@ -573,36 +617,58 @@ def _apply_hires_fix(script: dict, *,
     if upscale_type in ("pixel", "both"):
         upscale_model = _load_upscale_model(script["pixel_upscaler"])
 
+    # Same idea for the ControlNet — loaded once and reused across every
+    # hires iteration that applies it. The hint image still gets resampled
+    # per iteration since the target size changes.
+    control_net = None
+    if script["use_controlnet"]:
+        control_net = _load_controlnet(script["control_net_name"])
+
     base_seed = primary_seed if script["use_same_seed"] else script["seed"]
     cur = latent
 
-    if upscale_type == "both":
-        # Half the scale per stage so cumulative = total_scale across both.
-        # Each stage runs `iterations` passes at the appropriate fraction.
-        half_scale = total_scale ** 0.5
-        per_iter = half_scale ** (1.0 / iterations) if iterations > 1 else half_scale
-        for stage_idx, stage_mode in enumerate(("both_latent", "both_pixel")):
+    try:
+        if upscale_type == "both":
+            # Half the scale per stage so cumulative = total_scale across both.
+            # Each stage runs `iterations` passes at the appropriate fraction.
+            half_scale = total_scale ** 0.5
+            per_iter = half_scale ** (1.0 / iterations) if iterations > 1 else half_scale
+            for stage_idx, stage_mode in enumerate(("both_latent", "both_pixel")):
+                for i in range(iterations):
+                    seed = base_seed + stage_idx * iterations + i
+                    cur = _hires_one_iteration(
+                        model=sampling_model, clip=sampling_clip, vae=sampling_vae,
+                        positive=positive, negative=negative, latent=cur,
+                        per_scale=per_iter, mode=stage_mode, script=script,
+                        sampler_name=primary_sampler_name, scheduler=primary_scheduler,
+                        seed=seed, upscale_model=upscale_model,
+                        control_net=control_net,
+                    )
+        else:
+            per_iter = total_scale ** (1.0 / iterations) if iterations > 1 else total_scale
             for i in range(iterations):
-                seed = base_seed + stage_idx * iterations + i
                 cur = _hires_one_iteration(
                     model=sampling_model, clip=sampling_clip, vae=sampling_vae,
                     positive=positive, negative=negative, latent=cur,
-                    per_scale=per_iter, mode=stage_mode, script=script,
+                    per_scale=per_iter, mode=upscale_type, script=script,
                     sampler_name=primary_sampler_name, scheduler=primary_scheduler,
-                    seed=seed, upscale_model=upscale_model,
+                    seed=base_seed + i, upscale_model=upscale_model,
+                    control_net=control_net,
                 )
-    else:
-        per_iter = total_scale ** (1.0 / iterations) if iterations > 1 else total_scale
-        for i in range(iterations):
-            cur = _hires_one_iteration(
-                model=sampling_model, clip=sampling_clip, vae=sampling_vae,
-                positive=positive, negative=negative, latent=cur,
-                per_scale=per_iter, mode=upscale_type, script=script,
-                sampler_name=primary_sampler_name, scheduler=primary_scheduler,
-                seed=base_seed + i, upscale_model=upscale_model,
-            )
+    finally:
+        # Offload the pixel upscale model now that all iterations are done.
+        # _pixel_upscale_with_model leaves it on-device per iteration with
+        # keep_on_device=True; this is the matching cleanup.
+        if upscale_model is not None:
+            try:
+                import comfy.model_management
+                upscale_model.to(comfy.model_management.vae_offload_device())
+            except Exception:
+                pass
 
-    final_image = _vae_decode(sampling_vae, cur, mode=vae_decode_mode)
+    # Final decode honours the user's chosen mode but auto-promotes 'true'
+    # to tiled if the cumulative latent size would OOM the non-tiled path.
+    final_image = _smart_vae_decode(sampling_vae, cur, mode=vae_decode_mode)
     return cur, final_image
 
 
@@ -764,9 +830,9 @@ class GrimmRibbitySamplerSDXL:
                 )
             else:
                 print(f"[GrimmRibbitySamplerSDXL] unknown script kind {kind!r}; skipped")
-                image_out = _vae_decode(vae, latent_out, mode=vae_decode)
+                image_out = _smart_vae_decode(vae, latent_out, mode=vae_decode)
         else:
-            image_out = _vae_decode(vae, latent_out, mode=vae_decode)
+            image_out = _smart_vae_decode(vae, latent_out, mode=vae_decode)
 
         if image_out is None:
             # vae_decode='false' — emit a 1×1×3 zero so the IMAGE port still

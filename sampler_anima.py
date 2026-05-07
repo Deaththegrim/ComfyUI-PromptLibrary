@@ -35,10 +35,20 @@ _VAE_DECODE_MODES = ["true", "true (tiled)", "false"]
 _INTERPOLATION_METHODS = ["nearest-exact", "bilinear", "area", "bicubic", "bislerp"]
 
 
+_AUTO_TILE_LATENT_THRESHOLD = 192  # latent pixels — see sampler_sdxl._smart_vae_decode
+
+
 def _vae_decode(vae, latent, *, mode: str = "true"):
+    """Decode honouring the user's vae_decode mode. 'false' returns None.
+    'true' auto-promotes to tiled when the latent's longest dim exceeds
+    _AUTO_TILE_LATENT_THRESHOLD — saves the user from picking 'true (tiled)'
+    manually for HiResFix outputs that would OOM the non-tiled path."""
     if mode == "false" or vae is None:
         return None
     samples = latent["samples"]
+    latent_max = max(samples.shape[-1], samples.shape[-2])
+    if mode == "true" and latent_max > _AUTO_TILE_LATENT_THRESHOLD and hasattr(vae, "decode_tiled"):
+        return vae.decode_tiled(samples, tile_x=512, tile_y=512, overlap=64)
     if mode == "true (tiled)" and hasattr(vae, "decode_tiled"):
         return vae.decode_tiled(samples, tile_x=512, tile_y=512, overlap=64)
     return vae.decode(samples)
