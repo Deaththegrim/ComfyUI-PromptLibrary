@@ -1829,6 +1829,135 @@ class PromptLibraryTests(unittest.TestCase):
             sys.modules.pop(f"{pkg_name}.style_node", None)
             sys.modules.pop(pkg_name, None)
 
+    # ---- end-to-end round-trip: save → export zip → import zip --------
+
+    def test_export_import_roundtrip_preserves_full_entry(self):
+        """Save an entry with every supported field, export, wipe, reimport,
+        verify nothing was lost. Catches silent data loss whenever the
+        export manifest or import path forgets a field."""
+        png_bytes = _real_png()
+        loras = json.dumps([
+            {"name": "Anima/Anima.safetensors", "strength_model": 0.85,
+             "strength_clip": 0.85, "triggers": "anime style", "enabled": True},
+            {"name": "char/x.safetensors", "strength_model": 1.0,
+             "strength_clip": 1.0, "triggers": "", "enabled": False},
+        ])
+        # 1. Save a complex entry.
+        save_req = FakeRequest(post_data={
+            "name": "Round-trip target",
+            "text": "fluffy cat, masterpiece",
+            "negative": "lowres, bad_anatomy",
+            "tags": "character, model:anima",
+            "rating": "4",
+            "notes": "Roundtrip test entry",
+            "loras": loras,
+            "image": FakeFileField("rt.png", png_bytes),
+        })
+        body = json.loads(asyncio.run(self.mod.upsert_prompt(save_req)).body)
+        pid = body["id"]
+
+        # 2. Export — empty ids list means everything.
+        export_req = FakeRequest(json_data={"ids": [pid]})
+        export_resp = asyncio.run(self.mod.export_zip(export_req))
+        self.assertEqual(export_resp.status, 200)
+        zip_bytes = export_resp.body
+
+        # 3. Wipe the library + thumbnail.
+        self.mod._save([])
+        self.mod._delete_image_files(pid)
+        self.assertIsNone(self.mod._image_path_for(pid))
+
+        # 4. Reimport.
+        added, updated, skipped, errors = self.mod._import_zip(zip_bytes, mode="add_only")
+        self.assertEqual(added, 1)
+        self.assertEqual(skipped, 0)
+        self.assertEqual(errors, [])
+
+        # 5. Verify every field round-tripped.
+        items = self.mod._load()
+        self.assertEqual(len(items), 1)
+        e = items[0]
+        self.assertEqual(e["id"], pid)
+        self.assertEqual(e["name"], "Round-trip target")
+        self.assertEqual(e["text"], "fluffy cat, masterpiece")
+        self.assertEqual(e["negative"], "lowres, bad_anatomy")
+        self.assertIn("character", e["tags"])
+        self.assertIn("model:anima", e["tags"])
+        self.assertEqual(e["rating"], 4)
+        self.assertEqual(e["notes"], "Roundtrip test entry")
+        self.assertEqual(len(e["loras"]), 2)
+        self.assertEqual(e["loras"][0]["name"], "Anima/Anima.safetensors")
+        self.assertAlmostEqual(e["loras"][0]["strength_model"], 0.85)
+        self.assertEqual(e["loras"][0]["triggers"], "anime style")
+        self.assertEqual(e["loras"][1]["enabled"], False)
+        # Thumbnail file should also have been restored.
+        self.assertIsNotNone(self.mod._image_path_for(pid))
+
+    def test_export_import_roundtrip_add_only_skips_existing(self):
+        """add_only mode must NOT overwrite an existing entry — protects
+        local edits when reimporting a shared zip. The skipped entry's
+        in-library text/notes/etc. stay intact."""
+        loras_json = json.dumps([{"name": "a.safetensors", "strength_model": 1.0}])
+        body = json.loads(asyncio.run(self.mod.upsert_prompt(FakeRequest(post_data={
+            "name": "shared", "text": "v1", "loras": loras_json,
+        }))).body)
+        pid = body["id"]
+
+        export_resp = asyncio.run(self.mod.export_zip(
+            FakeRequest(json_data={"ids": [pid]})))
+        zip_bytes = export_resp.body
+
+        # Mutate locally — different text, no loras.
+        asyncio.run(self.mod.upsert_prompt(FakeRequest(post_data={
+            "id": pid, "name": "shared", "text": "v2 (local edit)",
+            "loras": "[]",
+        })))
+
+        added, updated, skipped, errors = self.mod._import_zip(zip_bytes, mode="add_only")
+        self.assertEqual(skipped, 1)
+        self.assertEqual(added, 0)
+        items = self.mod._load()
+        self.assertEqual(items[0]["text"], "v2 (local edit)")
+        self.assertEqual(items[0].get("loras", []), [])
+
+    # ---- import_backgrounds + import_tag_packs routes ------------------
+
+    def test_import_backgrounds_route_creates_entries(self):
+        """import_backgrounds walks the BG_PRESETS list (excluding the
+        '(none)' sentinel + the divider rows) and seeds the library."""
+        before = len(self.mod._load())
+        resp = asyncio.run(self.mod.import_backgrounds_route(FakeRequest()))
+        body = json.loads(resp.body)
+        self.assertEqual(resp.status, 200)
+        self.assertGreater(body["added"], 0)
+        items = self.mod._load()
+        self.assertEqual(len(items) - before, body["added"])
+        # Every imported entry has the 'location' tag.
+        for entry in items[before:]:
+            self.assertIn("location", entry["tags"])
+
+    def test_import_backgrounds_route_idempotent_without_refresh(self):
+        """Re-running with refresh_existing=False should report all skipped
+        instead of duplicating entries (slug collision protection)."""
+        asyncio.run(self.mod.import_backgrounds_route(FakeRequest()))
+        first_count = len(self.mod._load())
+        resp2 = asyncio.run(self.mod.import_backgrounds_route(
+            FakeRequest(json_data={"refresh_existing": False})))
+        body = json.loads(resp2.body)
+        self.assertEqual(body["added"], 0)
+        self.assertGreater(body["skipped"], 0)
+        self.assertEqual(len(self.mod._load()), first_count)
+
+    def test_import_tag_packs_rejects_non_zip(self):
+        """Sanity-check the basic error path for the route — passing a
+        non-zip body returns the underlying _import_tag_pack_zip error
+        without crashing."""
+        # No file field at all.
+        resp = asyncio.run(self.mod.import_tag_packs_route(FakeRequest()))
+        body = json.loads(resp.body)
+        self.assertEqual(resp.status, 400)
+        self.assertIn("error", body)
+
     # ---- watcher (smoke) -----------------------------------------------
 
     def test_watcher_starts_when_invoked(self):

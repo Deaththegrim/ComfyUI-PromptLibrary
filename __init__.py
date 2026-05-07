@@ -2212,6 +2212,11 @@ def _import_zip(zip_bytes: bytes, *, mode: str = "add_only") -> tuple[int, int, 
                         pass
                 if "notes" in raw:
                     existing["notes"] = str(raw.get("notes") or "")
+                # The negative field was silently dropped on import in versions
+                # prior to v0.40.1 — exports carried it but the import path
+                # didn't read it back, leaking data on every round-trip.
+                if "negative" in raw:
+                    existing["negative"] = str(raw.get("negative") or "")
                 if incoming_loras is not None:
                     existing["loras"] = incoming_loras
                 if history is not None and not created:
@@ -2825,7 +2830,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.40.1"
+__version__ = "0.40.2"
 
 
 def _autobackup_on_version_change() -> None:
