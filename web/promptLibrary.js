@@ -998,9 +998,9 @@ function buildLoraSection(initialLoras) {
   };
 }
 
-function openPromptModal({ existing, onSave, onDelete }) {
+function openPromptModal({ existing, onSave, onDelete, nameExists }) {
   try {
-    return _openPromptModalInner({ existing, onSave, onDelete });
+    return _openPromptModalInner({ existing, onSave, onDelete, nameExists });
   } catch (e) {
     // The modal builder constructs hundreds of DOM nodes synchronously and
     // attaches a half-dozen event listeners. A throw mid-construction would
@@ -1014,7 +1014,7 @@ function openPromptModal({ existing, onSave, onDelete }) {
   }
 }
 
-function _openPromptModalInner({ existing, onSave, onDelete }) {
+function _openPromptModalInner({ existing, onSave, onDelete, nameExists }) {
   const modal = document.createElement("div");
   modal.className = "pl-modal";
 
@@ -1318,6 +1318,20 @@ function _openPromptModalInner({ existing, onSave, onDelete }) {
       status.textContent = "id must be A-Z, 0-9, _ or - (max 64)";
       status.classList.add("error");
       return;
+    }
+    // Duplicate-name guard for the +Add path. The backend's _unique_id
+    // silently appends '_2', '_3', ... when the slug collides — that's
+    // how users end up with multiple entries sharing a name without
+    // realising it. When opening this modal in Add-new mode (no
+    // existing entry passed in), check the gallery for a name match
+    // first and ask before creating the duplicate. Edit mode (existing
+    // ≠ null) bypasses the check — those saves target a known id.
+    if (!existing && typeof nameExists === "function" && nameExists(name)) {
+      const ok = await confirmDestructive(
+        `An entry named "${name}" already exists. Save anyway as a new ` +
+        `(auto-numbered) entry, or cancel and edit the existing one?`,
+        { confirmLabel: "Save as new" });
+      if (!ok) return;
     }
     saveBtn.disabled = true;
     status.classList.remove("error");
@@ -1983,6 +1997,11 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       syncWidget();
       await refresh();
     },
+    // Tells the modal to warn before saving a name that collides with
+    // an existing entry. Case-insensitive match — 'Foo' and 'foo' get
+    // the same auto-id so they collide regardless of case.
+    nameExists: (n) => prompts.some(
+      p => (p.name || "").toLowerCase() === n.toLowerCase()),
   });
 
   const _openTileContextMenu = (e, p) => {

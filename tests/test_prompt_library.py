@@ -1872,6 +1872,38 @@ class PromptLibraryTests(unittest.TestCase):
 
     # ---- Save node loras_json ------------------------------------------
 
+    def test_save_overwrite_by_name_picks_most_recently_updated(self):
+        """When multiple entries share a name, overwrite_by_name should
+        target the most-recently-updated one — not the first by storage
+        order. Picking-the-oldest was confusing when users expected
+        'the one I last edited' semantics."""
+        # Seed two entries with the same name, different updated_at.
+        self.mod._save([
+            {"id": "old_dup", "name": "Foo", "text": "old version",
+             "tags": [], "updated_at": 100.0},
+            {"id": "new_dup", "name": "Foo", "text": "newer version",
+             "tags": [], "updated_at": 999.0},
+        ])
+        node = self.mod.PromptLibrarySave()
+        text_out, eid = node.save(name="Foo", text="updated body",
+                                    overwrite_by_name=True)
+        # Should have updated the newer one, not the older.
+        self.assertEqual(eid, "new_dup")
+        items = {i["id"]: i for i in self.mod._load()}
+        self.assertEqual(items["new_dup"]["text"], "updated body")
+        self.assertEqual(items["old_dup"]["text"], "old version")  # untouched
+
+    def test_save_overwrite_by_name_creates_when_no_match(self):
+        """overwrite_by_name with no existing entry of that name still
+        creates a new entry — no behaviour change from before."""
+        node = self.mod.PromptLibrarySave()
+        text_out, eid = node.save(name="Brand new", text="hi",
+                                    overwrite_by_name=True)
+        self.assertTrue(eid)
+        items = self.mod._load()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["name"], "Brand new")
+
     def test_save_node_persists_loras_json(self):
         """PromptLibrarySave grew a loras_json input — when set, the saved
         entry carries the LoRA stack just as if it had been edited via

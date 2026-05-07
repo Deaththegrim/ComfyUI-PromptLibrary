@@ -945,10 +945,22 @@ class PromptLibrarySave:
         with _lock:
             items = _load()
             existing = None
+            match_path = "new"
             if prompt_id:
                 existing = next((i for i in items if i.get("id") == prompt_id), None)
+                match_path = "prompt_id" if existing else "new (id miss)"
             elif overwrite_by_name:
-                existing = next((i for i in items if i.get("name") == name), None)
+                # Prefer the most-recently-updated entry when multiple share the
+                # same name. The previous code returned the first match by
+                # on-disk insertion order, which silently always-targets the
+                # OLDEST duplicate — surprising when a user expects "the one I
+                # was just editing" semantics. Picking by updated_at matches
+                # the human intent and is stable when no dupes exist.
+                matches = [i for i in items if i.get("name") == name]
+                if matches:
+                    existing = max(matches, key=lambda i: i.get("updated_at", 0))
+                    match_path = (f"overwrite_by_name (1 of {len(matches)} matches"
+                                   if len(matches) > 1 else "overwrite_by_name")
 
             created = existing is None
             if created:
@@ -980,7 +992,11 @@ class PromptLibrarySave:
             saved_id = existing["id"]
 
         _notify_change()
-        print(f"[PromptLibrary] saved id={saved_id!r} name={name!r} tags={parsed_tags}")
+        # Log which lookup path was taken so a sticky prompt_id widget or an
+        # ambiguous overwrite_by_name match can be diagnosed from the console
+        # without rebuilding the workflow.
+        print(f"[PromptLibrary] saved id={saved_id!r} name={name!r} "
+              f"via={match_path} tags={parsed_tags}")
         return (text or "", saved_id)
 
 
@@ -3006,7 +3022,7 @@ async def fix_orphans(request):
     return web.json_response({"removed": removed, "errors": errors})
 
 
-__version__ = "0.46.0"
+__version__ = "0.46.1"
 
 
 def _autobackup_on_version_change() -> None:
