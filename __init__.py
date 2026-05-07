@@ -493,13 +493,23 @@ def _start_watcher() -> None:
         global _last_known_mtime
         while True:
             time.sleep(2)
+            # Two-layer guard: the inner try/except OSError handles the
+            # narrow stat-failure case (storage unmounted, file replaced
+            # between exists() and stat()); the outer try/except Exception
+            # is the survival net so a future bug in _notify_change (e.g.
+            # a websocket exception) doesn't silently kill the thread and
+            # break the gallery's auto-refresh feature for the rest of
+            # the Comfy session.
             try:
-                mtime = STORE_PATH.stat().st_mtime if STORE_PATH.exists() else 0.0
-            except OSError:
-                continue
-            if mtime != _last_known_mtime:
-                _last_known_mtime = mtime
-                _notify_change()
+                try:
+                    mtime = STORE_PATH.stat().st_mtime if STORE_PATH.exists() else 0.0
+                except OSError:
+                    continue
+                if mtime != _last_known_mtime:
+                    _last_known_mtime = mtime
+                    _notify_change()
+            except Exception as e:
+                print(f"[PromptLibrary] watcher iteration failed: {e!r}; continuing")
 
     t = threading.Thread(target=loop, daemon=True, name="prompt-library-watcher")
     t.start()
@@ -1063,7 +1073,17 @@ class PromptLibraryRandom:
 
     @classmethod
     def IS_CHANGED(cls, tag_filter, seed, expand_wildcards=True):
-        return f"{seed}|{tag_filter}|{expand_wildcards}"
+        # Hash the prompts.json mtime into the cache key so that editing a
+        # tag-matched entry mid-session invalidates the cached pick. Without
+        # this, a fixed-seed Random by Tag run would keep emitting the
+        # stale text from a previous render even after the user updated
+        # the entry. control_after_generate=randomize already invalidates
+        # via the seed bump, but interactive workflows benefit too.
+        try:
+            mtime = STORE_PATH.stat().st_mtime if STORE_PATH.exists() else 0.0
+        except OSError:
+            mtime = 0.0
+        return f"{seed}|{tag_filter}|{expand_wildcards}|{mtime}"
 
     def pick(self, tag_filter, seed, expand_wildcards=True):
         wanted = _parse_tags(tag_filter)
@@ -2838,7 +2858,7 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.42.0"
+__version__ = "0.42.1"
 
 
 def _autobackup_on_version_change() -> None:

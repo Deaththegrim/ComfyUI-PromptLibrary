@@ -47,6 +47,26 @@ def _slugify(name: str) -> str:
     return out.strip("_")[:64] or "lora"
 
 
+def _comfy_base_url() -> str:
+    """Resolve the running ComfyUI server's base URL. Reads address +
+    port from PromptServer.instance.server.address / port when available
+    (works regardless of the user's --port / --listen flags); falls back
+    to the historical 127.0.0.1:8188 when running outside Comfy
+    (smoke-test scripts, etc.)."""
+    try:
+        from server import PromptServer  # type: ignore
+        srv = getattr(getattr(PromptServer, "instance", None), "server", None)
+        host = getattr(srv, "address", None) or "127.0.0.1"
+        port = getattr(srv, "port", None) or 8188
+        # 0.0.0.0 means "all interfaces" — connect via loopback for the
+        # in-process callback.
+        if host in ("0.0.0.0", "::", ""):
+            host = "127.0.0.1"
+        return f"http://{host}:{port}"
+    except Exception:
+        return "http://127.0.0.1:8188"
+
+
 def _save_to_library(*, name: str, text: str, extra_tags: str, notes: str) -> str:
     """POST the entry to the running ComfyUI's library route. Best-effort —
     catches exceptions so a transient HTTP failure doesn't break the
@@ -62,7 +82,7 @@ def _save_to_library(*, name: str, text: str, extra_tags: str, notes: str) -> st
     })
     try:
         req = urllib.request.Request(
-            "http://127.0.0.1:8188/prompt_library/upsert",
+            f"{_comfy_base_url()}/prompt_library/upsert",
             data=body, headers={"Content-Type": content_type})
         with urllib.request.urlopen(req, timeout=5) as r:
             import json
