@@ -4,6 +4,10 @@ These tests cover the pure-Python pieces (helpers + bypass / no-detector
 control flow). The full YOLO+sampler integration is verified by running it
 inside ComfyUI; mocking the entire model_patcher / common_ksampler stack is
 out of scope for these unit tests.
+
+Skipped when torch isn't installed (e.g. CI's stdlib-only runner). The
+detailer module itself imports torch at load, so we have to bail at the
+module level rather than per-test.
 """
 from __future__ import annotations
 
@@ -11,7 +15,9 @@ import sys
 import unittest
 from pathlib import Path
 
-import torch
+import pytest
+
+torch = pytest.importorskip("torch", reason="torch needed for Smart Detailer tests")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import detailer_node  # noqa: E402

@@ -46,7 +46,6 @@ import torch.nn.functional as F
 # all resolve through ComfyUI core modules that are guaranteed loaded by the
 # time our INPUT_TYPES is queried — no need for the lazy-import dance the
 # Impact Pack wrapper used to do.
-_NODES_MOD: Any = None
 _CLIP_TEXT_ENCODE = None
 _COND_CONCAT = None
 _COMMON_KSAMPLER = None
@@ -57,12 +56,11 @@ def _resolve_comfy_helpers() -> None:
     """Resolve the comfy/nodes singletons we use in hot paths. Called once
     lazily because at module-import time ComfyUI's `nodes` module isn't
     fully populated yet (load order)."""
-    global _NODES_MOD, _CLIP_TEXT_ENCODE, _COND_CONCAT, _COMMON_KSAMPLER, _PROGRESS_BAR_CLS
+    global _CLIP_TEXT_ENCODE, _COND_CONCAT, _COMMON_KSAMPLER, _PROGRESS_BAR_CLS
     if _COMMON_KSAMPLER is not None:
         return
     try:
         import nodes as _n
-        _NODES_MOD = _n
         _COMMON_KSAMPLER = _n.common_ksampler
         _CLIP_TEXT_ENCODE = _n.CLIPTextEncode()
         _COND_CONCAT = _n.ConditioningConcat()
