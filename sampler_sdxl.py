@@ -242,6 +242,25 @@ def _load_checkpoint(ckpt_name: str):
     return out[:3]  # (model, clip, vae)
 
 
+# 1-slot LRU for the hires checkpoint swap. Comfy doesn't cache checkpoint
+# loads at the workflow-execution level (each call to load_checkpoint_guess_config
+# re-reads the safetensors header), so re-running a workflow that swaps in
+# a different model for hires would pay disk + state-dict cost every time.
+# A single-entry cache holds the most recent hires ckpt resident; swapping
+# to a different one evicts the previous (checkpoints are 5-15 GB each, we
+# can't keep multiple alive without OOM).
+_HIRES_CKPT_CACHE: tuple[str, tuple] | None = None
+
+
+def _load_checkpoint_cached(ckpt_name: str):
+    global _HIRES_CKPT_CACHE
+    if _HIRES_CKPT_CACHE is not None and _HIRES_CKPT_CACHE[0] == ckpt_name:
+        return _HIRES_CKPT_CACHE[1]
+    out = _load_checkpoint(ckpt_name)
+    _HIRES_CKPT_CACHE = (ckpt_name, out)
+    return out
+
+
 def _load_controlnet(name: str):
     """Mirror nodes.ControlNetLoader.load_controlnet."""
     return comfy.sd.load_controlnet(folder_paths.get_full_path_or_raise("controlnet", name))
@@ -460,44 +479,51 @@ class GrimmRibbityHiResFixScript:
 def _hires_one_iteration(*, model, clip, vae, positive, negative, latent,
                           per_scale: float, mode: str,
                           script: dict, sampler_name: str, scheduler: str,
-                          seed: int):
+                          seed: int, upscale_model=None):
     """Run one upscale+sample iteration of HiResFix. mode is 'latent', 'pixel',
-    or one of the half-passes for 'both' ('both_latent' / 'both_pixel')."""
+    or one of the half-passes for 'both' ('both_latent' / 'both_pixel'). The
+    pixel upscale model is loaded once by the caller and passed in via
+    upscale_model — saves loading the same .pth file N times across iterations."""
     if mode in ("latent", "both_latent"):
         cur = _latent_upscale_by(latent, per_scale, script["latent_upscaler"])
     else:  # pixel or both_pixel
+        if upscale_model is None:
+            # Defensive — the caller should have loaded it. Fall back to load.
+            upscale_model = _load_upscale_model(script["pixel_upscaler"])
         decoded = _vae_decode(vae, latent, mode="true")
-        upscale_model = _load_upscale_model(script["pixel_upscaler"])
         upscaled = _pixel_upscale_with_model(decoded, upscale_model)
         target_w = round(decoded.shape[-2] * per_scale)
         target_h = round(decoded.shape[-3] * per_scale)
         upscaled = _resample_to(upscaled, target_w, target_h)
         cur = _vae_encode(vae, upscaled.clamp(0, 1))
 
-    # Re-encode prompts at the new size.
+    # Per-field re-encode: positive and negative are independent. Within
+    # the positive pair, an empty override mirrors the other side (so
+    # setting just G or just L gives a usable single-text encode rather
+    # than reusing the original conditioning wholesale and dropping the
+    # user's edit silently — the previous all-or-nothing behaviour).
     cur_w = cur["samples"].shape[-1] * 8
     cur_h = cur["samples"].shape[-2] * 8
-    if script["positive_g_override"].strip() or script["positive_l_override"].strip() or \
-       script["negative_override"].strip():
-        new_g = script["positive_g_override"].strip() or "(reuse)"
-        new_l = script["positive_l_override"].strip() or "(reuse)"
-        new_neg = script["negative_override"].strip() or "(reuse)"
-        # If any override is set, fully re-encode with whatever is supplied.
-        # When marked '(reuse)' we have no source text in this scope (since
-        # the sampler dropped its prompt fields); skip re-encode in that case
-        # and just reuse the primary's CONDITIONING wholesale.
-        if "(reuse)" in (new_g, new_l, new_neg):
-            pos = positive
-            neg = negative
-        else:
-            pos = _encode_sdxl(clip, new_g, new_l,
-                                width=cur_w, height=cur_h,
-                                target_width=cur_w, target_height=cur_h)
-            neg = _encode_sdxl(clip, new_neg, new_neg,
-                                width=cur_w, height=cur_h,
-                                target_width=cur_w, target_height=cur_h)
+    pos_g = script["positive_g_override"].strip()
+    pos_l = script["positive_l_override"].strip()
+    neg_text = script["negative_override"].strip()
+
+    if pos_g or pos_l:
+        if not pos_g:
+            pos_g = pos_l
+        if not pos_l:
+            pos_l = pos_g
+        pos = _encode_sdxl(clip, pos_g, pos_l,
+                            width=cur_w, height=cur_h,
+                            target_width=cur_w, target_height=cur_h)
     else:
         pos = positive
+
+    if neg_text:
+        neg = _encode_sdxl(clip, neg_text, neg_text,
+                            width=cur_w, height=cur_h,
+                            target_width=cur_w, target_height=cur_h)
+    else:
         neg = negative
 
     # ControlNet apply if enabled.
@@ -521,18 +547,31 @@ def _hires_one_iteration(*, model, clip, vae, positive, negative, latent,
 def _apply_hires_fix(script: dict, *,
                      model, clip, vae, positive, negative, latent,
                      primary_seed: int,
-                     primary_sampler_name: str, primary_scheduler: str):
-    """Top-level HiResFix dispatcher. Returns (latent, image)."""
+                     primary_sampler_name: str, primary_scheduler: str,
+                     vae_decode_mode: str = "true"):
+    """Top-level HiResFix dispatcher. Returns (latent, image). The pixel
+    upscale model is loaded ONCE up front (was previously re-loaded inside
+    every iteration); the hires checkpoint is served from a 1-slot LRU so
+    re-running the same workflow doesn't re-read the safetensors header.
+    The caller-supplied vae_decode_mode lets the sampler honour 'true (tiled)'
+    / 'false' through HiResFix the same way it does without a script."""
     iterations = script["iterations"]
     upscale_type = script["upscale_type"]
     total_scale = script["upscale_by"]
 
-    # Optional checkpoint swap for hires.
+    # Optional checkpoint swap for hires — cached so the same workflow re-running
+    # doesn't pay the full disk + state-dict load each time.
     if script["hires_ckpt_name"] != "(use same)":
-        h_model, h_clip, h_vae = _load_checkpoint(script["hires_ckpt_name"])
-        sampling_model, sampling_clip, sampling_vae = h_model, h_clip, h_vae
+        sampling_model, sampling_clip, sampling_vae = _load_checkpoint_cached(
+            script["hires_ckpt_name"])
     else:
         sampling_model, sampling_clip, sampling_vae = model, clip, vae
+
+    # Load the pixel upscale model once if any iteration will need it. For
+    # iterations=5 + mode=pixel/both this saves 4 redundant disk reads.
+    upscale_model = None
+    if upscale_type in ("pixel", "both"):
+        upscale_model = _load_upscale_model(script["pixel_upscaler"])
 
     base_seed = primary_seed if script["use_same_seed"] else script["seed"]
     cur = latent
@@ -550,7 +589,7 @@ def _apply_hires_fix(script: dict, *,
                     positive=positive, negative=negative, latent=cur,
                     per_scale=per_iter, mode=stage_mode, script=script,
                     sampler_name=primary_sampler_name, scheduler=primary_scheduler,
-                    seed=seed,
+                    seed=seed, upscale_model=upscale_model,
                 )
     else:
         per_iter = total_scale ** (1.0 / iterations) if iterations > 1 else total_scale
@@ -560,10 +599,10 @@ def _apply_hires_fix(script: dict, *,
                 positive=positive, negative=negative, latent=cur,
                 per_scale=per_iter, mode=upscale_type, script=script,
                 sampler_name=primary_sampler_name, scheduler=primary_scheduler,
-                seed=base_seed + i,
+                seed=base_seed + i, upscale_model=upscale_model,
             )
 
-    final_image = _vae_decode(sampling_vae, cur, mode="true")
+    final_image = _vae_decode(sampling_vae, cur, mode=vae_decode_mode)
     return cur, final_image
 
 
@@ -643,6 +682,11 @@ class GrimmRibbitySamplerSDXL:
                     "tooltip": "JSONL log file. Empty = <output>/prompt_logs/prompts.jsonl. "
                                "Relative paths root at the ComfyUI output dir; absolute paths "
                                "honoured verbatim."}),
+                "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Primary denoise. 1.0 = full txt2img. Lower = preserve a wired "
+                               "latent (img2img). Multiplied by start/end_at_step's effective "
+                               "range — typical img2img usage is to wire a real latent and set "
+                               "denoise<1.0 while leaving start/end_at_step at their defaults."}),
             },
             "hidden": {
                 "prompt_trace": "PROMPT",
@@ -668,15 +712,17 @@ class GrimmRibbitySamplerSDXL:
     def sample(self, sdxl_tuple, noise_seed, steps, cfg, sampler_name, scheduler,
                latent_image, start_at_step, end_at_step, vae_decode,
                script=None, optional_vae=None,
-               save_prompt_log=False, prompt_log_path="",
+               save_prompt_log=False, prompt_log_path="", denoise=1.0,
                prompt_trace=None, **legacy_kwargs):
         # Backward-compat shim: workflows saved against v0.21.0 wire ports
         # named differently (e.g. vae_override). Drain them here so the
         # workflow keeps loading instead of crashing on an unexpected kwarg.
+        # 'denoise' is no longer in this list — v0.33+ exposes it as a real
+        # input again so img2img works.
         if optional_vae is None and legacy_kwargs.get("vae_override") is not None:
             optional_vae = legacy_kwargs.pop("vae_override")
         for stale in ("ckpt_name", "positive_g", "positive_l", "negative",
-                       "width", "height", "denoise", "batch_size", "vae_override"):
+                       "width", "height", "batch_size", "vae_override"):
             legacy_kwargs.pop(stale, None)
         if legacy_kwargs:
             print(f"[GrimmRibbitySamplerSDXL] ignoring unknown legacy inputs: "
@@ -700,7 +746,7 @@ class GrimmRibbitySamplerSDXL:
         last_step = end_at_step if end_at_step < 10000 else None
         primary_latent_tuple = nodes.common_ksampler(
             base_model, noise_seed, steps, cfg, sampler_name, scheduler,
-            positive_cond, negative_cond, latent_image, denoise=1.0,
+            positive_cond, negative_cond, latent_image, denoise=float(denoise),
             start_step=start_step, last_step=last_step,
         )
         latent_out = primary_latent_tuple[0]
@@ -714,6 +760,7 @@ class GrimmRibbitySamplerSDXL:
                     latent=latent_out, primary_seed=noise_seed,
                     primary_sampler_name=sampler_name,
                     primary_scheduler=scheduler,
+                    vae_decode_mode=vae_decode,
                 )
             else:
                 print(f"[GrimmRibbitySamplerSDXL] unknown script kind {kind!r}; skipped")
