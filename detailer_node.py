@@ -877,11 +877,12 @@ class GrimmRibbitySmartDetailer:
                     "Seed for the sampling passes. Per-target seed is seed + (target_index * "
                     "1000) so the four passes don't share noise. Keeping this fixed across runs "
                     "gives reproducible detail."}),
-                "steps": ("INT", {"default": 20, "min": 1, "max": 200, "tooltip":
-                    "Sample steps per detection per target. 20 is a good baseline. More steps "
-                    "= slightly cleaner detail at proportional time cost. With low denoise "
-                    "(0.3-0.4) the effective sample budget is steps * denoise, so stepping up "
-                    "from 20 to 40 only meaningfully changes things if denoise is also high."}),
+                "steps": ("INT", {"default": 25, "min": 1, "max": 200, "tooltip":
+                    "Sample steps per detection per target. 25 is the quality default — clean "
+                    "detail without runaway time cost. Drop to 15-20 for speed-sensitive batches; "
+                    "push to 30+ for hero portraits. With low denoise (0.3-0.4) the effective "
+                    "sample budget is steps * denoise, so stepping up only meaningfully changes "
+                    "things if denoise is also high."}),
                 "cfg": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 30.0, "step": 0.1,
                     "tooltip":
                     "CFG scale for the sample passes. 5-7 is the SDXL detailer sweet spot; "
@@ -900,31 +901,31 @@ class GrimmRibbitySmartDetailer:
                     "go-to combo. exponential / sgm_uniform also work; simple is too coarse "
                     "at 20 steps."}),
 
-                "denoise": ("FLOAT", {"default": 0.40, "min": 0.01, "max": 1.0, "step": 0.01,
+                "denoise": ("FLOAT", {"default": 0.45, "min": 0.01, "max": 1.0, "step": 0.01,
                     "tooltip":
                     "Global denoise applied to the inpainting passes. Per-target presets "
                     "ride on top: face/eyes use this value directly, hands run +0.05, skin runs "
                     "-0.10. Higher = more aggressive redraw (can change identity); lower = more "
-                    "conservative (preserves likeness). 0.35-0.45 is the safe range. Per-target "
-                    "*_denoise overrides win when set."}),
-                "guide_size": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 8,
+                    "conservative (preserves likeness). 0.45 is the quality default — enough "
+                    "detail without identity drift. Per-target *_denoise overrides win when set."}),
+                "guide_size": ("INT", {"default": 1024, "min": 64, "max": 4096, "step": 8,
                     "tooltip":
                     "Target short-edge size (px) the cropped region is upscaled to before "
-                    "sampling. 512 = SD1.5-native, 1024 = SDXL-native — match your model's "
-                    "training resolution. Smaller = faster but less detail; larger = sharper "
-                    "but more VRAM and may exceed your VAE's safe range."}),
-                "max_size":   ("INT", {"default": 1024, "min": 64, "max": 4096, "step": 8,
+                    "sampling. 1024 = SDXL-native (default — sharper detail, recommended). "
+                    "Drop to 512 for SD1.5-native models, or to save VRAM at speed cost. "
+                    "Larger = sharper but more VRAM and may exceed your VAE's safe range."}),
+                "max_size":   ("INT", {"default": 1536, "min": 64, "max": 4096, "step": 8,
                     "tooltip":
                     "Hard cap on the longer-edge after guide-size scaling, to stop very wide "
                     "crops from blowing up. If the upscaled crop would exceed this, the scale "
-                    "is reduced so longest edge = max_size. 1024-1536 is sane for SDXL."}),
-                "bbox_threshold": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "is reduced so longest edge = max_size. 1536 lets SDXL-native crops breathe; "
+                    "drop to 1024 if you hit VRAM walls."}),
+                "bbox_threshold": ("FLOAT", {"default": 0.45, "min": 0.0, "max": 1.0, "step": 0.01,
                     "tooltip":
                     "Global YOLO confidence threshold — detections below this score are "
-                    "ignored. 0.5 is a balanced default. Drop to 0.3 if a partial/turned face "
-                    "isn't being caught; raise to 0.7 if false positives keep showing up. "
-                    "Per-target *_threshold overrides win when set (eye detectors often need "
-                    "0.3-0.4 to catch closed eyes)."}),
+                    "ignored. 0.45 is the quality default — catches partial / off-angle faces "
+                    "without too many false positives. Drop to 0.3 to be more inclusive; raise "
+                    "to 0.6+ for clean shots only. Per-target *_threshold overrides win when set."}),
                 "max_per_target": ("INT", {"default": 0, "min": 0, "max": 64, "tooltip":
                     "Global cap on detections per target. 0 = unlimited (every YOLO hit gets "
                     "sampled). 1 = portrait mode — only the highest-confidence detection runs, "
@@ -997,13 +998,13 @@ class GrimmRibbitySmartDetailer:
                     "overlapping bboxes for the same face, only one survives. Higher (0.7) = "
                     "more lenient — keeps near-duplicates separate, useful for tight close-ups "
                     "where hand/face bboxes naturally overlap."}),
-                "yolo_imgsz": ("INT", {"default": 640, "min": 320, "max": 1280, "step": 32,
+                "yolo_imgsz": ("INT", {"default": 960, "min": 320, "max": 1280, "step": 32,
                     "tooltip":
-                    "Resolution YOLO downsamples the input to before detection. 640 is the "
-                    "model's training resolution and the speed-quality default. Bump to 960 / "
-                    "1280 to catch SMALL faces in wide shots (background characters, group "
-                    "scenes) at ~2-3x detection cost. Drop to 416 for low-res anime where the "
-                    "face takes most of the frame and 640 is wasted budget."}),
+                    "Resolution YOLO downsamples the input to before detection. 960 is the "
+                    "quality default — catches small/background faces well at modest detection "
+                    "cost. Drop to 640 (the YOLO training default) for speed; bump to 1280 for "
+                    "the largest crowd / wide-shot detection. Drop to 416 for low-res anime "
+                    "where the face takes most of the frame."}),
                 "max_bbox_area_pct": ("FLOAT", {"default": 0.95, "min": 0.10, "max": 1.0, "step": 0.05,
                     "tooltip":
                     "Sanity cap on bbox size as fraction of image area. Detections covering "

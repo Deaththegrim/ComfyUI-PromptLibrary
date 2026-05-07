@@ -317,6 +317,33 @@ const CSS = `
 .pl-history-body strong { color: #fff; display: block; margin-bottom: 2px; }
 .pl-history-tags { color: #6cf; font-size: 10px; margin-top: 2px; }
 .pl-history-row button { font-size: 10px; padding: 2px 6px; }
+
+/* Smart Detailer per-target grid — 4 columns (face/eyes/hands/skin) ×
+   N rows (enable / threshold / denoise / max / steps). Replaces the
+   ugly long stack of 16+4 hidden widgets with a compact grid. */
+.pl-det-grid { display: grid; grid-template-columns: 78px 1fr 1fr 1fr 1fr;
+  gap: 4px; padding: 8px 6px; background: #1a1a1a; border-radius: 4px;
+  font-size: 11px; box-sizing: border-box; }
+.pl-det-corner { background: transparent; }
+.pl-det-h { font-weight: 700; text-align: center; padding: 5px 0;
+  border-radius: 3px; color: #000; letter-spacing: 0.5px;
+  font-size: 11px; text-transform: uppercase; }
+.pl-det-h.face  { background: #4cd866; }
+.pl-det-h.skin  { background: #f1e64c; }
+.pl-det-h.eyes  { background: #4cd8f1; }
+.pl-det-h.hands { background: #f14cd8; }
+.pl-det-l { color: #aaa; align-self: center; padding-right: 6px;
+  text-align: right; font-variant-numeric: tabular-nums; }
+.pl-det-i { width: 100%; padding: 3px 4px; box-sizing: border-box;
+  background: #2a2a2a; color: #fff; border: 1px solid #444;
+  border-radius: 2px; text-align: center; font-size: 11px;
+  font-family: inherit; }
+.pl-det-i:hover { border-color: #666; }
+.pl-det-i:focus { border-color: var(--pl-accent); outline: none;
+  background: var(--pl-bg-input); }
+.pl-det-i.dim { color: #888; font-style: italic; }
+.pl-det-toggle { width: 16px; height: 16px; accent-color: #d8754a;
+  margin: 0 auto; display: block; cursor: pointer; }
 `;
 
 function injectStyle() {
@@ -3179,6 +3206,160 @@ function registerComicFrameNode(nodeType) {
   };
 }
 
+// -----------------------------------------------------------------------------
+// Smart Detailer per-target grid — replaces the long stack of 16+4 hidden
+// widgets (enable/threshold/denoise/max/steps × face/eyes/hands/skin) with a
+// compact 5-column grid: 1 row-label column + 4 target columns. The
+// underlying widgets stay in `node.widgets` (so workflow JSON serialises
+// correctly) but get hidden behind the DOM grid; reads + writes go through
+// each cell input -> the underlying widget's .value setter.
+// -----------------------------------------------------------------------------
+const SMART_DETAILER_NAME = "GrimmRibbitySmartDetailer";
+
+function _buildSmartDetailerGrid(node) {
+  const TARGETS = ["face", "eyes", "hands", "skin"];
+  const ROWS = [
+    { key: "enable",    label: "enable",    pat: "enable_X",     kind: "bool" },
+    { key: "threshold", label: "threshold", pat: "X_threshold", kind: "float", step: 0.01, min: -1, max: 1 },
+    { key: "denoise",   label: "denoise",   pat: "X_denoise",   kind: "float", step: 0.01, min: -1, max: 1 },
+    { key: "max",       label: "max N",     pat: "X_max",       kind: "int",   step: 1, min: 0, max: 64 },
+    { key: "steps",     label: "steps",     pat: "X_steps",     kind: "int",   step: 1, min: 0, max: 200 },
+  ];
+
+  const widgetsByName = {};
+  for (const w of node.widgets || []) widgetsByName[w.name] = w;
+
+  const grid = document.createElement("div");
+  grid.className = "pl-det-grid";
+
+  // Header row: empty corner + 4 target labels.
+  const corner = document.createElement("div");
+  corner.className = "pl-det-corner";
+  grid.appendChild(corner);
+  for (const t of TARGETS) {
+    const h = document.createElement("div");
+    h.className = `pl-det-h ${t}`;
+    h.textContent = t;
+    grid.appendChild(h);
+  }
+
+  // Track every input for onConfigure resync — workflow loads call setValue
+  // on the underlying widgets; we need to refresh the grid from those values.
+  const cells = [];
+
+  for (const row of ROWS) {
+    const lbl = document.createElement("div");
+    lbl.className = "pl-det-l";
+    lbl.textContent = row.label;
+    grid.appendChild(lbl);
+
+    for (const t of TARGETS) {
+      const wname = row.pat.replace("X", t);
+      const w = widgetsByName[wname];
+      if (!w) {
+        // Missing widget — render an empty placeholder so the grid stays aligned.
+        grid.appendChild(document.createElement("div"));
+        continue;
+      }
+
+      // Hide the underlying widget but keep its value live for serialisation.
+      w.hidden = true;
+      w.computeSize = () => [0, -4];
+      w.draw = () => {};
+
+      const input = document.createElement("input");
+      if (row.kind === "bool") {
+        input.type = "checkbox";
+        input.className = "pl-det-toggle";
+        input.checked = !!w.value;
+        input.addEventListener("change", () => {
+          w.value = input.checked;
+          node.setDirtyCanvas?.(true, true);
+        });
+      } else {
+        input.type = "number";
+        input.className = "pl-det-i";
+        input.step = String(row.step);
+        if (typeof row.min === "number") input.min = String(row.min);
+        if (typeof row.max === "number") input.max = String(row.max);
+        const writeVal = () => {
+          const raw = input.value;
+          if (raw === "" || raw === null) return;
+          const v = row.kind === "int" ? parseInt(raw, 10) : parseFloat(raw);
+          if (!isNaN(v)) {
+            w.value = v;
+            node.setDirtyCanvas?.(true, true);
+            // Visually dim "use global" sentinel values (-1 for floats, 0 for max/steps).
+            const dim = (row.kind === "float" && v < 0) || (row.kind === "int" && v === 0);
+            input.classList.toggle("dim", dim);
+          }
+        };
+        const refresh = () => {
+          const v = w.value;
+          input.value = (v === undefined || v === null) ? "" : String(v);
+          const dim = (row.kind === "float" && v < 0) || (row.kind === "int" && v === 0);
+          input.classList.toggle("dim", dim);
+        };
+        refresh();
+        input.addEventListener("change", writeVal);
+        input.addEventListener("blur", writeVal);
+        cells.push({ input, refresh });
+      }
+      grid.appendChild(input);
+    }
+  }
+
+  // Boolean toggles also need a refresh hook for onConfigure.
+  for (const w of node.widgets || []) {
+    if (!w.name) continue;
+    if (!w.name.startsWith("enable_")) continue;
+    const target = w.name.slice("enable_".length);
+    if (!TARGETS.includes(target)) continue;
+    // Find the matching checkbox in the grid and add a refresher.
+    const idx = TARGETS.indexOf(target);
+    const checkbox = grid.querySelectorAll(".pl-det-toggle")[idx];
+    if (checkbox) cells.push({
+      input: checkbox,
+      refresh: () => { checkbox.checked = !!w.value; },
+    });
+  }
+
+  return { grid, refresh: () => cells.forEach(c => c.refresh()) };
+}
+
+function registerSmartDetailerNode(nodeType) {
+  const onNodeCreated = nodeType.prototype.onNodeCreated;
+  nodeType.prototype.onNodeCreated = function () {
+    const r = onNodeCreated?.apply(this, arguments);
+    const built = _buildSmartDetailerGrid(this);
+    this.addDOMWidget("per_target_grid", "GrimmRibbitySmartDetailerGrid",
+                       built.grid, {
+      serialize: false,
+      hideOnZoom: false,
+      getMinHeight: () => 200,
+      getValue: () => "",
+      setValue: () => {},
+    });
+    this._smartDetailerRefresh = built.refresh;
+    // Bump default node width so the 5 grid columns fit comfortably.
+    if (Array.isArray(this.size) && this.size[0] < 380) {
+      this.size = [380, this.size[1] || 720];
+      this.setSize?.(this.size);
+    }
+    return r;
+  };
+
+  const onConfigure = nodeType.prototype.onConfigure;
+  nodeType.prototype.onConfigure = function () {
+    const ret = onConfigure?.apply(this, arguments);
+    // Workflow load: underlying widgets just got their saved values; refresh
+    // every cell input so the grid reflects them.
+    this._smartDetailerRefresh?.();
+    return ret;
+  };
+}
+
+
 let _wsListenerInstalled = false;
 function installWebsocketBridge() {
   if (_wsListenerInstalled) return;
@@ -3314,6 +3495,11 @@ app.registerExtension({
     if (nodeData.name === BACKGROUND_NODE_NAME) {
       injectStyle();
       registerBackgroundNode(nodeType);
+      return;
+    }
+    if (nodeData.name === SMART_DETAILER_NAME) {
+      injectStyle();
+      registerSmartDetailerNode(nodeType);
       return;
     }
     if (!GALLERY_NODE_NAMES.has(nodeData.name)) return;
