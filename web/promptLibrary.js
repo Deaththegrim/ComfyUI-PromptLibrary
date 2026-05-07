@@ -1437,7 +1437,11 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   const bulkClearBtn = document.createElement("button");
   bulkClearBtn.className = "pl-btn";
   bulkClearBtn.textContent = "Clear";
-  bulkClearBtn.onclick = () => { checkedIds.clear(); syncWidget(); render(); };
+  bulkClearBtn.onclick = () => {
+    const wereSelected = [...checkedIds];
+    checkedIds.clear();
+    applySelectionChange(wereSelected);
+  };
   const bulkExportBtn = document.createElement("button");
   bulkExportBtn.className = "pl-btn";
   bulkExportBtn.textContent = "Export";
@@ -1459,6 +1463,49 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       bulkBar.style.display = "flex";
       bulkCount.textContent = `${checkedIds.size} selected`;
     }
+  };
+
+  // In-place selection updates — replace the previous "rebuild every tile on
+  // every click" pattern. For a 700-entry library, toggling selection used
+  // to rebuild ~21000 DOM nodes per click; now it just flips classes on the
+  // affected tile(s).
+  //
+  // Trade-off: the "selected tiles bubble to the top" behaviour from
+  // render()'s sort step doesn't fire on a selection-only change, so a
+  // selected tile stays visually in place until the next sort/filter
+  // change. Most workflows click tiles they can already see, so this is
+  // a net win for huge libraries; if it ever feels wrong we can call
+  // render() instead.
+  const _refreshTileSelection = (id) => {
+    const tile = grid.querySelector(`[data-prompt-id="${id}"]`);
+    if (!tile) return;
+    const sel = checkedIds.has(id);
+    tile.classList.toggle("selected", sel);
+    tile.setAttribute("aria-selected", sel ? "true" : "false");
+    const checkbox = tile.querySelector(".pl-tile-check");
+    if (checkbox) checkbox.textContent = sel ? "✓" : "";
+  };
+
+  const _refreshFocusedTile = () => {
+    // Move the .focused class from the previous tile (if any) to the one
+    // at lastVisible[focusedIndex]. Cheap: at most two DOM mutations.
+    for (const t of grid.querySelectorAll(".pl-tile.focused")) {
+      t.classList.remove("focused");
+    }
+    if (focusedIndex >= 0 && focusedIndex < lastVisible.length) {
+      const id = lastVisible[focusedIndex].id;
+      const tile = grid.querySelector(`[data-prompt-id="${id}"]`);
+      tile?.classList.add("focused");
+    }
+  };
+
+  const applySelectionChange = (idsToRefresh) => {
+    syncWidget();
+    if (idsToRefresh && idsToRefresh.length) {
+      for (const id of idsToRefresh) _refreshTileSelection(id);
+    }
+    _refreshFocusedTile();
+    updateBulkBar();
   };
   bulkExportBtn.onclick = withBusy(bulkExportBtn, "Exporting…", async () => {
     const ids = [...checkedIds];
@@ -1753,8 +1800,7 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
         if (checkedIds.has(p.id)) checkedIds.delete(p.id);
         else checkedIds.add(p.id);
         focusedIndex = idx;
-        syncWidget();
-        render();
+        applySelectionChange([p.id]);
       };
       tileImg.appendChild(checkbox);
       if (p.rating) {
@@ -1778,18 +1824,21 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
           const anchor = focusedIndex >= 0 ? focusedIndex : idx;
           const i0 = Math.min(anchor, idx);
           const i1 = Math.max(anchor, idx);
-          for (let i = i0; i <= i1; i++) checkedIds.add(lastVisible[i].id);
+          const affected = [];
+          for (let i = i0; i <= i1; i++) {
+            const rid = lastVisible[i].id;
+            checkedIds.add(rid);
+            affected.push(rid);
+          }
           focusedIndex = idx;
-          syncWidget();
-          render();
+          applySelectionChange(affected);
           return;
         }
         // Plain or Ctrl/Cmd click: toggle this tile's selection.
         if (checkedIds.has(p.id)) checkedIds.delete(p.id);
         else checkedIds.add(p.id);
         focusedIndex = idx;
-        syncWidget();
-        render();
+        applySelectionChange([p.id]);
       };
 
       tile.oncontextmenu = (e) => {
@@ -2156,7 +2205,10 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
     if (!lastVisible.length) return;
     if (focusedIndex < 0) focusedIndex = 0;
     else focusedIndex = Math.max(0, Math.min(lastVisible.length - 1, focusedIndex + delta));
-    render();
+    // Just shift the .focused class to the new tile in place — the previous
+    // path called the full render(), which on a 700-tile library meant
+    // arrow-key navigation rebuilt 700 DOM nodes per keystroke.
+    _refreshFocusedTile();
     const target = grid.querySelectorAll(".pl-tile")[focusedIndex];
     target?.scrollIntoView({ block: "nearest" });
   };
@@ -2181,8 +2233,7 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       if (!p) return;
       if (checkedIds.has(p.id)) checkedIds.delete(p.id);
       else checkedIds.add(p.id);
-      syncWidget();
-      render();
+      applySelectionChange([p.id]);
     }
     else if (e.key === "Delete" || e.key === "Backspace") {
       e.preventDefault();
