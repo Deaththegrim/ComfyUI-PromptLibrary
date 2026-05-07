@@ -1477,6 +1477,30 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
     node.properties = node.properties || {};
     return node.properties[propsKey] || {};
   };
+  // localStorage key — survives across browser tab close/reopen, ComfyUI
+  // restart, and different workflow tabs in the same browser. Per-node-id
+  // so multiple Library nodes don't stomp each other.
+  const _lsKey = () => `pl_sel_${node?.id ?? "anon"}`;
+  const readLocalSelection = () => {
+    try {
+      const raw = localStorage.getItem(_lsKey());
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.filter(x => typeof x === "string") : [];
+    } catch (_e) {
+      return [];
+    }
+  };
+  const writeLocalSelection = () => {
+    try {
+      const ids = [...checkedIds];
+      if (ids.length === 0) {
+        localStorage.removeItem(_lsKey());
+      } else {
+        localStorage.setItem(_lsKey(), JSON.stringify(ids));
+      }
+    } catch (_e) { /* localStorage quota / disabled — non-fatal */ }
+  };
   const writeState = () => {
     node.properties = node.properties || {};
     node.properties[propsKey] = {
@@ -1487,15 +1511,19 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       sort: sortSelect.value,
       tileSize: sizeInput.value,
       view: viewMode,
-      // Belt-and-suspenders selection persistence. The primary store is
-      // idWidget.value (a comma-joined STRING widget) which ComfyUI auto-
-      // serialises into the workflow JSON. But if a future ComfyUI rev
-      // changes widget-value handling, or if the user opens the workflow
-      // from a different source, the selection can come back empty. Mirror
-      // checkedIds into node.properties[propsKey].selectedIds so we can
-      // restore from either source.
+      // Three-tier selection persistence:
+      //   1. idWidget.value — comma-joined ids, ComfyUI auto-serialises
+      //      this into widgets_values for the workflow JSON
+      //   2. node.properties[propsKey].selectedIds — same payload, but in
+      //      properties (also workflow-JSON-serialised, but tolerates
+      //      future widget-value handling changes)
+      //   3. localStorage[`pl_sel_<node.id>`] — survives browser close,
+      //      ComfyUI restart, different workflow tabs
+      // syncFromWidget falls back through the chain if earlier tiers are
+      // empty, so selection sticks until the user explicitly clears it.
       selectedIds: [...checkedIds],
     };
+    writeLocalSelection();
   };
   const initialState = readState();
 
@@ -1718,17 +1746,26 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
         if (id) checkedIds.add(id);
       }
     } else {
-      // Widget came back empty — try the properties mirror.
+      // Widget empty — fall back through properties → localStorage. The
+      // first tier with a non-empty selection wins; subsequent tiers stay
+      // untouched so we don't clobber the canonical store.
       const stash = (node.properties && node.properties[propsKey]) || {};
-      const stashed = Array.isArray(stash.selectedIds) ? stash.selectedIds : [];
-      for (const id of stashed) {
+      const propIds = Array.isArray(stash.selectedIds) ? stash.selectedIds : [];
+      for (const id of propIds) {
         if (id) checkedIds.add(id);
       }
-      // Mirror back to the widget so downstream nodes see the canonical
-      // comma-joined string immediately.
+      if (checkedIds.size) {
+        source = "properties";
+      } else {
+        for (const id of readLocalSelection()) {
+          if (id) checkedIds.add(id);
+        }
+        if (checkedIds.size) source = "localStorage";
+      }
+      // Mirror restored selection back into idWidget so downstream nodes
+      // see the canonical comma-joined string on the very next eval.
       if (checkedIds.size) {
         idWidget.value = [...checkedIds].join(",");
-        source = "properties";
       }
     }
     _logSel(`${origin}(${source})`, before, checkedIds);
