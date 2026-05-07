@@ -1829,6 +1829,49 @@ class PromptLibraryTests(unittest.TestCase):
             sys.modules.pop(f"{pkg_name}.style_node", None)
             sys.modules.pop(pkg_name, None)
 
+    # ---- library validator route + fix_orphans -------------------------
+
+    def test_validate_route_reports_clean_library(self):
+        self.mod._save([{"id": "k1", "name": "K1", "text": "v1"},
+                          {"id": "k2", "name": "K2", "text": "v2"}])
+        resp = asyncio.run(self.mod.validate_library(FakeRequest()))
+        body = json.loads(resp.body)
+        self.assertEqual(body["entries_count"], 2)
+        self.assertEqual(body["thumbnails_count"], 0)
+        self.assertEqual(body["broken_loras"], [])
+        self.assertEqual(body["orphan_images"], [])
+        self.assertEqual(body["empty_texts"], [])
+        self.assertEqual(body["invalid_ids"], [])
+
+    def test_validate_route_flags_empty_texts(self):
+        self.mod._save([{"id": "ok", "name": "OK", "text": "value"},
+                          {"id": "empty", "name": "Bad", "text": ""}])
+        body = json.loads(asyncio.run(self.mod.validate_library(FakeRequest())).body)
+        self.assertEqual(len(body["empty_texts"]), 1)
+        self.assertEqual(body["empty_texts"][0]["id"], "empty")
+
+    def test_validate_route_finds_orphan_thumbnails(self):
+        self.mod._save([{"id": "k1", "name": "K1", "text": "v"}])
+        # Drop a stray thumbnail in IMAGES_DIR for an id that no entry has.
+        self.mod.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+        (self.mod.IMAGES_DIR / "ghost.png").write_bytes(_real_png())
+        body = json.loads(asyncio.run(self.mod.validate_library(FakeRequest())).body)
+        self.assertIn("ghost", body["orphan_images"])
+
+    def test_fix_orphans_removes_stray_thumbnails(self):
+        self.mod._save([{"id": "k1", "name": "K1", "text": "v"}])
+        self.mod.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+        (self.mod.IMAGES_DIR / "ghost.png").write_bytes(_real_png())
+        (self.mod.IMAGES_DIR / "phantom.jpg").write_bytes(_real_png())
+        resp = asyncio.run(self.mod.fix_orphans(FakeRequest()))
+        body = json.loads(resp.body)
+        self.assertEqual(body["removed"], 2)
+        # Re-validate: orphans gone.
+        after = json.loads(asyncio.run(self.mod.validate_library(FakeRequest())).body)
+        self.assertEqual(after["orphan_images"], [])
+
+    # ---- Save node loras_json ------------------------------------------
+
     def test_save_node_persists_loras_json(self):
         """PromptLibrarySave grew a loras_json input — when set, the saved
         entry carries the LoRA stack just as if it had been edited via

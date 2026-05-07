@@ -212,6 +212,25 @@ const CSS = `
 .pl-lora-missing-warn { font-size: 10px; color: var(--pl-danger); padding: 2px 4px;
   background: rgba(255, 100, 100, 0.08); border-left: 2px solid var(--pl-danger);
   border-radius: 0 2px 2px 0; line-height: 1.3; }
+/* Library validator: warning badge + modal section listing the findings. */
+.pl-health-btn { color: var(--pl-danger); border-color: var(--pl-danger);
+  background: rgba(255, 100, 100, 0.06); font-weight: 600; padding: 3px 8px; }
+.pl-health-btn:hover { background: rgba(255, 100, 100, 0.14);
+  color: var(--pl-fg-strong); }
+.pl-validator-section { display: flex; flex-direction: column; gap: 4px;
+  border: 1px solid var(--pl-border-soft); border-radius: 4px; padding: 8px;
+  background: var(--pl-bg-input); }
+.pl-validator-section-head { font-weight: 600; color: var(--pl-fg-strong);
+  font-size: 12px; }
+.pl-validator-list { display: flex; flex-direction: column; gap: 3px;
+  max-height: 220px; overflow-y: auto; }
+.pl-validator-row { display: flex; align-items: center; gap: 8px; padding: 3px 4px;
+  font-size: 11px; color: var(--pl-fg); border-radius: 3px;
+  background: var(--pl-bg-elevated); }
+.pl-validator-row > span { flex: 1 1 auto; word-break: break-all; }
+.pl-validator-row .pl-btn { padding: 2px 8px; font-size: 11px; flex: 0 0 auto; }
+.pl-validator-more { font-size: 10px; color: var(--pl-fg-muted);
+  padding: 4px; text-align: center; }
 /* Custom-styled range input — the browser default is a near-invisible thin
    line. Track is a 4px green-on-grey bar; thumb is a 14px green disc. */
 .pl-lora-strength-bar input[type=range] { flex: 1 1 0; min-width: 0; -webkit-appearance: none;
@@ -380,6 +399,19 @@ function confirmDestructive(message, { confirmLabel = "Delete", timeoutMs = 8000
     yes.focus();
     setTimeout(() => finish(false), timeoutMs);
   });
+}
+
+async function fetchValidate() {
+  const res = await api.fetchApi("/prompt_library/validate");
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function fixOrphans() {
+  const res = await api.fetchApi("/prompt_library/fix_orphans",
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
 }
 
 async function fetchList() {
@@ -1557,7 +1589,19 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   const countBadge = document.createElement("span");
   countBadge.className = "pl-count-badge";
   countBadge.title = "Visible / total prompts";
-  toolbar.append(searchWrap, modelSelect, sortSelect, sizeWrap, viewWrap, favBtn, countBadge, importBtn, undoBtn, exportBtn, scanLorasBtn, importBgBtn, queueAllBtn, refreshBtn, fileInput);
+
+  // Library health badge — fetches /prompt_library/validate on demand
+  // (or after a refresh) and shows a count of unhealed issues. Clicking
+  // opens a modal with the findings + a "Remove orphan thumbnails" action.
+  // Hidden when the count is zero so a clean library has no UI clutter.
+  const healthBtn = document.createElement("button");
+  healthBtn.className = "pl-btn pl-health-btn";
+  healthBtn.style.display = "none";
+  healthBtn.type = "button";
+  healthBtn.title = "Library health — click for the findings list.";
+  healthBtn.onclick = () => openValidatorModal();
+
+  toolbar.append(searchWrap, modelSelect, sortSelect, sizeWrap, viewWrap, favBtn, countBadge, healthBtn, importBtn, undoBtn, exportBtn, scanLorasBtn, importBgBtn, queueAllBtn, refreshBtn, fileInput);
 
   const tagsRow = document.createElement("div");
   tagsRow.className = "pl-tags-row";
@@ -1674,6 +1718,224 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
     }
     _refreshFocusedTile();
     updateBulkBar();
+  };
+
+  // -------------------------------------------------------------------------
+  // Library validator — toolbar badge + modal listing findings.
+  // -------------------------------------------------------------------------
+
+  let _lastValidation = null;
+
+  const refreshHealthBadge = async () => {
+    try {
+      _lastValidation = await fetchValidate();
+    } catch (e) {
+      // Validator failures shouldn't be loud; the gallery itself already
+      // works. Hide the badge and log to console for the curious.
+      console.warn("[PromptLibrary] validate failed:", e);
+      healthBtn.style.display = "none";
+      return;
+    }
+    const issues =
+      (_lastValidation.broken_loras?.length || 0) +
+      (_lastValidation.orphan_images?.length || 0) +
+      (_lastValidation.invalid_ids?.length || 0) +
+      (_lastValidation.empty_texts?.length || 0);
+    if (issues === 0) {
+      healthBtn.style.display = "none";
+      return;
+    }
+    healthBtn.style.display = "";
+    healthBtn.textContent = `⚠ ${issues}`;
+    healthBtn.title = `Library has ${issues} issue${issues === 1 ? "" : "s"} — click for details.`;
+  };
+
+  const openValidatorModal = async () => {
+    // Fetch fresh on open so the user always sees current state, even
+    // if entries have changed since the last refreshHealthBadge call.
+    let v;
+    try {
+      v = await fetchValidate();
+    } catch (e) {
+      toast(`Validator failed: ${e.message}`, "error");
+      return;
+    }
+    _lastValidation = v;
+
+    const modal = document.createElement("div");
+    modal.className = "pl-modal";
+    modal.style.width = "560px";
+
+    const header = document.createElement("div");
+    header.className = "pl-modal-header";
+    const title = document.createElement("h3");
+    title.textContent = "Library health";
+    const closeX = document.createElement("button");
+    closeX.className = "pl-modal-close";
+    closeX.type = "button";
+    closeX.textContent = "✕";
+    header.append(title, closeX);
+
+    const summary = document.createElement("div");
+    summary.style.fontSize = "12px";
+    summary.style.color = "var(--pl-fg-muted)";
+    summary.textContent = `${v.entries_count} entries · ${v.thumbnails_count} thumbnails`
+      + (v.lora_index_available ? "" : " · LoRA index unavailable (running outside Comfy?)");
+
+    const body = document.createElement("div");
+    body.style.display = "flex";
+    body.style.flexDirection = "column";
+    body.style.gap = "10px";
+    body.style.fontSize = "12px";
+
+    const buildSection = (heading, items, renderItem, action) => {
+      if (!items || items.length === 0) return null;
+      const sec = document.createElement("div");
+      sec.className = "pl-validator-section";
+      const h = document.createElement("div");
+      h.className = "pl-validator-section-head";
+      h.textContent = `${heading} (${items.length})`;
+      sec.appendChild(h);
+      const list = document.createElement("div");
+      list.className = "pl-validator-list";
+      for (const item of items.slice(0, 50)) {
+        list.appendChild(renderItem(item));
+      }
+      if (items.length > 50) {
+        const more = document.createElement("div");
+        more.className = "pl-validator-more";
+        more.textContent = `… ${items.length - 50} more not shown`;
+        list.appendChild(more);
+      }
+      sec.appendChild(list);
+      if (action) sec.appendChild(action);
+      return sec;
+    };
+
+    // Broken LoRAs
+    const brokenSec = buildSection("Broken LoRA references",
+      v.broken_loras,
+      (item) => {
+        const row = document.createElement("div");
+        row.className = "pl-validator-row";
+        const name = document.createElement("span");
+        name.textContent = `${item.name || item.id}: ${item.lora}`;
+        row.appendChild(name);
+        const editBtn = document.createElement("button");
+        editBtn.className = "pl-btn";
+        editBtn.textContent = "Edit";
+        editBtn.onclick = async () => {
+          // Re-fetch the entry then open it in the modal so the user
+          // can pick a replacement LoRA or remove the row.
+          const list = await fetchList();
+          const entry = list.find(p => p.id === item.id);
+          if (entry) openPromptModal({
+            existing: entry,
+            onSave: async (payload) => { await upsert(payload); await refresh(); refreshHealthBadge(); },
+            onDelete: async (id) => { await deletePrompt(id); await refresh(); refreshHealthBadge(); },
+          });
+        };
+        row.appendChild(editBtn);
+        return row;
+      });
+
+    // Orphan thumbnails — with a single bulk-cleanup action.
+    let orphanCleanupBtn = null;
+    if (v.orphan_images && v.orphan_images.length > 0) {
+      orphanCleanupBtn = document.createElement("button");
+      orphanCleanupBtn.className = "pl-btn";
+      orphanCleanupBtn.style.alignSelf = "flex-start";
+      orphanCleanupBtn.style.marginTop = "4px";
+      orphanCleanupBtn.textContent = "Remove orphan thumbnails";
+      orphanCleanupBtn.onclick = async () => {
+        if (!await confirmDestructive(
+          `Delete ${v.orphan_images.length} orphan thumbnail file(s)?`,
+          { confirmLabel: "Remove" })) return;
+        try {
+          const result = await fixOrphans();
+          toast(`Removed ${result.removed} orphan thumbnail(s).`, "success");
+          await refreshHealthBadge();
+          modal.remove();
+          openValidatorModal();  // reopen with fresh data
+        } catch (e) { toast(`Cleanup failed: ${e.message}`, "error"); }
+      };
+    }
+    const orphanSec = buildSection("Orphan thumbnails",
+      (v.orphan_images || []).map(id => ({ id })),
+      (item) => {
+        const row = document.createElement("div");
+        row.className = "pl-validator-row";
+        row.textContent = item.id;
+        return row;
+      },
+      orphanCleanupBtn);
+
+    // Invalid IDs
+    const invalidSec = buildSection("Invalid entry IDs",
+      v.invalid_ids,
+      (id) => {
+        const row = document.createElement("div");
+        row.className = "pl-validator-row";
+        row.textContent = String(id || "(empty)");
+        return row;
+      });
+
+    // Empty-text entries
+    const emptySec = buildSection("Entries with empty prompt text",
+      v.empty_texts,
+      (item) => {
+        const row = document.createElement("div");
+        row.className = "pl-validator-row";
+        const name = document.createElement("span");
+        name.textContent = `${item.name || "(unnamed)"} (${item.id})`;
+        row.appendChild(name);
+        const editBtn = document.createElement("button");
+        editBtn.className = "pl-btn";
+        editBtn.textContent = "Edit";
+        editBtn.onclick = async () => {
+          const list = await fetchList();
+          const entry = list.find(p => p.id === item.id);
+          if (entry) openPromptModal({
+            existing: entry,
+            onSave: async (payload) => { await upsert(payload); await refresh(); refreshHealthBadge(); },
+            onDelete: async (id) => { await deletePrompt(id); await refresh(); refreshHealthBadge(); },
+          });
+        };
+        row.appendChild(editBtn);
+        return row;
+      });
+
+    const sections = [brokenSec, orphanSec, invalidSec, emptySec].filter(Boolean);
+    if (sections.length === 0) {
+      const allClean = document.createElement("div");
+      allClean.style.color = "var(--pl-fg-muted)";
+      allClean.style.padding = "8px";
+      allClean.textContent = "✓ Library is clean — no issues found.";
+      body.appendChild(allClean);
+    } else {
+      for (const s of sections) body.appendChild(s);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "pl-modal-actions";
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "pl-btn";
+    closeBtn.textContent = "Close";
+    actions.appendChild(closeBtn);
+
+    const close = () => modal.remove();
+    closeX.onclick = close;
+    closeBtn.onclick = close;
+
+    modal.append(header, summary, body, actions);
+    modal.style.left = "calc(50% - 280px)";
+    modal.style.top = "12%";
+    document.body.appendChild(modal);
+    makeDraggable(modal, header);
+
+    for (const ev of ["keydown", "keyup", "keypress"]) {
+      modal.addEventListener(ev, (e) => e.stopPropagation());
+    }
   };
 
   // -------------------------------------------------------------------------
@@ -2218,6 +2480,10 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       err.textContent = `failed to load: ${e.message}`;
       grid.appendChild(err);
     }
+    // Health-badge refresh runs in the background — the gallery doesn't
+    // wait on it. Network failures hide the badge silently (the gallery
+    // itself works regardless of validator availability).
+    refreshHealthBadge();
   };
 
   // Debounce search input — every keystroke would otherwise trigger a full

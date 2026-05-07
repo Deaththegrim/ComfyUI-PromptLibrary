@@ -2908,7 +2908,105 @@ async def reorder_prompts(request):
     return web.json_response({"ok": True, "count": len(valid)})
 
 
-__version__ = "0.45.1"
+# --------------------------------------------------------------------------
+# Library validator — gallery-side counterpart to tools/library_validate.py.
+# Reuses _scan_image_ids + folder_paths so a Comfy-running install gets the
+# same answers the CLI would, just via HTTP for the UI to render.
+# --------------------------------------------------------------------------
+
+
+def _validate_library_internal() -> dict:
+    """Walk the live library + thumbnail dir + (when available) the
+    folder_paths LoRA index. Returns a dict of findings the gallery's
+    validator modal renders directly."""
+    with _lock:
+        items = _load()
+    image_ids = _scan_image_ids()
+    valid_entry_ids: set[str] = set()
+    broken_loras: list[dict] = []
+    invalid_ids: list[str] = []
+    empty_texts: list[dict] = []
+
+    available_loras: set[str] | None = None
+    if folder_paths is not None:
+        try:
+            available_loras = set(folder_paths.get_filename_list("loras") or [])
+        except Exception:
+            available_loras = None
+
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        eid = raw.get("id", "")
+        ename = raw.get("name", "")
+        if not _safe_id(eid or ""):
+            invalid_ids.append(eid)
+            continue
+        valid_entry_ids.add(eid)
+        if not (raw.get("text") or "").strip():
+            empty_texts.append({"id": eid, "name": ename})
+        for l in raw.get("loras") or []:
+            if not isinstance(l, dict) or not l.get("enabled", True):
+                continue
+            lname = (l.get("name") or "").strip()
+            if not lname:
+                continue
+            # If folder_paths is available we can decide authoritatively;
+            # otherwise we can't tell broken from intact, so we omit. The
+            # client UI shows a "running outside Comfy" note in that case.
+            if available_loras is not None and lname not in available_loras:
+                broken_loras.append({"id": eid, "name": ename, "lora": lname})
+
+    orphan_images = sorted(image_ids - valid_entry_ids)
+    return {
+        "entries_count": len(items),
+        "thumbnails_count": len(image_ids),
+        "broken_loras": broken_loras,
+        "orphan_images": orphan_images,
+        "invalid_ids": invalid_ids,
+        "empty_texts": empty_texts,
+        "lora_index_available": available_loras is not None,
+    }
+
+
+@routes.get("/prompt_library/validate")
+async def validate_library(_request):
+    """Gallery-side counterpart to tools/library_validate.py — surfaces
+    broken LoRA references / orphan thumbnails / invalid ids / empty
+    texts so the UI can render a maintenance summary. Read-only; cleanup
+    actions live on /fix_orphans (and the per-entry edit/delete routes
+    handle the rest)."""
+    return web.json_response(_validate_library_internal())
+
+
+@routes.post("/prompt_library/fix_orphans")
+async def fix_orphans(request):
+    """Delete every thumbnail file that doesn't correspond to a current
+    library entry. Idempotent — running with no orphans returns
+    {removed: 0}. Mirrors the CLI's --fix-orphans flag."""
+    findings = _validate_library_internal()
+    orphans = findings.get("orphan_images", [])
+    removed = 0
+    errors: list[str] = []
+    for oid in orphans:
+        if not _safe_id(oid):
+            errors.append(f"unsafe orphan id skipped: {oid!r}")
+            continue
+        for ext in _ALLOWED_IMAGE_EXT:
+            p = IMAGES_DIR / f"{oid}{ext}"
+            try:
+                p.unlink()
+                removed += 1
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                errors.append(f"{p.name}: {e}")
+    if removed or errors:
+        _notify_change()
+    return web.json_response({"removed": removed, "errors": errors})
+
+
+__version__ = "0.46.0"
 
 
 def _autobackup_on_version_change() -> None:
