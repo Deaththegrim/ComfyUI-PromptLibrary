@@ -669,6 +669,14 @@ class PromptLibrary:
         # The helper lives in style_node.py — lazy-imported here so the
         # plain STRING-only flow doesn't need torch / comfy.sd at import.
         model_out, clip_out = model, clip
+        # Half-wired guard: wiring MODEL without CLIP (or vice versa) used
+        # to silently skip LoRA application and emit a half-patched tuple
+        # downstream — confusing because the user explicitly wired the
+        # model side but got no LoRA effect. Warn once with the rule.
+        if (model is None) != (clip is None):
+            print("[PromptLibrary] WARNING: only one of MODEL / CLIP is wired — "
+                  "LoRA application requires BOTH. Wire the matching socket "
+                  "(or unwire both) to get LoRA-patched output.")
         if model is not None and clip is not None and entries:
             try:
                 from .style_node import _apply_loras
@@ -1085,13 +1093,20 @@ class PromptLibraryThumbnailSaver:
             print(f"[ThumbnailSaver] failed to process thumbnail for {pid!r}")
             return ("",)
         # Bump the entry's updated_at so the watcher fires + UIs refresh.
+        entry_name = ""
         with _lock:
             items = _load()
             entry = next((i for i in items if i.get("id") == pid), None)
             if entry is not None:
+                entry_name = entry.get("name", "")
                 _touch(entry, created=False)
                 _save(items)
         _notify_change()
+        # Log the targeted entry on success so a sticky prompt_id widget on
+        # this node (which would clobber the same entry's thumbnail every
+        # run) is visible from the Comfy console — same diagnostic the
+        # PromptLibrarySave node prints.
+        print(f"[ThumbnailSaver] wrote thumbnail to id={pid!r} name={entry_name!r}")
         return (pid,)
 
 
@@ -3022,7 +3037,7 @@ async def fix_orphans(request):
     return web.json_response({"removed": removed, "errors": errors})
 
 
-__version__ = "0.46.1"
+__version__ = "0.46.2"
 
 
 def _autobackup_on_version_change() -> None:
