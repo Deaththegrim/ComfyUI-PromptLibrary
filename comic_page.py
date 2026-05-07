@@ -166,8 +166,14 @@ class GrimmRibbityComicPage:
                 combined.append(cond)
             active += 1
         if active == 0:
-            print("[ComicPage] no panels had prompts — emitting empty CONDITIONING")
-            return ([],)
+            # Empty CONDITIONING ([]) crashes any sampler downstream. When no
+            # panels have prompts (e.g. user wired the node but left every
+            # panel blank), encode an empty prompt with the supplied CLIP so
+            # the output is at least a valid CONDITIONING the sampler can
+            # consume — matches the fallback pattern in PromptLibraryStyle.
+            print("[ComicPage] no panels had prompts — emitting trivial empty-prompt CONDITIONING")
+            (fallback,) = encoder.encode(clip, shared or "")
+            return (fallback,)
         return (combined,)
 
 
