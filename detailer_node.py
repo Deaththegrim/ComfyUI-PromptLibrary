@@ -241,6 +241,30 @@ def _load_sam(model_name: str):
     return handle
 
 
+def _offload_sam_to_cpu(sam_handle) -> None:
+    """Push the SAM predictor's model to CPU. Reclaims VRAM (≈600 MB for
+    sam2.1_hiera_large) without invalidating the cache — next call to
+    _sam_set_image moves it back to GPU lazily. Best-effort: any failure
+    is logged and ignored so detailer return path stays clean."""
+    if sam_handle is None:
+        return
+    try:
+        _kind, predictor = sam_handle
+        model = getattr(predictor, "model", None)
+        if model is not None and hasattr(model, "to"):
+            model.to("cpu")
+        # Drop cached image embeddings so they don't keep VRAM alive on the
+        # other side of the offload.
+        for attr in ("features", "_features", "image_embeddings", "is_image_set"):
+            if hasattr(predictor, attr):
+                try:
+                    setattr(predictor, attr, None if attr != "is_image_set" else False)
+                except (AttributeError, TypeError):
+                    pass
+    except Exception as exc:
+        logging.warning("[SmartDetailer] SAM offload to CPU failed (%s)", exc)
+
+
 def _sam_set_image(sam_handle, image_hwc_uint8) -> bool:
     """Pin the image into the SAM predictor once. Subsequent _sam_predict
     calls reuse the cached embeddings — set_image runs the SAM encoder
@@ -367,6 +391,29 @@ def _detect_bboxes_with_conf(yolo, image_hwc_uint8, threshold: float,
     if max_n and max_n > 0:
         detections = detections[:max_n]
     return detections
+
+
+def _normalize_image_shape(image: torch.Tensor) -> torch.Tensor:
+    """Coerce upstream-provided image tensor to the (B, H, W, C) shape the
+    detailer pipeline assumes. Without this guard, a 5D tensor from a
+    video/animation source crashes deep in the crop loop with a cryptic
+    `permute(sparse_coo)` error — this surfaces the real problem at the
+    entry point with an actionable message.
+    """
+    while image.dim() > 4 and image.shape[0] == 1:
+        image = image.squeeze(0)
+    if image.dim() == 3:
+        image = image.unsqueeze(0)
+    if image.dim() != 4:
+        raise ValueError(
+            "Smart Detailer expected a 4D image tensor (B, H, W, C); got "
+            f"shape {tuple(image.shape)} ({image.dim()}D). Likely cause: a "
+            "video/animation source (Wan, AnimateDiff, batch-frame loader) "
+            "is wired into the image input. Use a still image (LoadImage or "
+            "a single VAE Decode output) instead, or select one frame "
+            "before this node."
+        )
+    return image
 
 
 def _expand_bbox(bbox, crop_factor: float, w: int, h: int) -> tuple[int, int, int, int]:
@@ -498,17 +545,39 @@ def _vae_decode(vae, samples_dict, tiled: bool):
     """Decode latent → image. When `tiled` is requested, we only ACTUALLY tile
     if the decoded resolution would exceed ~1024² — for typical face/eye
     crops (256-512px decoded) full decode is faster and plenty RAM-safe.
-    Tiling kicks in for hands/skin passes at higher guide_size."""
+    Tiling kicks in for hands/skin passes at higher guide_size.
+
+    On OOM, walks tile_x/tile_y down (256→128→64) instead of crashing.
+    Last-resort falls through to vae.decode() so comfy's own decode-then-tiled
+    fallback can take a swing. The non-tiled path already routes through
+    vae.decode() which has built-in OOM→tiled retry."""
     samples = samples_dict["samples"]
-    # latent shape (B, C, H, W); decoded image is 8x in H+W.
     h_pix, w_pix = samples.shape[-2] * 8, samples.shape[-1] * 8
     needs_tile = tiled and (h_pix > 1024 or w_pix > 1024)
-    if needs_tile:
+    if not needs_tile:
+        return vae.decode(samples)
+    tile = 256
+    while True:
         try:
-            return vae.decode_tiled(samples, tile_x=512, tile_y=512)
-        except TypeError:
-            return vae.decode_tiled(samples)
-    return vae.decode(samples)
+            try:
+                return vae.decode_tiled(samples, tile_x=tile, tile_y=tile)
+            except TypeError:
+                return vae.decode_tiled(samples)
+        except Exception as e:
+            import comfy.model_management as _mm
+            _mm.raise_non_oom(e)
+            if tile <= 64:
+                logging.info(
+                    "[GrimmRibbity] vae decode OOM at tile=%d, "
+                    "falling through to vae.decode() auto-fallback", tile)
+                _mm.soft_empty_cache()
+                return vae.decode(samples)
+            new_tile = tile // 2
+            logging.info(
+                "[GrimmRibbity] vae decode OOM at tile=%d, retrying at tile=%d",
+                tile, new_tile)
+            tile = new_tile
+            _mm.soft_empty_cache()
 
 
 def _draw_bbox_on_preview(preview: torch.Tensor, bbox, color, line: int = 2,
@@ -600,14 +669,33 @@ class _Pass:
 
 def _vae_encode(vae, pixels, tiled: bool):
     """Encode pixels → latent. Tiled mode kicks in for large crops to keep
-    encode RAM bounded — symmetric with _vae_decode's auto-tile policy."""
+    encode RAM bounded — symmetric with _vae_decode's auto-tile policy.
+    OOM walks tile down 256→128→64, then falls through to vae.encode()."""
     h, w = pixels.shape[1], pixels.shape[2]
-    if tiled and (h > 1024 or w > 1024):
+    if not (tiled and (h > 1024 or w > 1024)):
+        return vae.encode(pixels)
+    tile = 256
+    while True:
         try:
-            return vae.encode_tiled(pixels, tile_x=512, tile_y=512)
-        except (TypeError, AttributeError):
-            return vae.encode(pixels)
-    return vae.encode(pixels)
+            try:
+                return vae.encode_tiled(pixels, tile_x=tile, tile_y=tile)
+            except (TypeError, AttributeError):
+                return vae.encode(pixels)
+        except Exception as e:
+            import comfy.model_management as _mm
+            _mm.raise_non_oom(e)
+            if tile <= 64:
+                logging.info(
+                    "[GrimmRibbity] vae encode OOM at tile=%d, "
+                    "falling through to vae.encode()", tile)
+                _mm.soft_empty_cache()
+                return vae.encode(pixels)
+            new_tile = tile // 2
+            logging.info(
+                "[GrimmRibbity] vae encode OOM at tile=%d, retrying at tile=%d",
+                tile, new_tile)
+            tile = new_tile
+            _mm.soft_empty_cache()
 
 
 def _enhance_one_pass(
@@ -628,6 +716,13 @@ def _enhance_one_pass(
     if _COMMON_KSAMPLER is None:
         _resolve_comfy_helpers()
     common_ksampler = _COMMON_KSAMPLER
+    # Lazy import — tests run this function without comfy importable. We
+    # only need _mm for the interrupt check + soft_empty_cache; both can
+    # no-op when unavailable.
+    try:
+        import comfy.model_management as _mm
+    except (ImportError, ModuleNotFoundError):
+        _mm = None
 
     device = image.device
     _, H, W, _ = image.shape
@@ -641,8 +736,13 @@ def _enhance_one_pass(
                     else float(_PRESETS[plan.name]["crop_factor"]))
 
     positive_with_wc = _encode_wildcard_cached(clip, wildcard_text, positive)
-    running = image.clone()
-    combined_mask = torch.zeros((1, H, W), device=device, dtype=image.dtype)
+    # Caller (detail()) hoists the fp32→fp16 cast and threads the owned
+    # fp16 buffer through every pass, so we mutate it in-place instead of
+    # cloning per pass — saves a full-resolution tensor allocation each
+    # pass (≈100-200 MB at hires) and removes the alloc/free pair that
+    # contributed to the 2026-05-08 wedge under HIP.
+    running = image
+    combined_mask = torch.zeros((1, H, W), device=device, dtype=running.dtype)
 
     # SAM's set_image runs the SAM encoder once per target. The encoder
     # output is cached internally by the predictor — we only need to call
@@ -685,11 +785,11 @@ def _enhance_one_pass(
         # Soft-cancel: between every bbox, check if user hit the "Interrupt"
         # button. Comfy raises an InterruptProcessingException which propagates
         # through the queue executor and aborts the whole prompt cleanly.
-        try:
-            import comfy.model_management as _mm
-            _mm.throw_exception_if_processing_interrupted()
-        except (ImportError, AttributeError):
-            pass
+        if _mm is not None:
+            try:
+                _mm.throw_exception_if_processing_interrupted()
+            except AttributeError:
+                pass
 
         x1, y1, x2, y2 = _expand_bbox(raw_bbox, crop_factor, W, H)
         if x2 - x1 < 16 or y2 - y1 < 16:
@@ -713,6 +813,8 @@ def _enhance_one_pass(
         ).permute(0, 2, 3, 1).contiguous()
 
         latent = {"samples": _vae_encode(vae, upscaled[:, :, :, :3], tiled_encode)}
+        # `upscaled` is now redundant with `latent` — drop it before sample.
+        del upscaled
         latent_h, latent_w = latent["samples"].shape[-2:]
         # Latent-space noise mask: respects bbox-edge suppression so the
         # sample pass also matches the eventual composite blend.
@@ -736,7 +838,10 @@ def _enhance_one_pass(
             positive_with_wc, negative, latent,
             denoise=float(plan.denoise),
         )
+        # Latent encode/feather no longer needed once the sample is refined.
+        del latent, latent_mask
         refined_image = _vae_decode(vae, refined_latent, tiled_decode)
+        del refined_latent
         refined_image = refined_image.to(device=device, dtype=running.dtype)
         # nan_to_num BEFORE clamp — clamp(NaN, 0, 1) returns NaN and then casts
         # silently turn it into garbage downstream (the black-screen bug).
@@ -762,6 +867,13 @@ def _enhance_one_pass(
         combined_mask[:, y1:y2, x1:x2] = torch.maximum(
             combined_mask[:, y1:y2, x1:x2], composite_mask.squeeze(-1),
         )
+        # End of bbox: drop the per-iteration tensors so the allocator can
+        # reuse them for the next bbox. We do NOT call soft_empty_cache()
+        # here — flushing every iteration defeats allocator pooling and
+        # under HIP forces an alloc/free roundtrip to amdgpu per bbox,
+        # which is exactly the churn pattern that produced the 2026-05-08
+        # gfxhub-page-fault wedge. Coarser flush at end of pass.
+        del refined_image, composite_mask, blended, crop
         if progress_bar is not None:
             progress_bar.update(1)
 
@@ -1129,6 +1241,7 @@ class GrimmRibbitySmartDetailer:
                nms_iou=0.5, yolo_imgsz=960,
                max_bbox_area_pct=0.95, draw_preview=True):
 
+        image = _normalize_image_shape(image)
         device = image.device
         _, H, W, _ = image.shape
 
@@ -1249,8 +1362,12 @@ class GrimmRibbitySmartDetailer:
         # Detections exist — clone for the bbox overlay only when the user
         # actually wants the preview. With draw_preview=False the preview
         # output is the input image unchanged (no clone, no draw work).
+        # Draw on CPU: bbox/text rasterization is a pixel-write loop with
+        # zero parallelism benefit on GPU, and after hires-fix this clone
+        # is ~200MB. CPU also avoids holding it in VRAM during the bbox
+        # sample loop. Comfy moves the output to intermediate_device anyway.
         if draw_preview:
-            preview = image.clone()
+            preview = image.detach().to(device="cpu", copy=True)
             for p in passes:
                 color = _PRESETS[p.name]["color"]
                 for raw_bbox, conf in p.detections:
@@ -1286,8 +1403,18 @@ class GrimmRibbitySmartDetailer:
             _resolve_comfy_helpers()
         pbar = _PROGRESS_BAR_CLS(total_detections) if _PROGRESS_BAR_CLS else None
 
-        running = image
-        combined_mask = torch.zeros((1, H, W), device=device, dtype=image.dtype)
+        # Hoist the fp16 cast out of _enhance_one_pass so each pass works on
+        # an already-owned fp16 buffer. Image data is in [0,1] so fp16 is
+        # plenty precise for the bilinear-mask composite, and halves the
+        # resident tensor (a 4096² hires image drops ~200MB → ~100MB).
+        # Cast back to the input dtype on the way out so the node's output
+        # contract is unchanged.
+        out_dtype = image.dtype
+        if image.dtype not in (torch.float16, torch.bfloat16):
+            running = image.to(dtype=torch.float16).contiguous()
+        else:
+            running = image.clone()
+        combined_mask = torch.zeros((1, H, W), device=device, dtype=running.dtype)
 
         import time
         run_start = time.monotonic()
@@ -1295,6 +1422,17 @@ class GrimmRibbitySmartDetailer:
         # SAM mask cache shared across passes — face + skin (which share the
         # same bboxes) compute SAM once total instead of once each.
         sam_mask_cache: dict[tuple[int, int, int, int], torch.Tensor | None] = {}
+
+        # Precompute per-pass-index "still needed" bbox sets so we can drop
+        # cache entries the moment no future pass references them. SAM masks
+        # are full-resolution tensors (≈4 MB at 2048², bigger after hires),
+        # so an unbounded cache across 6 passes is a real VRAM bite.
+        future_bboxes_after = [None] * len(passes)
+        seen: set[tuple[int, int, int, int]] = set()
+        for j in range(len(passes) - 1, -1, -1):
+            future_bboxes_after[j] = set(seen)
+            for raw_bbox, _conf in passes[j].detections:
+                seen.add(raw_bbox)
 
         for i, p in enumerate(passes):
             preset = _PRESETS[p.name]
@@ -1320,6 +1458,13 @@ class GrimmRibbitySmartDetailer:
                 progress_bar=pbar,
             )
             combined_mask = torch.maximum(combined_mask, mask)
+            # Prune SAM masks no future pass will reuse. Avoids accumulating
+            # full-resolution mask tensors for the whole run when later
+            # passes (e.g. hands, feet) detect on different bboxes.
+            still_needed = future_bboxes_after[i]
+            if sam_mask_cache and still_needed is not None:
+                for stale in [k for k in sam_mask_cache if k not in still_needed]:
+                    sam_mask_cache.pop(stale, None)
             logging.info("[SmartDetailer] %s pass: %d bbox(es) in %.1fs (steps=%d)",
                           p.name, len(p.detections),
                           time.monotonic() - pass_start, p.steps or int(steps))
@@ -1331,6 +1476,19 @@ class GrimmRibbitySmartDetailer:
         # something, downstream nodes can't survive a NaN in IMAGE.
         running = torch.nan_to_num(running, nan=0.0, posinf=1.0, neginf=0.0).clamp(0, 1)
         combined_mask = torch.nan_to_num(combined_mask, nan=0.0).clamp(0, 1)
+        if running.dtype != out_dtype:
+            running = running.to(dtype=out_dtype)
+        # Push SAM back to CPU between runs. Keeps the cache (no reload
+        # work, ~30-50 ms saved on next call's set_image) but reclaims
+        # ≈600 MB-1.5 GB VRAM that would otherwise stay pinned across the
+        # whole comfy session.
+        if sam_handle is not None:
+            _offload_sam_to_cpu(sam_handle)
+            if soft_cleanup is not None:
+                try:
+                    soft_cleanup()
+                except Exception:
+                    pass
         return (running, combined_mask, preview)
 
 

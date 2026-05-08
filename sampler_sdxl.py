@@ -25,6 +25,7 @@ VAE encode/decode, the upscale-with-model tiling logic).
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 
 import torch
 
@@ -246,17 +247,36 @@ def _pixel_upscale_with_model(pixel_image, upscale_model, *, keep_on_device: boo
     comfy.model_management.free_memory(memory_required, device)
     upscale_model.to(device)
     in_img = pixel_image.movedim(-1, -3).to(device)
-    tile, overlap = 512, 32
-    steps_total = in_img.shape[0] * comfy.utils.get_tiled_scale_steps(
-        in_img.shape[3], in_img.shape[2], tile_x=tile, tile_y=tile, overlap=overlap)
-    pbar = comfy.utils.ProgressBar(steps_total)
-    upscaled = comfy.utils.tiled_scale(
-        in_img, lambda a: upscale_model(a.float()),
-        tile_x=tile, tile_y=tile, overlap=overlap,
-        upscale_amount=upscale_model.scale,
-        pbar=pbar,
-        output_device=comfy.model_management.intermediate_device(),
-    )
+    # Default 256 (was 512). On RX 9070 XT under PYTORCH_NO_HIP_MEMORY_CACHING=1
+    # the 512 attempt reliably OOMs and retries down to 256 anyway — start
+    # there and skip the wasted first attempt. Retry loop below still walks
+    # to 128 if even 256 can't fit on a future workflow.
+    tile, overlap = 256, 32
+    output_device = comfy.model_management.intermediate_device()
+    upscaled = None
+    while True:
+        try:
+            steps_total = in_img.shape[0] * comfy.utils.get_tiled_scale_steps(
+                in_img.shape[3], in_img.shape[2], tile_x=tile, tile_y=tile, overlap=overlap)
+            pbar = comfy.utils.ProgressBar(steps_total)
+            upscaled = comfy.utils.tiled_scale(
+                in_img, lambda a: upscale_model(a.float()),
+                tile_x=tile, tile_y=tile, overlap=overlap,
+                upscale_amount=upscale_model.scale,
+                pbar=pbar,
+                output_device=output_device,
+            )
+            break
+        except Exception as e:
+            comfy.model_management.raise_non_oom(e)
+            if tile <= 128:
+                raise
+            new_tile = tile // 2
+            logging.info(
+                "[GrimmRibbity] upscale OOM at tile=%d, retrying at tile=%d",
+                tile, new_tile)
+            tile = new_tile
+            comfy.model_management.soft_empty_cache()
     if not keep_on_device:
         upscale_model.to(comfy.model_management.vae_offload_device())
     return upscaled.movedim(-3, -1)
@@ -607,8 +627,15 @@ def _hires_one_iteration(*, model, clip, vae, positive, negative, latent,
                                               keep_on_device=True)
         target_w = round(decoded.shape[-2] * per_scale)
         target_h = round(decoded.shape[-3] * per_scale)
+        # `decoded` is dead after we've captured target_h/target_w — free
+        # its ~12-50MB before the resample/encode allocate fresh buffers.
+        del decoded
         upscaled = _resample_to(upscaled, target_w, target_h)
         cur = _vae_encode(vae, upscaled.clamp(0, 1), auto_tile=True)
+        # `upscaled` (full-res fp32 RGB, e.g. 4096²×3 = 200MB) is now
+        # redundant with `cur` (the latent encoding). Drop it before the
+        # next iteration's decode allocates again.
+        del upscaled
 
     # Per-field re-encode: positive and negative are independent. Within
     # the positive pair, an empty override mirrors the other side (so

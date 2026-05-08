@@ -22,6 +22,8 @@ the VAE's decode / decode_tiled).
 
 from __future__ import annotations
 
+import logging
+
 import torch
 
 import comfy.samplers
@@ -42,16 +44,37 @@ def _vae_decode(vae, latent, *, mode: str = "true"):
     """Decode honouring the user's vae_decode mode. 'false' returns None.
     'true' auto-promotes to tiled when the latent's longest dim exceeds
     _AUTO_TILE_LATENT_THRESHOLD — saves the user from picking 'true (tiled)'
-    manually for HiResFix outputs that would OOM the non-tiled path."""
+    manually for HiResFix outputs that would OOM the non-tiled path.
+
+    On OOM, walks tile_x/tile_y down (256→128→64) instead of crashing,
+    then falls through to vae.decode() which has its own OOM→tiled retry."""
     if mode == "false" or vae is None:
         return None
     samples = latent["samples"]
     latent_max = max(samples.shape[-1], samples.shape[-2])
-    if mode == "true" and latent_max > _AUTO_TILE_LATENT_THRESHOLD and hasattr(vae, "decode_tiled"):
-        return vae.decode_tiled(samples, tile_x=512, tile_y=512, overlap=64)
-    if mode == "true (tiled)" and hasattr(vae, "decode_tiled"):
-        return vae.decode_tiled(samples, tile_x=512, tile_y=512, overlap=64)
-    return vae.decode(samples)
+    use_tiled = (mode == "true (tiled)" or
+                 (mode == "true" and latent_max > _AUTO_TILE_LATENT_THRESHOLD))
+    if not (use_tiled and hasattr(vae, "decode_tiled")):
+        return vae.decode(samples)
+    tile = 256
+    while True:
+        try:
+            return vae.decode_tiled(samples, tile_x=tile, tile_y=tile, overlap=64)
+        except Exception as e:
+            import comfy.model_management as _mm
+            _mm.raise_non_oom(e)
+            if tile <= 64:
+                logging.info(
+                    "[GrimmRibbity] anima vae decode OOM at tile=%d, "
+                    "falling through to vae.decode()", tile)
+                _mm.soft_empty_cache()
+                return vae.decode(samples)
+            new_tile = tile // 2
+            logging.info(
+                "[GrimmRibbity] anima vae decode OOM at tile=%d, retrying at tile=%d",
+                tile, new_tile)
+            tile = new_tile
+            _mm.soft_empty_cache()
 
 
 def _interpolation_upscale(latent: dict, scale: float, method: str) -> dict:
@@ -310,6 +333,15 @@ class GrimmRibbityAnimaSampler:
                 )
             else:
                 print(f"[GrimmRibbityAnimaSampler] unknown script kind {kind!r}; skipped")
+
+        # Defragment between sampling and decode — under fragmentation pressure
+        # (e.g. AMD/HIP without allocator caching, or after long hires loops)
+        # the VAE's large allocations land cleaner in a coalesced pool.
+        try:
+            import comfy.model_management
+            comfy.model_management.soft_empty_cache()
+        except (ImportError, ModuleNotFoundError):
+            pass
 
         image_out = _vae_decode(optional_vae, latent_out, mode=vae_decode)
         if image_out is None:

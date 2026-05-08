@@ -92,6 +92,56 @@ class HelperTests(unittest.TestCase):
         self.assertTrue(torch.all(m == 1.0))
 
 
+class NormalizeImageShapeTests(unittest.TestCase):
+    def test_4d_passes_through_unchanged(self):
+        img = torch.zeros((1, 64, 64, 3))
+        out = detailer_node._normalize_image_shape(img)
+        self.assertEqual(tuple(out.shape), (1, 64, 64, 3))
+        self.assertIs(out, img)
+
+    def test_3d_gets_batch_dim_added(self):
+        img = torch.zeros((64, 64, 3))
+        out = detailer_node._normalize_image_shape(img)
+        self.assertEqual(tuple(out.shape), (1, 64, 64, 3))
+
+    def test_5d_with_leading_singleton_squeezes_to_4d(self):
+        img = torch.zeros((1, 1, 64, 64, 3))
+        out = detailer_node._normalize_image_shape(img)
+        self.assertEqual(tuple(out.shape), (1, 64, 64, 3))
+
+    def test_6d_with_leading_singletons_squeezes_to_4d(self):
+        img = torch.zeros((1, 1, 1, 64, 64, 3))
+        out = detailer_node._normalize_image_shape(img)
+        self.assertEqual(tuple(out.shape), (1, 64, 64, 3))
+
+    def test_5d_with_T_leading_singleton_squeezes_to_batch(self):
+        # (1, 4, H, W, C): singleton batch wrapping a 4-frame source. Squeeze
+        # the leading 1 and the result (4, H, W, C) is a valid batch — no
+        # crash, just runs the detailer on all 4 frames.
+        img = torch.zeros((1, 4, 64, 64, 3))
+        out = detailer_node._normalize_image_shape(img)
+        self.assertEqual(tuple(out.shape), (4, 64, 64, 3))
+
+    def test_5d_video_shape_raises_clear_error(self):
+        # (B=1, T=4, H, W, C) — animation source: leading dim is 1 but T>1
+        # so squeeze stops at 4D-with-T, not 4D-spatial. We squeeze the
+        # leading 1 then have (4, 64, 64, 3) which IS 4D — that's the "use
+        # one frame instead" case. Genuine 5D no-singleton stays 5D.
+        img = torch.zeros((2, 4, 64, 64, 3))
+        with self.assertRaises(ValueError) as ctx:
+            detailer_node._normalize_image_shape(img)
+        msg = str(ctx.exception)
+        self.assertIn("4D", msg)
+        self.assertIn("(2, 4, 64, 64, 3)", msg)
+        self.assertIn("video", msg.lower())
+
+    def test_2d_raises_clear_error(self):
+        img = torch.zeros((64, 64))
+        with self.assertRaises(ValueError) as ctx:
+            detailer_node._normalize_image_shape(img)
+        self.assertIn("4D", str(ctx.exception))
+
+
 class WildcardCacheTests(unittest.TestCase):
     def setUp(self):
         detailer_node._WILDCARD_CACHE.clear()
@@ -356,6 +406,106 @@ class PresetTests(unittest.TestCase):
         hands = detailer_node._PRESETS["hands"]["denoise"]
         for other in ("face", "eyes", "skin"):
             self.assertGreaterEqual(hands, detailer_node._PRESETS[other]["denoise"])
+
+
+class SamOffloadTests(unittest.TestCase):
+    """_offload_sam_to_cpu reclaims VRAM between detail() runs without
+    invalidating the cache. Tolerates the diverse predictor shapes
+    (sam2 / sam_v1 / future variants) defensively."""
+
+    def test_none_handle_is_noop(self):
+        detailer_node._offload_sam_to_cpu(None)
+
+    def test_moves_model_to_cpu(self):
+        moves = []
+
+        class FakeModel:
+            def to(self, device):
+                moves.append(device)
+                return self
+
+        class FakePredictor:
+            model = FakeModel()
+            features = "stub_embeddings"
+            is_image_set = True
+
+        detailer_node._offload_sam_to_cpu(("sam2", FakePredictor()))
+        self.assertEqual(moves, ["cpu"])
+
+    def test_clears_cached_embeddings(self):
+        class FakeModel:
+            def to(self, device):
+                return self
+
+        class FakePredictor:
+            def __init__(self):
+                self.model = FakeModel()
+                self.features = "embedded_image_data"
+                self.is_image_set = True
+
+        pred = FakePredictor()
+        detailer_node._offload_sam_to_cpu(("sam2", pred))
+        self.assertIsNone(pred.features)
+        self.assertFalse(pred.is_image_set)
+
+    def test_swallows_exceptions(self):
+        class BrokenPredictor:
+            @property
+            def model(self):
+                raise RuntimeError("predictor is in a weird state")
+
+        detailer_node._offload_sam_to_cpu(("sam2", BrokenPredictor()))
+
+    def test_predictor_without_model_attr_is_noop_safe(self):
+        class MinimalPredictor:
+            pass
+
+        detailer_node._offload_sam_to_cpu(("sam_v1", MinimalPredictor()))
+
+
+class FutureBboxesAfterTests(unittest.TestCase):
+    """detail() builds a 'still-needed bbox set after pass i' table by
+    walking passes in reverse to drive sam_mask_cache pruning. Mirror
+    that algorithm here so a regression is caught at unit-test time."""
+
+    @staticmethod
+    def _build_future(passes_detections):
+        future = [None] * len(passes_detections)
+        seen = set()
+        for j in range(len(passes_detections) - 1, -1, -1):
+            future[j] = set(seen)
+            for raw_bbox, _conf in passes_detections[j]:
+                seen.add(raw_bbox)
+        return future
+
+    def test_last_pass_has_empty_future(self):
+        passes = [
+            [((0, 0, 10, 10), 0.9)],
+            [((20, 20, 30, 30), 0.8)],
+        ]
+        self.assertEqual(self._build_future(passes)[-1], set())
+
+    def test_first_pass_future_contains_all_later_bboxes(self):
+        a = (0, 0, 10, 10)
+        b = (20, 20, 30, 30)
+        c = (40, 40, 50, 50)
+        passes = [[(a, 0.9)], [(b, 0.8)], [(c, 0.7)]]
+        self.assertEqual(self._build_future(passes)[0], {b, c})
+
+    def test_shared_bbox_kept_through_overlap(self):
+        shared = (10, 10, 100, 100)
+        passes = [[(shared, 0.95)], [(shared, 0.95)], [((200, 200, 250, 250), 0.7)]]
+        future = self._build_future(passes)
+        self.assertIn(shared, future[0])
+        self.assertNotIn(shared, future[1])
+
+    def test_empty_detections_pass_threads_through(self):
+        a = (0, 0, 10, 10)
+        passes = [[(a, 0.9)], [], [(a, 0.9)]]
+        future = self._build_future(passes)
+        self.assertIn(a, future[0])
+        self.assertIn(a, future[1])
+        self.assertEqual(future[2], set())
 
 
 if __name__ == "__main__":
