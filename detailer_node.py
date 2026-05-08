@@ -91,7 +91,12 @@ _PRESETS: dict[str, dict[str, Any]] = {
     "feet":  {"denoise": 0.40, "feather": 12, "crop_factor": 2.5,
               "wildcard": "detailed feet, sharp shoe details, clean stitching,",
               "color": (0.61, 0.30, 0.95)},   # violet
-    "hands": {"denoise": 0.45, "feather": 10, "crop_factor": 2.0,
+    # Hands crop_factor 2.0 → 1.5 (2026-05-08): at hires resolution a hand
+    # bbox already has plenty of pixels; the 2x context made the upscaled
+    # crop near-fullres → UNet sample on that latent + VAE encode/decode
+    # was the highest VRAM peak in the whole detail() call (close to
+    # lockup on 16 GB). 1.5x keeps wrist context, halves the bite.
+    "hands": {"denoise": 0.45, "feather": 10, "crop_factor": 1.5,
               "wildcard": "detailed hands, anatomically correct fingers,",
               "color": (0.95, 0.30, 0.85)},   # magenta
 }
@@ -543,9 +548,14 @@ def _encode_wildcard_cached(clip, wildcard_text: str, positive):
 
 def _vae_decode(vae, samples_dict, tiled: bool):
     """Decode latent → image. When `tiled` is requested, we only ACTUALLY tile
-    if the decoded resolution would exceed ~1024² — for typical face/eye
+    if the decoded resolution would exceed ~768² — for typical face/eye
     crops (256-512px decoded) full decode is faster and plenty RAM-safe.
     Tiling kicks in for hands/skin passes at higher guide_size.
+
+    Threshold lowered 1024 → 768 (2026-05-08): the hand pass at hires was
+    landing in 768-1024 range and consuming enough VRAM to nearly lock up
+    the system. Lower threshold = more crops go tiled, costing some warm
+    latency but staying well clear of the VRAM ceiling.
 
     On OOM, walks tile_x/tile_y down (256→128→64) instead of crashing.
     Last-resort falls through to vae.decode() so comfy's own decode-then-tiled
@@ -553,7 +563,7 @@ def _vae_decode(vae, samples_dict, tiled: bool):
     vae.decode() which has built-in OOM→tiled retry."""
     samples = samples_dict["samples"]
     h_pix, w_pix = samples.shape[-2] * 8, samples.shape[-1] * 8
-    needs_tile = tiled and (h_pix > 1024 or w_pix > 1024)
+    needs_tile = tiled and (h_pix > 768 or w_pix > 768)
     if not needs_tile:
         return vae.decode(samples)
     tile = 256
@@ -669,10 +679,12 @@ class _Pass:
 
 def _vae_encode(vae, pixels, tiled: bool):
     """Encode pixels → latent. Tiled mode kicks in for large crops to keep
-    encode RAM bounded — symmetric with _vae_decode's auto-tile policy.
+    encode RAM bounded — symmetric with _vae_decode's auto-tile policy
+    (threshold 768 to match decode side, lowered from 1024 after the
+    2026-05-08 hand-pass near-lockup).
     OOM walks tile down 256→128→64, then falls through to vae.encode()."""
     h, w = pixels.shape[1], pixels.shape[2]
-    if not (tiled and (h > 1024 or w > 1024)):
+    if not (tiled and (h > 768 or w > 768)):
         return vae.encode(pixels)
     tile = 256
     while True:

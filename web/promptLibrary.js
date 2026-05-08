@@ -1713,9 +1713,9 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
   queueAllBtn.className = "pl-btn";
   queueAllBtn.textContent = "Queue ▶▶";
   queueAllBtn.title = "Queue the current workflow once per selected entry (or per visible "
-    + "entry if no selection). Sets the first GrimmRibbity Library node's prompt_id to "
-    + "that entry's id before each queue. Pair with a PromptLibrarySave node wired to "
-    + "your output (with the same prompt_id) to auto-fill thumbnails across many entries.";
+    + "entry if no selection). Sets THIS gallery's prompt_id to that entry's id before "
+    + "each queue and restores it after. Pair with a PromptLibrarySave or ThumbnailSaver "
+    + "node wired to your output to auto-fill thumbnails across many entries.";
 
   const refreshBtn = document.createElement("button");
   refreshBtn.className = "pl-btn";
@@ -2586,8 +2586,13 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
     lastVisible = visible;
     // Drop checked ids that no longer exist in the library; keep ones that
     // are merely filtered out so multi-select persists across filter changes.
-    for (const id of [...checkedIds]) {
-      if (!prompts.some(p => p.id === id)) checkedIds.delete(id);
+    // Skip when prompts is empty: that means fetchList hasn't resolved yet
+    // (we got here from onConfigure's render call running before the initial
+    // refresh awaits), and pruning would wipe a freshly-restored selection.
+    if (prompts.length > 0) {
+      for (const id of [...checkedIds]) {
+        if (!prompts.some(p => p.id === id)) checkedIds.delete(id);
+      }
     }
     updateBulkBar();
     countBadge.textContent = visible.length === prompts.length
@@ -2941,16 +2946,13 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
       toast("Nothing to queue (no selection, no visible entries).", "info");
       return;
     }
-    // Find the first PromptLibrary node in the active graph.
-    const libraryNode = app.graph?._nodes?.find(n => n.type === "PromptLibrary");
-    if (!libraryNode) {
-      toast("No GrimmRibbity Library node found in the current workflow. Add one and "
-        + "wire it to your sampler chain first.", "error", 8000);
-      return;
-    }
-    const idWidget = libraryNode.widgets?.find(w => w.name === "prompt_id");
+    // Drive THIS gallery's parent node, not the first PromptLibrary in the
+    // graph. That makes Queue ▶▶ work from a Multi panel (cycles its own
+    // panel, leaving the others fixed) or a Style node (cycles styles)
+    // without forcing a separate Library node into the workflow.
+    const libraryNode = node;
     if (!idWidget) {
-      toast("Library node has no prompt_id widget — workflow may be from an older "
+      toast("Gallery has no prompt_id widget — workflow may be from an older "
         + "version. Re-add the node.", "error");
       return;
     }
@@ -2964,19 +2966,33 @@ function buildGallery(node, idWidget, propsKey = "pl_state") {
         { confirmLabel: "Queue all" });
       if (!ok) return;
     }
+    // Snapshot the canonical widget values so we can restore them after the
+    // loop. Without this, idWidget.value ends up as just the last queued id
+    // — desyncing from checkedIds (which the user still sees highlighted)
+    // and shrinking the persisted multi-select to a single entry on the
+    // next page refresh.
+    const savedIdWidgetValue = idWidget.value;
+    const savedSaverIdValue = saverIdWidget?.value;
     let queued = 0;
     const fails = [];
-    for (const id of ids) {
-      idWidget.value = id;
-      if (saverIdWidget) saverIdWidget.value = id;
+    try {
+      for (const id of ids) {
+        idWidget.value = id;
+        if (saverIdWidget) saverIdWidget.value = id;
+        libraryNode.setDirtyCanvas?.(true, true);
+        if (saverNode) saverNode.setDirtyCanvas?.(true, true);
+        try {
+          await app.queuePrompt(0, 1);
+          queued++;
+        } catch (e) {
+          fails.push({ id, error: e?.message || String(e) });
+        }
+      }
+    } finally {
+      idWidget.value = savedIdWidgetValue;
+      if (saverIdWidget) saverIdWidget.value = savedSaverIdValue;
       libraryNode.setDirtyCanvas?.(true, true);
       if (saverNode) saverNode.setDirtyCanvas?.(true, true);
-      try {
-        await app.queuePrompt(0, 1);
-        queued++;
-      } catch (e) {
-        fails.push({ id, error: e?.message || String(e) });
-      }
     }
     if (!fails.length) {
       toast(`Queued ${queued} workflow run${queued === 1 ? "" : "s"}.`, "success", 6000);
