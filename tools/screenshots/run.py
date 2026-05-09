@@ -366,6 +366,34 @@ def _scn_style_node_with_sockets(page: Page, out: Path) -> None:
     screenshot_node(page, "PromptLibraryStyle", out)
 
 
+def _scn_multi_library_3_panels(page: Page, out: Path) -> None:
+    """Multi Library node — three independent gallery panels in one node.
+    Captures the post-v0.57.1 layout where each panel keeps its own
+    selection state (and its own localStorage tier-3 entry)."""
+    wait_for_gallery(page)
+    page.evaluate("""() => {
+        const ds = window.app?.canvas?.ds;
+        if (ds) { ds.scale = 1.0; ds.offset = [0, 0]; }
+        window.app?.canvas?.draw?.(true, true);
+    }""")
+    page.wait_for_timeout(300)
+    screenshot_node(page, "PromptLibraryMulti", out)
+
+
+def _scn_upscale_sdxl_node(page: Page, out: Path) -> None:
+    """Full Upscale SDXL node — IMAGE/MODEL/VAE/CONDITIONING inputs, the
+    full widget stack (denoise / cfg / tile_* / cn_* / seam_fix_*), and
+    the IMAGE output. New in v0.57.1."""
+    page.wait_for_timeout(500)
+    page.evaluate("""() => {
+        const ds = window.app?.canvas?.ds;
+        if (ds) { ds.scale = 1.0; ds.offset = [0, 0]; }
+        window.app?.canvas?.draw?.(true, true);
+    }""")
+    page.wait_for_timeout(300)
+    screenshot_node(page, "GrimmRibbityUpscaleSDXL", out)
+
+
 SCENARIOS: list[Scenario] = [
     Scenario("library-gallery", "library-minimal.json",
               _scn_library_gallery,
@@ -376,6 +404,12 @@ SCENARIOS: list[Scenario] = [
     Scenario("style-node-with-sockets", "style-minimal.json",
               _scn_style_node_with_sockets,
               "Full Style node showing MODEL/CLIP/CONDITIONING in/out (v0.29+)."),
+    Scenario("multi-library-3-panels", "multi-library-minimal.json",
+              _scn_multi_library_3_panels,
+              "Multi Library node with three independent panels (v0.57.1 fix: per-panel localStorage)."),
+    Scenario("upscale-sdxl-node", "upscale-sdxl-minimal.json",
+              _scn_upscale_sdxl_node,
+              "Full Upscale SDXL node with all widgets visible (new in v0.57.1)."),
     Scenario("gallery-list-view", "library-minimal.json",
               _scn_gallery_list_view,
               "Library gallery in single-column list mode."),

@@ -40,7 +40,7 @@ python3 tools/screenshots/run.py
 
 ## Other library nodes
 
-- [ ] `multi-library-3-panels.png` — Multi Library node showing three panels with different filters (e.g. Character / Style / Clothing).
+- [x] `multi-library-3-panels.png` — Multi Library node showing three panels with different filters (e.g. Character / Style / Clothing).
 - [ ] `random-by-tag-overnight.png` — three Random by Tag nodes feeding a concat → CLIPTextEncode → KSampler chain. The classic overnight pattern.
 - [ ] `wildcard-expand-text.png` — Wildcard Expand node with a `{a|b|c}` and `__char__` reference, output text shown.
 - [ ] `save-node.png` — Save node mid-run capturing a freshly-generated image to the library.

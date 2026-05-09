@@ -70,7 +70,9 @@ After install, find them under **GrimmRibbity/** sub-menus in the node picker:
 - **GrimmRibbity — Style (LoRA + Conditioning)** — like the Library node above but takes the next step: also encodes the joined positive + negative on the patched CLIP and emits `CONDITIONING` outputs (concatted onto optional inputs). Same gallery, same LoRA stack, but skips the separate CLIPTextEncode step. `bypass` toggle for A/B comparisons; `strength_scale` multiplies every LoRA at once.
 
   ![Style node](docs/screenshots/style-node-with-sockets.png)
-- **GrimmRibbity — Multi Library (3 panels)** — three independent gallery panels in one node, replaces 3× Library + 2× Join Strings spaghetti
+- **GrimmRibbity — Multi Library (3 panels)** — three independent gallery panels in one node, replaces 3× Library + 2× Join Strings spaghetti. Each panel keeps its own search / tag-filter / sort / selection state, persisted per-panel across page refreshes (v0.57.1: fixed a localStorage collision where the three panels stomped each other's saved selection).
+
+  ![Multi Library 3 panels](docs/screenshots/multi-library-3-panels.png)
 - **GrimmRibbity — Save** — write prompts to the library during workflow runs. Inputs: `name`, `text`, optional `negative`, optional `IMAGE` thumbnail, optional `tags`, optional `prompt_id` (override target id), `overwrite_by_name` (when set, updates the most-recently-edited entry sharing the typed name instead of appending a new one), `loras_json` (programmatic LoRA stack as JSON). Logs the lookup path on every save (`via=prompt_id` / `via=overwrite_by_name` / `via=new`) so a sticky widget value is visible in the console.
 - **GrimmRibbity — Random by Tag** — pick a random library entry by tag filter (outputs text, id, negative). Built for overnight loops
 - **GrimmRibbity — Wildcard Expand** — expand `{a|b|c}` alternatives and `__name__` library refs in any string
@@ -94,6 +96,9 @@ After install, find them under **GrimmRibbity/** sub-menus in the node picker:
 - **GrimmRibbity — Anima Sampler** — KSampler-shaped sampler for Qwen / Flux / SD3 / any flow-matching base. Pre-encoded CONDITIONING + MODEL + LATENT directly, no SDXL-specific tuple.
 - **GrimmRibbity — HiResFix Script** (SDXL) — latent / pixel / both upscale, optional checkpoint swap, per-iteration ControlNet anchoring, per-field hires prompt overrides, 1–5 iterations. Pixel upscale model + ControlNet load **once per run** instead of once per iteration; hires checkpoint cached across workflow re-runs (1-slot LRU). Auto-tiles VAE decode for outputs >1536px.
 - **GrimmRibbity — Anima HiResFix Script** — shape-agnostic latent upscale (works on 5D Qwen latents). Per-iteration ProgressBar, refinement-only mode at scale=1.0, same auto-tile decode.
+
+**Upscale**
+- **GrimmRibbity — Upscale SDXL** *(new in v0.57.1)* — single-node tile-diffusion upscaler. Pre-upscales the input (via `upscale_model` if wired, otherwise Lanczos to `upscale_by`), optionally applies an SDXL tile ControlNet to the conditioning, then walks the canvas tile-by-tile with a low-denoise sampler and feather-blends each tile back in. Defaults match the Magnific Precise V2 / Clarity recipe (denoise 0.25, CFG 4.0, CN strength 0.5, 512 px tiles). `bypass=True` skips the diffusion pass and returns the upscaled image directly. Replaces the LoadControlNet + ApplyControlNet + UltimateSDUpscale chain with one node, all knobs exposed.
 
 Both samplers have an opt-in `save_prompt_log` toggle (default off) — when enabled, every queued sample appends one JSONL line to `prompt_log_path` (empty = `<output>/prompt_logs/prompts.jsonl`) with the positive + negative prompts, the LoRA stack walked from the workflow trace, the model, and the sampler params (seed/steps/cfg/sampler_name/scheduler). One growing file per overnight batch — `jq`-friendly, no per-image directory pollution.
 
