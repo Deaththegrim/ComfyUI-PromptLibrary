@@ -3071,7 +3071,7 @@ async def fix_orphans(request):
     return web.json_response({"removed": removed, "errors": errors})
 
 
-__version__ = "0.55.2"
+__version__ = "0.57.1"
 
 
 def _autobackup_on_version_change() -> None:
@@ -3194,6 +3194,14 @@ except Exception as _e:
     print(f"[PromptLibrary] Style node unavailable: {_e}")
     _style_node, _style_label = {}, {}
 
+try:
+    from .upscaler_node import GrimmRibbityUpscaleSDXL
+    _upscaler_node = {"GrimmRibbityUpscaleSDXL": GrimmRibbityUpscaleSDXL}
+    _upscaler_label = {"GrimmRibbityUpscaleSDXL": "GrimmRibbity — Upscale SDXL"}
+except Exception as _e:
+    print(f"[PromptLibrary] Upscale SDXL unavailable: {_e}")
+    _upscaler_node, _upscaler_label = {}, {}
+
 NODE_CLASS_MAPPINGS = {
     "PromptLibrary": PromptLibrary,
     "PromptLibraryMulti": PromptLibraryMulti,
@@ -3212,6 +3220,7 @@ NODE_CLASS_MAPPINGS = {
     **_detailer_node,
     **_comic_page_node,
     **_style_node,
+    **_upscaler_node,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptLibrary": "GrimmRibbity — Library",
@@ -3231,6 +3240,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **_detailer_label,
     **_comic_page_label,
     **_style_label,
+    **_upscaler_label,
 }
 WEB_DIRECTORY = "./web"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]

@@ -73,7 +73,12 @@ def _resolve_comfy_helpers() -> None:
         _PROGRESS_BAR_CLS = None
 
 
-_TARGET_ORDER = ("face", "skin", "mouth", "eyes", "feet", "hands")
+# Coarse-to-fine. Skin (broadest, gentlest 0.30 denoise) lays texture
+# across the whole body; face refines on top of that on the head; mouth
+# and eyes polish within the already-refined face; hands and feet are
+# independent extremities last (VRAM peaks there, so we run them after
+# the face work is committed).
+_TARGET_ORDER = ("skin", "face", "mouth", "eyes", "hands", "feet")
 
 _PRESETS: dict[str, dict[str, Any]] = {
     "face":  {"denoise": 0.40, "feather": 12, "crop_factor": 3.0,
@@ -244,6 +249,19 @@ def _load_sam(model_name: str):
 
     _SAM_CACHE[model_name] = handle
     return handle
+
+
+def _offload_yolo_cache_to_cpu() -> None:
+    """Push every cached YOLO model back to CPU. Reclaims ~50-300 MB per
+    model (3-4 models × ~100 MB typical) without invalidating the cache
+    — next _load_yolo cache hit moves the model back to GPU implicitly
+    on inference. Best-effort; per-model failures are logged and skipped."""
+    for name, yolo in list(_YOLO_CACHE.items()):
+        try:
+            if hasattr(yolo, "to"):
+                yolo.to("cpu")
+        except Exception as exc:
+            logging.warning("[SmartDetailer] YOLO '%s' offload failed (%s)", name, exc)
 
 
 def _offload_sam_to_cpu(sam_handle) -> None:
@@ -548,14 +566,16 @@ def _encode_wildcard_cached(clip, wildcard_text: str, positive):
 
 def _vae_decode(vae, samples_dict, tiled: bool):
     """Decode latent → image. When `tiled` is requested, we only ACTUALLY tile
-    if the decoded resolution would exceed ~768² — for typical face/eye
-    crops (256-512px decoded) full decode is faster and plenty RAM-safe.
-    Tiling kicks in for hands/skin passes at higher guide_size.
+    if the decoded resolution would exceed ~1024² — for typical face/eye/
+    mouth crops (256-768px decoded) full decode is faster and plenty
+    RAM-safe. Tiling kicks in for hand/skin passes at higher guide_size.
 
-    Threshold lowered 1024 → 768 (2026-05-08): the hand pass at hires was
-    landing in 768-1024 range and consuming enough VRAM to nearly lock up
-    the system. Lower threshold = more crops go tiled, costing some warm
-    latency but staying well clear of the VRAM ceiling.
+    Threshold history: 1024 → 768 → 1024. Briefly lowered to 768 to stop
+    the hand pass nearly locking up; the v0.55.2 hand crop_factor cut
+    (2.0 → 1.5) shrunk hand crops enough that 1024 works again. The 768
+    cutover broke the mouth pass — typical mouth crops at guide=1024
+    landed in 768-1024 and got force-tiled into hundreds of small VAE
+    calls, looking like a hang from the silent log.
 
     On OOM, walks tile_x/tile_y down (256→128→64) instead of crashing.
     Last-resort falls through to vae.decode() so comfy's own decode-then-tiled
@@ -563,7 +583,7 @@ def _vae_decode(vae, samples_dict, tiled: bool):
     vae.decode() which has built-in OOM→tiled retry."""
     samples = samples_dict["samples"]
     h_pix, w_pix = samples.shape[-2] * 8, samples.shape[-1] * 8
-    needs_tile = tiled and (h_pix > 768 or w_pix > 768)
+    needs_tile = tiled and (h_pix > 1024 or w_pix > 1024)
     if not needs_tile:
         return vae.decode(samples)
     tile = 256
@@ -680,11 +700,10 @@ class _Pass:
 def _vae_encode(vae, pixels, tiled: bool):
     """Encode pixels → latent. Tiled mode kicks in for large crops to keep
     encode RAM bounded — symmetric with _vae_decode's auto-tile policy
-    (threshold 768 to match decode side, lowered from 1024 after the
-    2026-05-08 hand-pass near-lockup).
+    (threshold 1024).
     OOM walks tile down 256→128→64, then falls through to vae.encode()."""
     h, w = pixels.shape[1], pixels.shape[2]
-    if not (tiled and (h > 768 or w > 768)):
+    if not (tiled and (h > 1024 or w > 1024)):
         return vae.encode(pixels)
     tile = 256
     while True:
@@ -1004,42 +1023,50 @@ class GrimmRibbitySmartDetailer:
                 "enable_mouth": ("BOOLEAN", {"default": False, "tooltip":
                     "Run the mouth/teeth pass: tight crop on the mouth region, sharpens "
                     "teeth and lip detail. Off by default — needs a mouth detector "
-                    "(e.g. adetailer2dMouth_v10.pt) in models/ultralytics/bbox/."}),
+                    "(e.g. mouth_ANIME_adetailer2d_v10.pt) in models/ultralytics/bbox/."}),
                 "enable_hands": ("BOOLEAN", {"default": False, "tooltip":
-                    "Run the hands pass: needs a dedicated hand detector (hand_yolov8s.pt or "
-                    "PitHandDetailer-v2-Test-v9c.pt). Highest preset denoise (0.45) since hands "
-                    "often need real geometry rebuilding. Off by default because most workflows "
-                    "don't have a hand model wired in."}),
+                    "Run the hands pass: needs a dedicated hand detector "
+                    "(hand_REAL_y9c.pt for photos, hand_MIXED_PitHand_v2_y9c.pt for stylized). "
+                    "Highest preset denoise (0.45) since hands often need real geometry "
+                    "rebuilding. Off by default because most workflows don't have a hand "
+                    "model wired in."}),
                 "enable_feet": ("BOOLEAN", {"default": False, "tooltip":
                     "Run the feet/shoes pass: cleans up shoe stitching, sole detail, ankle "
-                    "boundary. Off by default — needs a foot detector (footShoeDetailer or "
-                    "foot_yolov8s.pt) in models/ultralytics/bbox/."}),
+                    "boundary. Off by default — needs a foot detector "
+                    "(feet_MIXED_footShoe_v04seg.pt or feet_REAL_y8x_v2.pt) in "
+                    "models/ultralytics/bbox/."}),
                 "enable_skin":  ("BOOLEAN", {"default": False, "tooltip":
                     "Run a skin-smoothing pass on the face region (uses bbox_face). Lowest "
                     "denoise (0.30) and largest feather — refines pore texture without changing "
                     "identity. Off by default; turn on for portrait close-ups."}),
 
                 "bbox_face":  (bbox_models, {"default": _NONE, "tooltip":
-                    "YOLO bbox model for the face / skin / (fallback) eyes passes. Pick "
-                    "face_yolov8m.pt (good speed-accuracy balance) or face_yolov9c.pt (higher "
-                    "accuracy, slower). face_yolov8s.pt is the smallest/fastest. Required when "
+                    "YOLO bbox model for the face / skin / (fallback) eyes passes. "
+                    "Naming key: <part>_<style>_<name>.pt where style is REAL "
+                    "(photos), ANIME, FURRY (anthro/animal), UNIV (multi-style), or "
+                    "MIXED (community-tested). Defaults: face_REAL_y9c for photos, "
+                    "face_UNIV_Anzhc_v4_y11n for anime/illustration, "
+                    "face_FURRY_FaceFinder_v12 for furry/anthro. Required when "
                     "enable_face / enable_eyes / enable_skin is True."}),
                 "bbox_eyes":  (bbox_models, {"default": _NONE, "tooltip":
-                    "Optional dedicated eye detector (e.g. Eyeful_v2-Paired.pt). "
+                    "Optional dedicated eye detector. eyes_UNIV_Eyeful_v2_paired works "
+                    "across all styles; eyes_ANIME_Anzhc_seg_hd is anime-specialized. "
                     "Set to (none) to fall back to bbox_face — when both targets use the same "
                     "detector + threshold, YOLO inference runs ONCE and the bboxes are reused. "
                     "A dedicated eye detector finds eye bboxes inside the face region for "
                     "tighter crops than the face detector alone."}),
                 "bbox_mouth": (bbox_models, {"default": _NONE, "tooltip":
                     "YOLO bbox model for the mouth pass. Required when enable_mouth=True. "
-                    "adetailer2dMouth_v10.pt (YOLO11n, illustration-tuned) is a good pick."}),
+                    "mouth_ANIME_adetailer2d_v10 (YOLO11n, illustration-tuned) is a good pick "
+                    "for stylized; mouth_REAL_lips_v1 for photos."}),
                 "bbox_hands": (bbox_models, {"default": _NONE, "tooltip":
-                    "YOLO bbox model for hands (e.g. hand_yolov8s.pt or "
-                    "PitHandDetailer-v2-Test-v9c.pt). Required when enable_hands is True; "
-                    "ignored otherwise."}),
+                    "YOLO bbox model for hands. hand_REAL_y9c for photos; "
+                    "hand_MIXED_PitHand_v2_y9c for stylized / SD hands. "
+                    "Required when enable_hands is True; ignored otherwise."}),
                 "bbox_feet": (bbox_models, {"default": _NONE, "tooltip":
                     "YOLO bbox model for the feet pass. Required when enable_feet=True. "
-                    "footShoeDetailer_v04Seg.pt is the standard YOLO11n foot+shoe model."}),
+                    "feet_MIXED_footShoe_v04seg is the standard YOLO11n foot+shoe model; "
+                    "feet_REAL_y8x_v2 is the most accurate for photos."}),
                 "sam_model":  (sam_models, {"default": _NONE, "tooltip":
                     "Optional SAM (Segment Anything) model for mask refinement. Without SAM, "
                     "the composite blends the refined crop back using a rectangular feathered "
@@ -1490,17 +1517,35 @@ class GrimmRibbitySmartDetailer:
         combined_mask = torch.nan_to_num(combined_mask, nan=0.0).clamp(0, 1)
         if running.dtype != out_dtype:
             running = running.to(dtype=out_dtype)
-        # Push SAM back to CPU between runs. Keeps the cache (no reload
-        # work, ~30-50 ms saved on next call's set_image) but reclaims
-        # ≈600 MB-1.5 GB VRAM that would otherwise stay pinned across the
-        # whole comfy session.
+        # End-of-run cleanup. Multi-prompt sessions otherwise saw VRAM
+        # creep ~2 GB per run on a 16 GB card even with --lowvram +
+        # --no-cache-models, because comfy's cleanup_models() doesn't
+        # know about our module-level caches (YOLO, SAM, wildcard CLIP
+        # encodings). All three reclaim VRAM without invalidating the
+        # caches — next run pulls them back lazily.
         if sam_handle is not None:
             _offload_sam_to_cpu(sam_handle)
-            if soft_cleanup is not None:
-                try:
-                    soft_cleanup()
-                except Exception:
-                    pass
+        _offload_yolo_cache_to_cpu()
+        # Drop wildcard cache entries whose CLIP id no longer matches
+        # the current CLIP. With --no-cache-models, comfy reloads CLIP
+        # per prompt, so id(clip) churns and stale entries pin
+        # conditioning tensors on GPU forever otherwise.
+        current_clip_id = id(clip)
+        for stale_key in [k for k in _WILDCARD_CACHE if k[0] != current_clip_id]:
+            _WILDCARD_CACHE.pop(stale_key, None)
+        if soft_cleanup is not None:
+            try:
+                soft_cleanup()
+            except Exception:
+                pass
+        # Push freed allocator blocks back to amdgpu so rocm-smi reflects
+        # the offloads; otherwise the caching allocator holds the
+        # reservation up to gc_threshold (60% of usable).
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
         return (running, combined_mask, preview)
 
 
