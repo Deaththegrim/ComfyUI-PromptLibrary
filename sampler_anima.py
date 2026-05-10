@@ -173,12 +173,17 @@ def _apply_anima_hires_fix(script: dict, *,
     progress bar — same bookkeeping as the SDXL HiResFix so behaviour
     stays consistent."""
     # Cross-module borrow for the shared plan + pre-flight warning + the
-    # between-iteration GPU cleanup. SDXL is always present (no torch
-    # fallback path on this side either, since this whole function only
-    # runs at sample time when torch is loaded).
+    # between-iteration GPU cleanup + telemetry helpers. SDXL is always
+    # present (no torch fallback path on this side either, since this
+    # whole function only runs at sample time when torch is loaded).
     from .sampler_sdxl import (
         _HiresIterPlan, _preflight_size_warning, _between_iterations_cleanup,
+        _peak_vram_reset, _log_hires_iter,
     )
+    try:
+        from .runtime import hip_sync
+    except ImportError:
+        from runtime import hip_sync
 
     base_seed = primary_seed if script["use_same_seed"] else script["seed"]
 
@@ -190,6 +195,7 @@ def _apply_anima_hires_fix(script: dict, *,
     cur = latent
     denoise = script["hires_denoise"]
     for i in range(plan.iterations):
+        pre_mb = _peak_vram_reset()
         if not plan.skip_upscale:
             cur = _interpolation_upscale(cur, plan.per_iter, script["upscale_method"])
         # denoise=0 short-circuit: skip the noise+step ritual when the
@@ -202,7 +208,9 @@ def _apply_anima_hires_fix(script: dict, *,
                 positive, negative, cur,
                 denoise=denoise,
             )
+            hip_sync("post-ksampler-hires-anima")
             cur = sampled[0]
+        _log_hires_iter("anima", i, pre_mb)
         plan.pbar.update(1)
         _between_iterations_cleanup()
     return cur
@@ -344,6 +352,11 @@ class GrimmRibbityAnimaSampler:
             pass
 
         image_out = _vae_decode(optional_vae, latent_out, mode=vae_decode)
+        try:
+            from .runtime import hip_sync as _hip_sync_final
+        except ImportError:
+            from runtime import hip_sync as _hip_sync_final
+        _hip_sync_final("post-vae-decode-anima-final")
         if image_out is None:
             image_out = torch.zeros((1, 1, 1, 3))
 

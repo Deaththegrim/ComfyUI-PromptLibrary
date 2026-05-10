@@ -37,9 +37,9 @@ import folder_paths
 import nodes  # for common_ksampler
 
 try:
-    from .runtime import register_cache, ensure_unload_hook
+    from .runtime import register_cache, ensure_unload_hook, hip_sync
 except ImportError:
-    from runtime import register_cache, ensure_unload_hook
+    from runtime import register_cache, ensure_unload_hook, hip_sync
 
 
 # Shared iteration math + UI feedback for any HiResFix variant. Both the
@@ -105,6 +105,36 @@ def _between_iterations_cleanup() -> None:
         comfy.model_management.soft_empty_cache()
     except Exception:
         pass
+
+
+def _peak_vram_reset() -> float | None:
+    """Reset the peak-memory counter and return the current allocated MB
+    as a baseline. Caller passes the baseline to _log_hires_iter after
+    the iteration body. Returns None on non-CUDA / failure paths so the
+    log call no-ops cleanly. Shared by both SDXL and Anima HiResFix
+    iteration loops via the cross-module borrow in sampler_anima."""
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+            return torch.cuda.memory_allocated() / (1024 * 1024)
+    except Exception:
+        pass
+    return None
+
+
+def _log_hires_iter(mode: str, i: int, pre_mb: float | None) -> None:
+    """Per-iteration HiResFix log line with peak/delta VRAM. Mirrors the
+    detailer's per-pass telemetry from v0.57.2 so wedge investigations
+    have the same numbers across nodes."""
+    if pre_mb is None:
+        logging.info("[GrimmRibbity HiRes] %s iter %d done", mode, i + 1)
+        return
+    try:
+        peak_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
+        logging.info("[GrimmRibbity HiRes] %s iter %d done peak_vram_mb=%.0f delta_mb=%+.0f",
+                      mode, i + 1, peak_mb, peak_mb - pre_mb)
+    except Exception:
+        logging.info("[GrimmRibbity HiRes] %s iter %d done", mode, i + 1)
 
 
 def _preflight_size_warning(latent: dict, total_scale: float, *, sampler: str) -> None:
@@ -646,6 +676,7 @@ def _hires_one_iteration(*, model, clip, vae, positive, negative, latent,
         # has pushed the latent past the threshold so iteration N doesn't
         # OOM where iteration N-1 fit comfortably.
         decoded = _smart_vae_decode(vae, latent, mode="true")
+        hip_sync("post-vae-decode-hires")
         upscaled = _pixel_upscale_with_model(decoded, upscale_model,
                                               keep_on_device=True)
         target_w = round(decoded.shape[-2] * per_scale)
@@ -724,6 +755,7 @@ def _hires_one_iteration(*, model, clip, vae, positive, negative, latent,
         iter_sampler, iter_sched, pos, neg, cur,
         denoise=script["hires_denoise"],
     )
+    hip_sync("post-ksampler-hires")
     return sampled[0]
 
 
@@ -787,6 +819,7 @@ def _apply_hires_fix(script: dict, *,
             for stage_idx, stage_mode in enumerate(("both_latent", "both_pixel")):
                 for i in range(plan.iterations):
                     seed = base_seed + stage_idx * plan.iterations + i
+                    pre_mb = _peak_vram_reset()
                     cur = _hires_one_iteration(
                         model=sampling_model, clip=sampling_clip, vae=sampling_vae,
                         positive=positive, negative=negative, latent=cur,
@@ -795,12 +828,14 @@ def _apply_hires_fix(script: dict, *,
                         seed=seed, upscale_model=upscale_model,
                         control_net=control_net,
                     )
+                    _log_hires_iter(stage_mode, i, pre_mb)
                     plan.pbar.update(1)
                     _between_iterations_cleanup()
         else:
             plan = _HiresIterPlan.build(total_scale=total_scale, iterations=iterations,
                                          total_steps=total_iters)
             for i in range(plan.iterations):
+                pre_mb = _peak_vram_reset()
                 cur = _hires_one_iteration(
                     model=sampling_model, clip=sampling_clip, vae=sampling_vae,
                     positive=positive, negative=negative, latent=cur,
@@ -809,6 +844,7 @@ def _apply_hires_fix(script: dict, *,
                     seed=base_seed + i, upscale_model=upscale_model,
                     control_net=control_net,
                 )
+                _log_hires_iter(upscale_type, i, pre_mb)
                 plan.pbar.update(1)
                 _between_iterations_cleanup()
     finally:

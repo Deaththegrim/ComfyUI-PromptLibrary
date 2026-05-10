@@ -83,8 +83,12 @@ class RegistryTests(unittest.TestCase):
                       "second install must not re-wrap the already-wrapped fn")
 
     def test_install_silent_when_comfy_missing(self):
-        sys.modules.pop("comfy.model_management", None)
-        sys.modules.pop("comfy", None)
+        # Setting sys.modules entries to None forces ImportError even when
+        # comfy is importable from disk (locally with PYTHONPATH set to a
+        # ComfyUI checkout). Plain pop() would let the import succeed and
+        # the test would assert wrong.
+        sys.modules["comfy"] = None
+        sys.modules["comfy.model_management"] = None
         runtime.ensure_unload_hook()
         self.assertFalse(runtime._UNLOAD_HOOK_INSTALLED)
 
