@@ -768,8 +768,11 @@ def _enhance_one_pass(
         return image, torch.zeros((1, H, W), device=device, dtype=image.dtype)
 
     feather = int(_PRESETS[plan.name]["feather"])
-    # Per-target override wins; 0.0 sentinel falls back to the preset value.
-    crop_factor = (plan.crop_factor if plan.crop_factor > 0
+    # Per-target override wins when >= 1.0. Anything below (the -1.0 default
+    # sentinel, the legacy 0.0 sentinel, or accidental sub-1.0 values that
+    # would shrink the bbox) falls back to the preset. Prevents silent
+    # detection-cutoff if the user thought 0.5 = "half crop".
+    crop_factor = (plan.crop_factor if plan.crop_factor >= 1.0
                     else float(_PRESETS[plan.name]["crop_factor"]))
 
     positive_with_wc = _encode_wildcard_cached(clip, wildcard_text, positive)
@@ -988,15 +991,25 @@ class GrimmRibbitySmartDetailer:
                     f"thorough face pass (20-30 steps), or vice versa. Cost scales linearly.")})
 
         def crop(target, preset_val):
-            return ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.05,
+            return ("FLOAT", {"default": -1.0, "min": -1.0, "max": 10.0, "step": 0.1,
                 "tooltip": (
-                    f"Per-target crop_factor for the {target} pass. "
-                    f"0.0 (default) = use preset value ({preset_val}). "
-                    f"Higher = more context around the detection (the model sees more of the "
-                    f"surrounding region) — useful for stylised characters where the canonical "
-                    f"shape needs more context to anchor on. Lower = tighter crop (faster, "
-                    f"sharper detail but riskier on stylised art). Sweet spot for cartoon "
-                    f"characters: face=4.0, eyes=2.5, mouth=3.5, hands=2.5.")})
+                    f"Per-target crop_factor for the {target} pass — multiplier applied "
+                    f"to the YOLO bbox before cropping. The crop is centered on the bbox.\n"
+                    f"\n"
+                    f"-1.0 (default) = use preset value ({preset_val}).\n"
+                    f"Any value < 1.0 = also falls back to preset (prevents accidental "
+                    f"sub-bbox crops that cut off parts of the detection).\n"
+                    f"1.0 = bbox only, zero padding (no surrounding context).\n"
+                    f"1.5 = bbox + ~25% padding each side (1.5x w × 1.5x h = 2.25x area).\n"
+                    f"2.0 = bbox + ~50% padding each side (2x w × 2x h = 4x area).\n"
+                    f"3.0 = bbox + ~100% padding each side (3x w × 3x h = 9x area). "
+                    f"Cropped patch may exceed the image size — it gets clamped to the "
+                    f"image bounds.\n"
+                    f"\n"
+                    f"Higher = more context for the model to anchor stylised features. "
+                    f"Lower = tighter, faster, sharper detail but riskier on cartoon art "
+                    f"where canonical shapes need context. Most realistic-photo workflows "
+                    f"want 1.5–2.0; stylised/cartoon workflows want 2.5–4.0.")})
 
         return {
             "required": {
