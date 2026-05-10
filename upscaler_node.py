@@ -341,7 +341,6 @@ class GrimmRibbityUpscaleSDXL:
         if neighbour tiles diverged enough that the average looks blurry.
         Band sampling lets diffusion re-knit the seam itself."""
         b, h, w, c = image.shape
-        device = image.device
         out = image.clone()
         bw = _round_to_8(band_width)
 

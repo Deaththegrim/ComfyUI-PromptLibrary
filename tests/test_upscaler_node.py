@@ -59,11 +59,8 @@ def _install_stubs():
     return True
 
 
-try:
-    import torch  # noqa: F401
-    _TORCH_OK = True
-except ImportError:
-    _TORCH_OK = False
+import importlib.util
+_TORCH_OK = importlib.util.find_spec("torch") is not None
 
 
 if _TORCH_OK and _install_stubs():
