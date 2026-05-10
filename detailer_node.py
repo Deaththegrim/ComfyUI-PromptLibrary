@@ -31,6 +31,7 @@ Outputs:
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from collections import OrderedDict
@@ -826,10 +827,8 @@ def _enhance_one_pass(
         # button. Comfy raises an InterruptProcessingException which propagates
         # through the queue executor and aborts the whole prompt cleanly.
         if _mm is not None:
-            try:
+            with contextlib.suppress(AttributeError):
                 _mm.throw_exception_if_processing_interrupted()
-            except AttributeError:
-                pass
 
         x1, y1, x2, y2 = _expand_bbox(raw_bbox, crop_factor, W, H)
         if x2 - x1 < 16 or y2 - y1 < 16:
@@ -1578,18 +1577,14 @@ class GrimmRibbitySmartDetailer:
         for stale_key in [k for k in _WILDCARD_CACHE if k[0] != current_clip_id]:
             _WILDCARD_CACHE.pop(stale_key, None)
         if soft_cleanup is not None:
-            try:
+            with contextlib.suppress(Exception):
                 soft_cleanup()
-            except Exception:
-                pass
         # Push freed allocator blocks back to amdgpu so rocm-smi reflects
         # the offloads; otherwise the caching allocator holds the
         # reservation up to gc_threshold (60% of usable).
-        try:
+        with contextlib.suppress(Exception):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        except Exception:
-            pass
         return (running, combined_mask, preview)
 
 

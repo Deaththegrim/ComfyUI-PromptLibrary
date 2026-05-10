@@ -22,6 +22,7 @@ the VAE's decode / decode_tiled).
 
 from __future__ import annotations
 
+import contextlib
 import logging
 
 import torch
@@ -345,11 +346,9 @@ class GrimmRibbityAnimaSampler:
         # Defragment between sampling and decode — under fragmentation pressure
         # (e.g. AMD/HIP without allocator caching, or after long hires loops)
         # the VAE's large allocations land cleaner in a coalesced pool.
-        try:
+        with contextlib.suppress(ImportError, ModuleNotFoundError):
             import comfy.model_management
             comfy.model_management.soft_empty_cache()
-        except (ImportError, ModuleNotFoundError):
-            pass
 
         image_out = _vae_decode(optional_vae, latent_out, mode=vae_decode)
         try:
