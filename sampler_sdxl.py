@@ -36,6 +36,11 @@ import comfy.utils
 import folder_paths
 import nodes  # for common_ksampler
 
+try:
+    from .runtime import register_cache, ensure_unload_hook
+except ImportError:
+    from runtime import register_cache, ensure_unload_hook
+
 
 # Shared iteration math + UI feedback for any HiResFix variant. Both the
 # SDXL and Anima samplers consume one of these per stage; the dataclass
@@ -325,6 +330,15 @@ def _load_upscale_model_cached(model_name: str):
     return out
 
 
+def _clear_upscale_model_cache() -> None:
+    """Drop the single-slot upscale model cache. Wired into the runtime
+    unload hook so the "Unload Models" button actually reclaims the
+    ~50-200 MB held here. Cache is a tuple-or-None rebind, not a dict
+    mutation, so we need `global` + reassign to clear it."""
+    global _UPSCALE_MODEL_CACHE
+    _UPSCALE_MODEL_CACHE = None
+
+
 def _load_checkpoint(ckpt_name: str):
     ckpt_path = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
     out = comfy.sd.load_checkpoint_guess_config(
@@ -351,6 +365,15 @@ def _load_checkpoint_cached(ckpt_name: str):
     out = _load_checkpoint(ckpt_name)
     _HIRES_CKPT_CACHE = (ckpt_name, out)
     return out
+
+
+def _clear_hires_ckpt_cache() -> None:
+    """Drop the single-slot hires checkpoint cache. The biggest ticket
+    item — checkpoints are 5-15 GB. Without this, "Unload Models" leaves
+    the swapped-in hires model resident even though Comfy thinks the
+    only loaded model is the primary."""
+    global _HIRES_CKPT_CACHE
+    _HIRES_CKPT_CACHE = None
 
 
 def _load_controlnet(name: str):
@@ -927,6 +950,8 @@ class GrimmRibbitySamplerSDXL:
             print(f"[GrimmRibbitySamplerSDXL] ignoring unknown legacy inputs: "
                   f"{list(legacy_kwargs.keys())}")
 
+        ensure_unload_hook()
+
         # _unpack_sdxl_tuple validates the base slots, normalises the refiner
         # half (warns on partial fills), and always returns 8 elements so
         # the out_tuple construction below is straight indexing.
@@ -991,3 +1016,10 @@ class GrimmRibbitySamplerSDXL:
                 print(f"[GrimmRibbitySamplerSDXL] prompt_log append failed: {e}")
 
         return (image_out, latent_out, base_model, base_clip, vae, int(noise_seed), out_tuple)
+
+
+# Cache eviction wired into the runtime unload hook. Both caches are
+# tuple-or-None rebinds (not dict mutations), so each gets its own clear
+# function rather than a `.clear()` bound-method registration.
+register_cache(_clear_upscale_model_cache)
+register_cache(_clear_hires_ckpt_cache)
