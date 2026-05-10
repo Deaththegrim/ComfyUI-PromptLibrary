@@ -73,6 +73,24 @@ def _resolve_comfy_helpers() -> None:
         _PROGRESS_BAR_CLS = None
 
 
+# HIP-only sync at KSampler↔VAE boundaries. Mirrors the 2026-05-05 Impact
+# Pack patch (3 torch.cuda.synchronize() calls in enhance_detail) that
+# resolved the MIOpen+allocator wedge. Smart Detailer dropped Impact Pack
+# at v0.48.0 and never inherited the guard. CUDA proper takes the no-op
+# path; only HIP pays the per-call cost (~0.5-2 ms on RDNA4).
+_IS_HIP = bool(getattr(torch.version, "hip", None))
+
+
+def _hip_sync(where: str) -> None:
+    if not _IS_HIP:
+        return
+    try:
+        torch.cuda.synchronize()
+        logging.debug("[SmartDetailer] sync (%s)", where)
+    except Exception:
+        pass
+
+
 # Coarse-to-fine. Skin (broadest, gentlest 0.30 denoise) lays texture
 # across the whole body; face refines on top of that on the head; mouth
 # and eyes polish within the already-refined face; hands and feet are
@@ -869,9 +887,11 @@ def _enhance_one_pass(
             positive_with_wc, negative, latent,
             denoise=float(plan.denoise),
         )
+        _hip_sync("post-ksampler")
         # Latent encode/feather no longer needed once the sample is refined.
         del latent, latent_mask
         refined_image = _vae_decode(vae, refined_latent, tiled_decode)
+        _hip_sync("post-vae-decode")
         del refined_latent
         refined_image = refined_image.to(device=device, dtype=running.dtype)
         # nan_to_num BEFORE clamp — clamp(NaN, 0, 1) returns NaN and then casts
