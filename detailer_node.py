@@ -73,70 +73,10 @@ def _resolve_comfy_helpers() -> None:
         _PROGRESS_BAR_CLS = None
 
 
-# HIP-only sync at KSampler↔VAE boundaries. Mirrors the 2026-05-05 Impact
-# Pack patch (3 torch.cuda.synchronize() calls in enhance_detail) that
-# resolved the MIOpen+allocator wedge. Smart Detailer dropped Impact Pack
-# at v0.48.0 and never inherited the guard. CUDA proper takes the no-op
-# path; only HIP pays the per-call cost (~0.5-2 ms on RDNA4).
-_IS_HIP = bool(getattr(torch.version, "hip", None))
-
-
-def _hip_sync(where: str) -> None:
-    if not _IS_HIP:
-        return
-    try:
-        torch.cuda.synchronize()
-        logging.debug("[SmartDetailer] sync (%s)", where)
-    except Exception:
-        pass
-
-
-def _evict_detailer_caches() -> None:
-    """Drop module-level YOLO/SAM/wildcard caches. Triggered on Comfy's
-    unload_all_models() (the /free route, the "Unload Models" button, and
-    auto-eviction). Per-run we CPU-offload (see _offload_*); this is the
-    full eviction path so a manual unload actually reclaims everything.
-    Globals are looked up at call time so this can sit above _WILDCARD_CACHE."""
-    _YOLO_CACHE.clear()
-    _SAM_CACHE.clear()
-    try:
-        _WILDCARD_CACHE.clear()
-    except NameError:
-        pass
-
-
-_UNLOAD_HOOK_INSTALLED = False
-
-
-def _install_unload_hook() -> None:
-    """Wrap comfy.model_management.unload_all_models so detailer caches drop
-    on the same trigger. Idempotent; silent when comfy isn't importable
-    (test environments). Called lazily from detail() because at custom-node
-    load time comfy.model_management may not yet be fully populated."""
-    global _UNLOAD_HOOK_INSTALLED
-    if _UNLOAD_HOOK_INSTALLED:
-        return
-    try:
-        import comfy.model_management as _mm
-    except Exception:
-        return
-    original = getattr(_mm, "unload_all_models", None)
-    if original is None:
-        return
-    if getattr(original, "_grimmribbity_wrapped", False):
-        _UNLOAD_HOOK_INSTALLED = True
-        return
-
-    def wrapped(*args, **kwargs):
-        try:
-            _evict_detailer_caches()
-        except Exception as exc:
-            logging.warning("[SmartDetailer] cache eviction on unload failed (%s)", exc)
-        return original(*args, **kwargs)
-
-    wrapped._grimmribbity_wrapped = True  # type: ignore[attr-defined]
-    _mm.unload_all_models = wrapped
-    _UNLOAD_HOOK_INSTALLED = True
+try:
+    from .runtime import hip_sync, register_cache, ensure_unload_hook
+except ImportError:
+    from runtime import hip_sync, register_cache, ensure_unload_hook
 
 
 # Coarse-to-fine. Skin (broadest, gentlest 0.30 denoise) lays texture
@@ -935,11 +875,11 @@ def _enhance_one_pass(
             positive_with_wc, negative, latent,
             denoise=float(plan.denoise),
         )
-        _hip_sync("post-ksampler")
+        hip_sync("post-ksampler")
         # Latent encode/feather no longer needed once the sample is refined.
         del latent, latent_mask
         refined_image = _vae_decode(vae, refined_latent, tiled_decode)
-        _hip_sync("post-vae-decode")
+        hip_sync("post-vae-decode")
         del refined_latent
         refined_image = refined_image.to(device=device, dtype=running.dtype)
         # nan_to_num BEFORE clamp — clamp(NaN, 0, 1) returns NaN and then casts
@@ -1362,7 +1302,7 @@ class GrimmRibbitySmartDetailer:
                     torch.zeros((1, H, W), device=device, dtype=image.dtype),
                     image)
 
-        _install_unload_hook()
+        ensure_unload_hook()
 
         # Build the plan: ordered list of (target, bbox_model_name, threshold,
         # denoise_override, max_override). Order is face → skin → eyes → hands.
@@ -1644,3 +1584,11 @@ NODE_CLASS_MAPPINGS = {"GrimmRibbitySmartDetailer": GrimmRibbitySmartDetailer}
 NODE_DISPLAY_NAME_MAPPINGS = {
     "GrimmRibbitySmartDetailer": "GrimmRibbity — Smart Detailer",
 }
+
+
+# Hand off cache eviction to the shared runtime hook. Lambdas defer the dict
+# lookup until clear-time so registration order is independent of definition
+# order in this file. The hook itself installs lazily on first detail() call.
+register_cache(lambda: _YOLO_CACHE.clear())
+register_cache(lambda: _SAM_CACHE.clear())
+register_cache(lambda: _WILDCARD_CACHE.clear())
