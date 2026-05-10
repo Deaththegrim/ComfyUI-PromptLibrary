@@ -91,6 +91,54 @@ def _hip_sync(where: str) -> None:
         pass
 
 
+def _evict_detailer_caches() -> None:
+    """Drop module-level YOLO/SAM/wildcard caches. Triggered on Comfy's
+    unload_all_models() (the /free route, the "Unload Models" button, and
+    auto-eviction). Per-run we CPU-offload (see _offload_*); this is the
+    full eviction path so a manual unload actually reclaims everything.
+    Globals are looked up at call time so this can sit above _WILDCARD_CACHE."""
+    _YOLO_CACHE.clear()
+    _SAM_CACHE.clear()
+    try:
+        _WILDCARD_CACHE.clear()
+    except NameError:
+        pass
+
+
+_UNLOAD_HOOK_INSTALLED = False
+
+
+def _install_unload_hook() -> None:
+    """Wrap comfy.model_management.unload_all_models so detailer caches drop
+    on the same trigger. Idempotent; silent when comfy isn't importable
+    (test environments). Called lazily from detail() because at custom-node
+    load time comfy.model_management may not yet be fully populated."""
+    global _UNLOAD_HOOK_INSTALLED
+    if _UNLOAD_HOOK_INSTALLED:
+        return
+    try:
+        import comfy.model_management as _mm
+    except Exception:
+        return
+    original = getattr(_mm, "unload_all_models", None)
+    if original is None:
+        return
+    if getattr(original, "_grimmribbity_wrapped", False):
+        _UNLOAD_HOOK_INSTALLED = True
+        return
+
+    def wrapped(*args, **kwargs):
+        try:
+            _evict_detailer_caches()
+        except Exception as exc:
+            logging.warning("[SmartDetailer] cache eviction on unload failed (%s)", exc)
+        return original(*args, **kwargs)
+
+    wrapped._grimmribbity_wrapped = True  # type: ignore[attr-defined]
+    _mm.unload_all_models = wrapped
+    _UNLOAD_HOOK_INSTALLED = True
+
+
 # Coarse-to-fine. Skin (broadest, gentlest 0.30 denoise) lays texture
 # across the whole body; face refines on top of that on the head; mouth
 # and eyes polish within the already-refined face; hands and feet are
@@ -1313,6 +1361,8 @@ class GrimmRibbitySmartDetailer:
             return (image,
                     torch.zeros((1, H, W), device=device, dtype=image.dtype),
                     image)
+
+        _install_unload_hook()
 
         # Build the plan: ordered list of (target, bbox_model_name, threshold,
         # denoise_override, max_override). Order is face → skin → eyes → hands.

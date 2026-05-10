@@ -508,5 +508,82 @@ class FutureBboxesAfterTests(unittest.TestCase):
         self.assertEqual(future[2], set())
 
 
+class UnloadHookTests(unittest.TestCase):
+    """Hook into comfy.model_management.unload_all_models clears module-level
+    caches (YOLO/SAM/wildcard) so the "Unload Models" button reclaims more
+    than just the comfy-tracked models."""
+
+    def setUp(self):
+        import types
+        self._prev_mm = sys.modules.get("comfy.model_management")
+        self._prev_comfy = sys.modules.get("comfy")
+        self._original_called = False
+
+        def _fake_unload(*_a, **_k):
+            self._original_called = True
+
+        comfy_mod = types.ModuleType("comfy")
+        mm_mod = types.ModuleType("comfy.model_management")
+        mm_mod.unload_all_models = _fake_unload
+        comfy_mod.model_management = mm_mod
+        sys.modules["comfy"] = comfy_mod
+        sys.modules["comfy.model_management"] = mm_mod
+        self._mm_mod = mm_mod
+
+        self._prev_yolo = dict(detailer_node._YOLO_CACHE)
+        self._prev_sam = dict(detailer_node._SAM_CACHE)
+        self._prev_wc = list(detailer_node._WILDCARD_CACHE.items())
+        self._prev_installed = detailer_node._UNLOAD_HOOK_INSTALLED
+        detailer_node._UNLOAD_HOOK_INSTALLED = False
+
+    def tearDown(self):
+        detailer_node._YOLO_CACHE.clear()
+        detailer_node._YOLO_CACHE.update(self._prev_yolo)
+        detailer_node._SAM_CACHE.clear()
+        detailer_node._SAM_CACHE.update(self._prev_sam)
+        detailer_node._WILDCARD_CACHE.clear()
+        for k, v in self._prev_wc:
+            detailer_node._WILDCARD_CACHE[k] = v
+        detailer_node._UNLOAD_HOOK_INSTALLED = self._prev_installed
+        if self._prev_mm is not None:
+            sys.modules["comfy.model_management"] = self._prev_mm
+        else:
+            sys.modules.pop("comfy.model_management", None)
+        if self._prev_comfy is not None:
+            sys.modules["comfy"] = self._prev_comfy
+        else:
+            sys.modules.pop("comfy", None)
+
+    def test_unload_evicts_caches_and_calls_original(self):
+        detailer_node._YOLO_CACHE["face_yolov8m.pt"] = object()
+        detailer_node._SAM_CACHE["sam_vit_b.pth"] = ("sam_v1", object())
+        detailer_node._WILDCARD_CACHE[(123, "smooth skin,")] = object()
+
+        detailer_node._install_unload_hook()
+        self.assertTrue(detailer_node._UNLOAD_HOOK_INSTALLED)
+
+        self._mm_mod.unload_all_models()
+
+        self.assertTrue(self._original_called,
+                        "wrapper must delegate to the original unload_all_models")
+        self.assertEqual(detailer_node._YOLO_CACHE, {})
+        self.assertEqual(detailer_node._SAM_CACHE, {})
+        self.assertEqual(len(detailer_node._WILDCARD_CACHE), 0)
+
+    def test_install_is_idempotent(self):
+        detailer_node._install_unload_hook()
+        wrapped_once = self._mm_mod.unload_all_models
+        detailer_node._install_unload_hook()
+        self.assertIs(self._mm_mod.unload_all_models, wrapped_once,
+                      "second install must not re-wrap the already-wrapped fn")
+
+    def test_install_silent_when_comfy_missing(self):
+        sys.modules.pop("comfy.model_management", None)
+        sys.modules.pop("comfy", None)
+        detailer_node._UNLOAD_HOOK_INSTALLED = False
+        detailer_node._install_unload_hook()
+        self.assertFalse(detailer_node._UNLOAD_HOOK_INSTALLED)
+
+
 if __name__ == "__main__":
     unittest.main()
