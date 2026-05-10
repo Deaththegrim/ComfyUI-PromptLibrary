@@ -904,6 +904,11 @@ def _enhance_one_pass(
         # under HIP forces an alloc/free roundtrip to amdgpu per bbox,
         # which is exactly the churn pattern that produced the 2026-05-08
         # gfxhub-page-fault wedge. Coarser flush at end of pass.
+        # Assumption depends on HIP allocator caching being ON. If
+        # PYTORCH_NO_HIP_MEMORY_CACHING=1 is set in launch.sh (currently
+        # disabled per the 2026-05-09 VM-leak A/B), pooling is off anyway
+        # and an inter-bbox soft_empty_cache() becomes free again —
+        # re-evaluate this branch if that env var flips back on.
         del refined_image, composite_mask, blended, crop
         if progress_bar is not None:
             progress_bar.update(1)
@@ -1480,6 +1485,14 @@ class GrimmRibbitySmartDetailer:
             logging.info(
                 "[SmartDetailer] target=%s denoise=%.2f crop=%.2f max=%d threshold=%.2f wc='%s'",
                 p.name, p.denoise, preset["crop_factor"], p.max_n, p.threshold, wildcard_text)
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.reset_peak_memory_stats()
+                    pre_pass_mb = torch.cuda.memory_allocated() / (1024 * 1024)
+                else:
+                    pre_pass_mb = None
+            except Exception:
+                pre_pass_mb = None
             pass_start = time.monotonic()
             running, mask = _enhance_one_pass(
                 running, model, clip, vae, positive, negative, p, sam_handle,
@@ -1504,9 +1517,17 @@ class GrimmRibbitySmartDetailer:
             if sam_mask_cache and still_needed is not None:
                 for stale in [k for k in sam_mask_cache if k not in still_needed]:
                     sam_mask_cache.pop(stale, None)
-            logging.info("[SmartDetailer] %s pass: %d bbox(es) in %.1fs (steps=%d)",
+            try:
+                if pre_pass_mb is not None:
+                    peak_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
+                    vram_log = f" peak_vram_mb={peak_mb:.0f} delta_mb={peak_mb - pre_pass_mb:+.0f}"
+                else:
+                    vram_log = ""
+            except Exception:
+                vram_log = ""
+            logging.info("[SmartDetailer] %s pass: %d bbox(es) in %.1fs (steps=%d)%s",
                           p.name, len(p.detections),
-                          time.monotonic() - pass_start, p.steps or int(steps))
+                          time.monotonic() - pass_start, p.steps or int(steps), vram_log)
 
         logging.info("[SmartDetailer] all passes done in %.1fs (%d total detections)",
                       time.monotonic() - run_start, total_detections)
