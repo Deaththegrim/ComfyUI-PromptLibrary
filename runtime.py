@@ -86,3 +86,103 @@ def ensure_unload_hook() -> None:
     wrapped._grimmribbity_wrapped = True  # type: ignore[attr-defined]
     _mm.unload_all_models = wrapped
     _UNLOAD_HOOK_INSTALLED = True
+
+
+# Auto-tile threshold in *latent* pixels. Above this, decode/encode falls
+# back to the tiled path even when the user picked "true". A 192-latent
+# image is 1536px decoded — non-tiled decode of larger latents reliably
+# OOMs on 16GB AMD VRAM under TTM placement pressure.
+AUTO_TILE_LATENT_THRESHOLD = 192
+
+
+def _soft_empty_cache() -> None:
+    try:
+        import comfy.model_management as _mm
+        _mm.soft_empty_cache()
+    except (ImportError, ModuleNotFoundError):
+        pass
+
+
+def _raise_non_oom(exc: BaseException) -> None:
+    """Re-raise `exc` unless it's an OOM. Lets the caller's shrink-loop
+    only catch genuine OOMs and let other exceptions propagate."""
+    try:
+        import comfy.model_management as _mm
+        _mm.raise_non_oom(exc)
+    except (ImportError, ModuleNotFoundError):
+        raise exc
+
+
+def oom_safe_vae_decode(vae, latent, *, mode: str = "true",
+                         tile: int = 256, overlap: int = 64):
+    """Decode a latent with consistent tile policy + OOM shrink loop.
+
+    `mode`:
+      - "false"        → returns None (caller emits placeholder).
+      - "true"         → auto-tile when latent's longest side exceeds
+                         AUTO_TILE_LATENT_THRESHOLD, else non-tiled.
+      - "true (tiled)" → force tiled decode.
+
+    On tiled OOM, walks tile 256→128→64 then falls through to vae.decode().
+    """
+    if mode == "false" or vae is None or latent is None:
+        return None
+    samples = latent["samples"] if isinstance(latent, dict) else latent
+    latent_max = max(samples.shape[-1], samples.shape[-2])
+    needs_tile = (mode == "true (tiled)" or
+                  (mode == "true" and latent_max > AUTO_TILE_LATENT_THRESHOLD))
+    if not (needs_tile and hasattr(vae, "decode_tiled")):
+        return vae.decode(samples)
+    while True:
+        try:
+            try:
+                return vae.decode_tiled(samples, tile_x=tile, tile_y=tile, overlap=overlap)
+            except TypeError:
+                return vae.decode_tiled(samples, tile_x=tile, tile_y=tile)
+        except Exception as exc:
+            _raise_non_oom(exc)
+            if tile <= 64:
+                logging.info("[GrimmRibbity] vae decode OOM at tile=%d, "
+                              "falling through to vae.decode()", tile)
+                _soft_empty_cache()
+                return vae.decode(samples)
+            tile //= 2
+            logging.info("[GrimmRibbity] vae decode OOM, retrying at tile=%d", tile)
+            _soft_empty_cache()
+
+
+def oom_safe_vae_encode(vae, image, *, mode: str = "true",
+                         tile: int = 256, overlap: int = 64) -> dict:
+    """Encode an HWC image with consistent tile policy + OOM shrink loop.
+    Returns {"samples": tensor}.
+
+    `mode`:
+      - "true"         → auto-tile when image's longest pixel side exceeds
+                         AUTO_TILE_LATENT_THRESHOLD * 8, else non-tiled.
+      - "true (tiled)" → force tiled encode.
+
+    On tiled OOM, walks tile 256→128→64 then falls through to vae.encode().
+    """
+    side_max = max(image.shape[-2], image.shape[-3])
+    needs_tile = (mode == "true (tiled)" or
+                  (mode == "true" and side_max > AUTO_TILE_LATENT_THRESHOLD * 8))
+    if not (needs_tile and hasattr(vae, "encode_tiled")):
+        return {"samples": vae.encode(image)}
+    while True:
+        try:
+            try:
+                return {"samples": vae.encode_tiled(
+                    image, tile_x=tile, tile_y=tile, overlap=overlap)}
+            except TypeError:
+                return {"samples": vae.encode_tiled(
+                    image, tile_x=tile, tile_y=tile)}
+        except Exception as exc:
+            _raise_non_oom(exc)
+            if tile <= 64:
+                logging.info("[GrimmRibbity] vae encode OOM at tile=%d, "
+                              "falling through to vae.encode()", tile)
+                _soft_empty_cache()
+                return {"samples": vae.encode(image)}
+            tile //= 2
+            logging.info("[GrimmRibbity] vae encode OOM, retrying at tile=%d", tile)
+            _soft_empty_cache()

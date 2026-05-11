@@ -75,9 +75,11 @@ def _resolve_comfy_helpers() -> None:
 
 
 try:
-    from .runtime import hip_sync, register_cache, ensure_unload_hook
+    from .runtime import (register_cache, ensure_unload_hook,
+                          oom_safe_vae_decode, oom_safe_vae_encode)
 except ImportError:
-    from runtime import hip_sync, register_cache, ensure_unload_hook
+    from runtime import (register_cache, ensure_unload_hook,
+                         oom_safe_vae_decode, oom_safe_vae_encode)
 
 
 # Coarse-to-fine. Skin (broadest, gentlest 0.30 denoise) lays texture
@@ -95,7 +97,7 @@ _PRESETS: dict[str, dict[str, Any]] = {
               "wildcard": "smooth skin texture, natural pores,",
               "color": (0.95, 0.90, 0.30)},   # yellow
     "mouth": {"denoise": 0.40, "feather": 12, "crop_factor": 2.5,
-              "wildcard": "detailed mouth, clean teeth, sharp lips,",
+              "wildcard": "detailed_mouth, clean_teeth, even_teeth, neat_teeth, white_teeth, sharp_lips, parted_lips,",
               "color": (0.95, 0.46, 0.30)},   # coral / red-orange
     "eyes":  {"denoise": 0.40, "feather": 15, "crop_factor": 1.5,
               "wildcard": "detailed eyes, highly detailed,",
@@ -470,6 +472,7 @@ def _scale_to_guide(crop_h: int, crop_w: int, guide: int, max_size: int
 
 def _make_feather_mask(h: int, w: int, feather: int, device, dtype=torch.float32,
                         suppress_edges: tuple[bool, bool, bool, bool] = (False, False, False, False),
+                        smooth: bool = False,
                         ) -> torch.Tensor:
     """Rectangular fall-off mask. Used as fallback when SAM isn't wired.
 
@@ -478,6 +481,12 @@ def _make_feather_mask(h: int, w: int, feather: int, device, dtype=torch.float32
     a flat 1.0 — without this, the mask drops to 0 at the image edge and
     you get a visible seam where the original (un-detailed) edge meets the
     feathered (zero-weighted) detail. Edge-aware feathering eliminates that.
+
+    `smooth=True` Gaussian-blurs the rectangular ramp so the corners round
+    off and the slope matches the SAM-mask path. This is what hides the
+    rectangle seam in uniform-textured backgrounds (e.g. sparkle/particle
+    backdrops where any per-region denoise produces a visible delta at the
+    ramp edge).
     """
     if feather <= 0:
         return torch.ones((1, h, w), device=device, dtype=dtype)
@@ -492,7 +501,16 @@ def _make_feather_mask(h: int, w: int, feather: int, device, dtype=torch.float32
     dist_t = ys if not sup_t else torch.full_like(ys, feather)
     dist_b = (h - 1) - ys if not sup_b else torch.full_like(ys, feather)
     edge_y = torch.minimum(dist_t, dist_b).clamp(max=feather) / feather
-    return (edge_y[:, None] * edge_x[None, :]).unsqueeze(0)
+    mask = (edge_y[:, None] * edge_x[None, :]).unsqueeze(0)
+    if smooth:
+        # Gaussian-blur with sigma = feather/2 matches the SAM path's smoothing
+        # constant, so SAM-on / SAM-off composites have similar transition
+        # widths and the feathered-bbox corners round off into the background
+        # instead of producing a visible rectangle.
+        sigma = max(1.0, feather / 2.0)
+        mask = _gaussian_blur_2d(mask.unsqueeze(0), sigma=sigma).squeeze(0)
+        mask = mask.clamp(0, 1)
+    return mask
 
 
 def _gaussian_blur_2d(x: torch.Tensor, sigma: float) -> torch.Tensor:
@@ -516,17 +534,34 @@ def _refine_to_blend_mask(
     crop_h: int, crop_w: int,
     feather: int, device, dtype,
     image_h: int, image_w: int,
+    crop_factor: float = 1.0,
 ) -> torch.Tensor:
     """Build the (1, crop_h, crop_w) alpha mask used to composite a refined
     crop back. With SAM: gaussian-blur the SAM mask so the seam follows the
     actual region outline. Without: feathered bbox with edge-suppression
-    where the bbox touches the real image border."""
+    where the bbox touches the real image border, scaled feather + Gaussian
+    smoothing so the rectangle shape doesn't read as a visible seam in
+    uniform-textured backgrounds.
+
+    Why scale feather with `crop_factor` in the no-SAM path: the per-pass
+    `feather` preset value is tuned for tight crops. At face crop_factor=3.0
+    or skin crop_factor=2.5, the crop extends well into the background, and
+    a fixed 12-20 px feather becomes a tiny ramp on a 600+ px crop — visible
+    rectangle. Scaling effective feather by crop_factor keeps the relative
+    transition width constant so any seam stays soft regardless of crop size.
+    """
     x1, y1, x2, y2 = crop_box
     if sam_mask is None:
         suppress = (x1 <= 0, y1 <= 0, x2 >= image_w, y2 >= image_h)
+        # Scale feather with crop_factor so the transition width grows with
+        # the crop. Cap at 25% of the shorter crop dimension so the mask
+        # never collapses to "all gradient, no fully-refined center."
+        scaled_feather = int(feather * max(1.0, crop_factor))
+        max_feather = max(1, min(crop_h, crop_w) // 4)
+        scaled_feather = min(scaled_feather, max_feather)
         return _make_feather_mask(
-            crop_h, crop_w, feather, device=device, dtype=dtype,
-            suppress_edges=suppress,
+            crop_h, crop_w, scaled_feather, device=device, dtype=dtype,
+            suppress_edges=suppress, smooth=True,
         )
 
     crop_mask = sam_mask[y1:y2, x1:x2].to(device=device, dtype=dtype)
@@ -572,49 +607,12 @@ def _encode_wildcard_cached(clip, wildcard_text: str, positive):
 
 
 def _vae_decode(vae, samples_dict, tiled: bool):
-    """Decode latent → image. When `tiled` is requested, we only ACTUALLY tile
-    if the decoded resolution would exceed ~1024² — for typical face/eye/
-    mouth crops (256-768px decoded) full decode is faster and plenty
-    RAM-safe. Tiling kicks in for hand/skin passes at higher guide_size.
-
-    Threshold history: 1024 → 768 → 1024. Briefly lowered to 768 to stop
-    the hand pass nearly locking up; the v0.55.2 hand crop_factor cut
-    (2.0 → 1.5) shrunk hand crops enough that 1024 works again. The 768
-    cutover broke the mouth pass — typical mouth crops at guide=1024
-    landed in 768-1024 and got force-tiled into hundreds of small VAE
-    calls, looking like a hang from the silent log.
-
-    On OOM, walks tile_x/tile_y down (256→128→64) instead of crashing.
-    Last-resort falls through to vae.decode() so comfy's own decode-then-tiled
-    fallback can take a swing. The non-tiled path already routes through
-    vae.decode() which has built-in OOM→tiled retry."""
-    samples = samples_dict["samples"]
-    h_pix, w_pix = samples.shape[-2] * 8, samples.shape[-1] * 8
-    needs_tile = tiled and (h_pix > 1024 or w_pix > 1024)
-    if not needs_tile:
-        return vae.decode(samples)
-    tile = 256
-    while True:
-        try:
-            try:
-                return vae.decode_tiled(samples, tile_x=tile, tile_y=tile)
-            except TypeError:
-                return vae.decode_tiled(samples)
-        except Exception as e:
-            import comfy.model_management as _mm
-            _mm.raise_non_oom(e)
-            if tile <= 64:
-                logging.info(
-                    "[GrimmRibbity] vae decode OOM at tile=%d, "
-                    "falling through to vae.decode() auto-fallback", tile)
-                _mm.soft_empty_cache()
-                return vae.decode(samples)
-            new_tile = tile // 2
-            logging.info(
-                "[GrimmRibbity] vae decode OOM at tile=%d, retrying at tile=%d",
-                tile, new_tile)
-            tile = new_tile
-            _mm.soft_empty_cache()
+    """Thin wrapper preserving the detailer's boolean toggle.
+    `tiled=True` permits the shared OOM-safe tiled path when the latent is
+    large enough to need it; `tiled=False` forces a non-tiled decode."""
+    if not tiled:
+        return vae.decode(samples_dict["samples"])
+    return oom_safe_vae_decode(vae, samples_dict, mode="true")
 
 
 def _draw_bbox_on_preview(preview: torch.Tensor, bbox, color, line: int = 2,
@@ -704,36 +702,13 @@ class _Pass:
     detections: list[tuple[tuple[int, int, int, int], float]] = field(default_factory=list)
 
 
-def _vae_encode(vae, pixels, tiled: bool):
-    """Encode pixels → latent. Tiled mode kicks in for large crops to keep
-    encode RAM bounded — symmetric with _vae_decode's auto-tile policy
-    (threshold 1024).
-    OOM walks tile down 256→128→64, then falls through to vae.encode()."""
-    h, w = pixels.shape[1], pixels.shape[2]
-    if not (tiled and (h > 1024 or w > 1024)):
-        return vae.encode(pixels)
-    tile = 256
-    while True:
-        try:
-            try:
-                return vae.encode_tiled(pixels, tile_x=tile, tile_y=tile)
-            except (TypeError, AttributeError):
-                return vae.encode(pixels)
-        except Exception as e:
-            import comfy.model_management as _mm
-            _mm.raise_non_oom(e)
-            if tile <= 64:
-                logging.info(
-                    "[GrimmRibbity] vae encode OOM at tile=%d, "
-                    "falling through to vae.encode()", tile)
-                _mm.soft_empty_cache()
-                return vae.encode(pixels)
-            new_tile = tile // 2
-            logging.info(
-                "[GrimmRibbity] vae encode OOM at tile=%d, retrying at tile=%d",
-                tile, new_tile)
-            tile = new_tile
-            _mm.soft_empty_cache()
+def _vae_encode(vae, pixels, tiled: bool) -> dict:
+    """Thin wrapper preserving the detailer's boolean toggle. Returns a
+    `{"samples": tensor}` latent dict so call sites can wire it straight
+    into common_ksampler."""
+    if not tiled:
+        return {"samples": vae.encode(pixels)}
+    return oom_safe_vae_encode(vae, pixels, mode="true")
 
 
 def _enhance_one_pass(
@@ -851,7 +826,7 @@ def _enhance_one_pass(
             mode="bilinear", align_corners=False,
         ).permute(0, 2, 3, 1).contiguous()
 
-        latent = {"samples": _vae_encode(vae, upscaled[:, :, :, :3], tiled_encode)}
+        latent = _vae_encode(vae, upscaled[:, :, :, :3], tiled_encode)
         # `upscaled` is now redundant with `latent` — drop it before sample.
         del upscaled
         latent_h, latent_w = latent["samples"].shape[-2:]
@@ -877,11 +852,9 @@ def _enhance_one_pass(
             positive_with_wc, negative, latent,
             denoise=float(plan.denoise),
         )
-        hip_sync("post-ksampler")
         # Latent encode/feather no longer needed once the sample is refined.
         del latent, latent_mask
         refined_image = _vae_decode(vae, refined_latent, tiled_decode)
-        hip_sync("post-vae-decode")
         del refined_latent
         refined_image = refined_image.to(device=device, dtype=running.dtype)
         # nan_to_num BEFORE clamp — clamp(NaN, 0, 1) returns NaN and then casts
@@ -899,6 +872,7 @@ def _enhance_one_pass(
             sam_full_mask, (x1, y1, x2, y2), crop_h, crop_w, feather,
             device=device, dtype=running.dtype,
             image_h=H, image_w=W,
+            crop_factor=crop_factor,
         ).unsqueeze(-1)
         if mask_strength != 1.0:
             composite_mask = composite_mask * float(mask_strength)
@@ -1316,6 +1290,15 @@ class GrimmRibbitySmartDetailer:
 
         ensure_unload_hook()
 
+        # Purge wildcard-cache entries from a previous CLIP. Under
+        # --no-cache-models, comfy reloads CLIP per prompt → id(clip) changes
+        # → stale entries pin encoded conditioning tensors on GPU until the
+        # next purge. Doing this at the start (not the end) ensures stale
+        # entries don't survive across the call where they could be reached.
+        current_clip_id = id(clip)
+        for stale_key in [k for k in _WILDCARD_CACHE if k[0] != current_clip_id]:
+            _WILDCARD_CACHE.pop(stale_key, None)
+
         # Build the plan: ordered list of (target, bbox_model_name, threshold,
         # denoise_override, max_override). Order is face → skin → eyes → hands.
         ovr = {
@@ -1560,31 +1543,18 @@ class GrimmRibbitySmartDetailer:
         combined_mask = torch.nan_to_num(combined_mask, nan=0.0).clamp(0, 1)
         if running.dtype != out_dtype:
             running = running.to(dtype=out_dtype)
-        # End-of-run cleanup. Multi-prompt sessions otherwise saw VRAM
-        # creep ~2 GB per run on a 16 GB card even with --lowvram +
-        # --no-cache-models, because comfy's cleanup_models() doesn't
-        # know about our module-level caches (YOLO, SAM, wildcard CLIP
-        # encodings). All three reclaim VRAM without invalidating the
-        # caches — next run pulls them back lazily.
-        if sam_handle is not None:
-            _offload_sam_to_cpu(sam_handle)
-        _offload_yolo_cache_to_cpu()
-        # Drop wildcard cache entries whose CLIP id no longer matches
-        # the current CLIP. With --no-cache-models, comfy reloads CLIP
-        # per prompt, so id(clip) churns and stale entries pin
-        # conditioning tensors on GPU forever otherwise.
-        current_clip_id = id(clip)
-        for stale_key in [k for k in _WILDCARD_CACHE if k[0] != current_clip_id]:
-            _WILDCARD_CACHE.pop(stale_key, None)
+        # End-of-run cleanup is now soft-only. The expensive YOLO + SAM
+        # CPU offload (~600 ms-2 s on SAM, run on every call) used to live
+        # here as a VRAM-creep mitigation; with kernel patches #1/#4-#8,
+        # the tuned allocator (gc_threshold=0.4, max_split_size_mb=256),
+        # and the cache evictions firing through the unload-hook
+        # registrations below, the per-call offload became dead weight.
+        # If multi-prompt VRAM creep returns, the unload-hook clearers do
+        # a full offload-then-clear on the next "Unload Models" / cleanup
+        # event — see below.
         if soft_cleanup is not None:
             with contextlib.suppress(Exception):
                 soft_cleanup()
-        # Push freed allocator blocks back to amdgpu so rocm-smi reflects
-        # the offloads; otherwise the caching allocator holds the
-        # reservation up to gc_threshold (60% of usable).
-        with contextlib.suppress(Exception):
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
         return (running, combined_mask, preview)
 
 
@@ -1594,9 +1564,22 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 }
 
 
-# Hand off cache eviction to the shared runtime hook. Lambdas defer the dict
-# lookup until clear-time so registration order is independent of definition
-# order in this file. The hook itself installs lazily on first detail() call.
-register_cache(lambda: _YOLO_CACHE.clear())
-register_cache(lambda: _SAM_CACHE.clear())
+# Hand off cache eviction to the shared runtime hook. The YOLO/SAM clearers
+# offload tensors off-GPU before dropping the dict — `dict.clear()` only
+# drops Python refs, and GC delay means VRAM wouldn't release promptly on
+# the unload event without the explicit `.to("cpu")`. The wildcard cache is
+# pure tensors so a plain `.clear()` is enough.
+def _drop_yolo_cache() -> None:
+    _offload_yolo_cache_to_cpu()
+    _YOLO_CACHE.clear()
+
+
+def _drop_sam_cache() -> None:
+    for handle in list(_SAM_CACHE.values()):
+        _offload_sam_to_cpu(handle)
+    _SAM_CACHE.clear()
+
+
+register_cache(_drop_yolo_cache)
+register_cache(_drop_sam_cache)
 register_cache(lambda: _WILDCARD_CACHE.clear())

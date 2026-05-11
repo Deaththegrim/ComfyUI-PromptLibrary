@@ -12,6 +12,7 @@ PromptLibrary policy.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 from dataclasses import dataclass
 
@@ -21,6 +22,11 @@ import torch.nn.functional as F
 import comfy.samplers
 import comfy.utils
 import nodes
+
+try:
+    from .runtime import oom_safe_vae_decode, oom_safe_vae_encode
+except ImportError:
+    from runtime import oom_safe_vae_decode, oom_safe_vae_encode
 
 
 _log = logging.getLogger("GrimmRibbity.Upscale")
@@ -290,7 +296,19 @@ class GrimmRibbityUpscaleSDXL:
         out = pre.clone()
         pbar = comfy.utils.ProgressBar(len(tiles) + (len(tiles) if seam_fix_mode != "none" else 0))
 
+        try:
+            import comfy.model_management as _mm
+        except Exception:
+            _mm = None
+
         for i, t in enumerate(tiles):
+            # Soft-cancel between tiles — comfy's interrupt checks fire inside
+            # common_ksampler too, but encode/composite/decode are not covered.
+            # Catching here makes the Cancel button responsive throughout a
+            # 30-tile upscale rather than only mid-sample.
+            if _mm is not None:
+                with contextlib.suppress(AttributeError):
+                    _mm.throw_exception_if_processing_interrupted()
             tile_seed = (seed + i) & 0xFFFFFFFFFFFFFFFF
             crop = pre[:, t.outer_y:t.outer_y + t.outer_h, t.outer_x:t.outer_x + t.outer_w, :]
             cw = _round_to_8(crop.shape[2])
@@ -298,12 +316,12 @@ class GrimmRibbityUpscaleSDXL:
             if cw != crop.shape[2] or ch != crop.shape[1]:
                 crop = _scale_image(crop, cw, ch)
 
-            latent_in = {"samples": vae.encode(crop[:, :, :, :3])}
+            latent_in = oom_safe_vae_encode(vae, crop[:, :, :, :3], mode="true")
             sampled = _COMMON_KSAMPLER(
                 model, tile_seed, steps, cfg, sampler_name, scheduler,
                 positive, negative, latent_in, denoise=denoise,
             )[0]
-            decoded = vae.decode(sampled["samples"])
+            decoded = oom_safe_vae_decode(vae, sampled, mode="true")
             if decoded.shape[1] != t.outer_h or decoded.shape[2] != t.outer_w:
                 decoded = _scale_image(decoded, t.outer_w, t.outer_h)
 
@@ -343,6 +361,10 @@ class GrimmRibbityUpscaleSDXL:
         b, h, w, c = image.shape
         out = image.clone()
         bw = _round_to_8(band_width)
+        try:
+            import comfy.model_management as _mm
+        except Exception:
+            _mm = None
 
         seams_x = list(range(tile_width, w, tile_width))
         for sx in seams_x:
@@ -350,6 +372,9 @@ class GrimmRibbityUpscaleSDXL:
             x1 = min(w, x0 + bw)
             x0 = max(0, x1 - bw)
             for y0 in range(0, h, tile_height):
+                if _mm is not None:
+                    with contextlib.suppress(AttributeError):
+                        _mm.throw_exception_if_processing_interrupted()
                 y1 = min(h, y0 + tile_height)
                 yh = _round_to_8(y1 - y0)
                 if yh < 64:
@@ -366,6 +391,9 @@ class GrimmRibbityUpscaleSDXL:
             y1 = min(h, y0 + bw)
             y0 = max(0, y1 - bw)
             for x0 in range(0, w, tile_width):
+                if _mm is not None:
+                    with contextlib.suppress(AttributeError):
+                        _mm.throw_exception_if_processing_interrupted()
                 x1 = min(w, x0 + tile_width)
                 xw = _round_to_8(x1 - x0)
                 if xw < 64:
@@ -384,12 +412,12 @@ class GrimmRibbityUpscaleSDXL:
     ):
         """In-place: sample one band rectangle and feather-blend it back."""
         crop = image[:, y:y + h, x:x + w, :]
-        latent_in = {"samples": vae.encode(crop[:, :, :, :3])}
+        latent_in = oom_safe_vae_encode(vae, crop[:, :, :, :3], mode="true")
         sampled = _COMMON_KSAMPLER(
             model, seed & 0xFFFFFFFFFFFFFFFF, steps, cfg, sampler_name, scheduler,
             positive, negative, latent_in, denoise=denoise,
         )[0]
-        decoded = vae.decode(sampled["samples"])
+        decoded = oom_safe_vae_decode(vae, sampled, mode="true")
         if decoded.shape[1] != h or decoded.shape[2] != w:
             decoded = _scale_image(decoded, w, h)
         mask = _make_feather_mask(h, w, mask_blur, image.device, dtype=image.dtype)

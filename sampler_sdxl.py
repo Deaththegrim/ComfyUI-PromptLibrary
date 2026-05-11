@@ -37,9 +37,11 @@ import folder_paths
 import nodes  # for common_ksampler
 
 try:
-    from .runtime import register_cache, ensure_unload_hook, hip_sync
+    from .runtime import (register_cache, ensure_unload_hook, hip_sync,
+                          oom_safe_vae_decode, oom_safe_vae_encode)
 except ImportError:
-    from runtime import register_cache, ensure_unload_hook, hip_sync
+    from runtime import (register_cache, ensure_unload_hook, hip_sync,
+                         oom_safe_vae_decode, oom_safe_vae_encode)
 
 
 # Shared iteration math + UI feedback for any HiResFix variant. Both the
@@ -104,6 +106,18 @@ def _between_iterations_cleanup() -> None:
         import comfy.model_management
         comfy.model_management.soft_empty_cache()
     except Exception:
+        pass
+
+
+def _check_interrupt() -> None:
+    """Raise InterruptProcessingException if the user clicked Cancel.
+    common_ksampler checks internally during sampling, but encode/upscale/
+    composite work between iterations is not covered — call this at
+    iteration boundaries so the Cancel button stays responsive."""
+    try:
+        import comfy.model_management as _mm
+        _mm.throw_exception_if_processing_interrupted()
+    except (ImportError, ModuleNotFoundError, AttributeError):
         pass
 
 
@@ -218,47 +232,20 @@ def _encode_sdxl(clip, text_g: str, text_l: str,
     })
 
 
-def _vae_decode(vae, latent, *, mode: str = "true"):
-    """Decode honouring the user's vae_decode mode. 'false' returns None."""
-    if mode == "false":
-        return None
-    samples = latent["samples"]
-    if mode == "true (tiled)":
-        return vae.decode_tiled(samples, tile_x=512, tile_y=512, overlap=64)
-    return vae.decode(samples)
-
-
-# Auto-tile threshold (in latent pixels). Above this, decode falls back to
-# the tiled path even when the user picked 'true' — non-tiled decode of a
-# 256-latent (= 2048px image) often OOMs on 16GB GPUs. SDXL's default
-# 128-latent (= 1024px image) stays on the fast path; HiResFix at 2x or
-# higher promotes itself.
-_AUTO_TILE_LATENT_THRESHOLD = 192
-
-
 def _smart_vae_decode(vae, latent, *, mode: str = "true"):
-    """Like _vae_decode but auto-promotes 'true' → tiled for large latents.
-    Saves the user from picking 'true (tiled)' manually for HiResFix outputs
-    that would OOM the non-tiled path. The user's explicit 'true (tiled)'
-    or 'false' choice is honoured verbatim — promotion only applies to 'true'."""
-    if mode == "false":
-        return None
-    samples = latent["samples"]
-    latent_max = max(samples.shape[-1], samples.shape[-2])
-    if mode == "true" and latent_max > _AUTO_TILE_LATENT_THRESHOLD and hasattr(vae, "decode_tiled"):
-        return vae.decode_tiled(samples, tile_x=512, tile_y=512, overlap=64)
-    if mode == "true (tiled)":
-        return vae.decode_tiled(samples, tile_x=512, tile_y=512, overlap=64)
-    return vae.decode(samples)
+    """Decode honouring the user's vae_decode mode, auto-promoting 'true'
+    to tiled for large latents. Routes through the shared OOM-safe helper
+    so all three nodes (sampler, anima, detailer) share tile policy
+    (256→128→64 shrink, overlap=64, fall-through to vae.decode())."""
+    return oom_safe_vae_decode(vae, latent, mode=mode)
 
 
 def _vae_encode(vae, image, *, auto_tile: bool = False):
-    """Encode an HWC image. auto_tile=True falls back to vae.encode_tiled
-    for large images so the inverse of _smart_vae_decode doesn't OOM."""
+    """Encode an HWC image. auto_tile=True routes through the shared OOM-safe
+    helper which auto-promotes to tiled when the image is large enough that
+    non-tiled would OOM. auto_tile=False is non-tiled."""
     if auto_tile:
-        side_max = max(image.shape[-2], image.shape[-3])
-        if side_max > _AUTO_TILE_LATENT_THRESHOLD * 8 and hasattr(vae, "encode_tiled"):
-            return {"samples": vae.encode_tiled(image)}
+        return oom_safe_vae_encode(vae, image, mode="true")
     return {"samples": vae.encode(image)}
 
 
@@ -276,10 +263,11 @@ def _pixel_upscale_with_model(pixel_image, upscale_model, *, keep_on_device: boo
     one device-transfer instead of five."""
     import comfy.model_management
     device = comfy.model_management.get_torch_device()
-    memory_required = comfy.model_management.module_size(upscale_model.model)
-    memory_required += (512 * 512 * 3) * pixel_image.element_size() * max(upscale_model.scale, 1.0) * 384.0
-    memory_required += pixel_image.nelement() * pixel_image.element_size()
-    comfy.model_management.free_memory(memory_required, device)
+    # Upstream Comfy's heuristic free_memory(384× factor) reservation
+    # over-estimates on a 16GB AMD card and feeds the TTM eviction storm
+    # we're already absorbing via kernel patches. Skip it: the allocator
+    # handles real demand lazily on first allocation. Tile-shrink loop
+    # below is the actual OOM safety net.
     upscale_model.to(device)
     in_img = pixel_image.movedim(-1, -3).to(device)
     # Default 256 (was 512). On RX 9070 XT under PYTORCH_NO_HIP_MEMORY_CACHING=1
@@ -818,6 +806,7 @@ def _apply_hires_fix(script: dict, *,
                                          total_steps=total_iters)
             for stage_idx, stage_mode in enumerate(("both_latent", "both_pixel")):
                 for i in range(plan.iterations):
+                    _check_interrupt()
                     seed = base_seed + stage_idx * plan.iterations + i
                     pre_mb = _peak_vram_reset()
                     cur = _hires_one_iteration(
@@ -835,6 +824,7 @@ def _apply_hires_fix(script: dict, *,
             plan = _HiresIterPlan.build(total_scale=total_scale, iterations=iterations,
                                          total_steps=total_iters)
             for i in range(plan.iterations):
+                _check_interrupt()
                 pre_mb = _peak_vram_reset()
                 cur = _hires_one_iteration(
                     model=sampling_model, clip=sampling_clip, vae=sampling_vae,

@@ -191,8 +191,9 @@ class VaeDecodeTilingPolicyTests(unittest.TestCase):
                 calls.append("decode_tiled")
                 return torch.zeros((1, samples.shape[-2] * 8, samples.shape[-1] * 8, 3))
 
-        # 192x192 latent → 1536x1536 image → must tile
-        latent = {"samples": torch.zeros((1, 4, 192, 192))}
+        # 256x256 latent → 2048x2048 image → must tile (above the shared
+        # 192-latent / 1536px threshold).
+        latent = {"samples": torch.zeros((1, 4, 256, 256))}
         detailer_node._vae_decode(FakeVae(), latent, tiled=True)
         self.assertEqual(calls, ["decode_tiled"])
 

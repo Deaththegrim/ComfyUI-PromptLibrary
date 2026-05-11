@@ -23,13 +23,17 @@ the VAE's decode / decode_tiled).
 from __future__ import annotations
 
 import contextlib
-import logging
 
 import torch
 
 import comfy.samplers
 import comfy.utils
 import nodes
+
+try:
+    from .runtime import oom_safe_vae_decode
+except ImportError:
+    from runtime import oom_safe_vae_decode
 
 
 GRIMM_ANIMA_SCRIPT_TYPE = "GRIMM_ANIMA_SCRIPT"
@@ -38,44 +42,10 @@ _VAE_DECODE_MODES = ["true", "true (tiled)", "false"]
 _INTERPOLATION_METHODS = ["nearest-exact", "bilinear", "area", "bicubic", "bislerp"]
 
 
-_AUTO_TILE_LATENT_THRESHOLD = 192  # latent pixels — see sampler_sdxl._smart_vae_decode
-
-
 def _vae_decode(vae, latent, *, mode: str = "true"):
-    """Decode honouring the user's vae_decode mode. 'false' returns None.
-    'true' auto-promotes to tiled when the latent's longest dim exceeds
-    _AUTO_TILE_LATENT_THRESHOLD — saves the user from picking 'true (tiled)'
-    manually for HiResFix outputs that would OOM the non-tiled path.
-
-    On OOM, walks tile_x/tile_y down (256→128→64) instead of crashing,
-    then falls through to vae.decode() which has its own OOM→tiled retry."""
-    if mode == "false" or vae is None:
-        return None
-    samples = latent["samples"]
-    latent_max = max(samples.shape[-1], samples.shape[-2])
-    use_tiled = (mode == "true (tiled)" or
-                 (mode == "true" and latent_max > _AUTO_TILE_LATENT_THRESHOLD))
-    if not (use_tiled and hasattr(vae, "decode_tiled")):
-        return vae.decode(samples)
-    tile = 256
-    while True:
-        try:
-            return vae.decode_tiled(samples, tile_x=tile, tile_y=tile, overlap=64)
-        except Exception as e:
-            import comfy.model_management as _mm
-            _mm.raise_non_oom(e)
-            if tile <= 64:
-                logging.info(
-                    "[GrimmRibbity] anima vae decode OOM at tile=%d, "
-                    "falling through to vae.decode()", tile)
-                _mm.soft_empty_cache()
-                return vae.decode(samples)
-            new_tile = tile // 2
-            logging.info(
-                "[GrimmRibbity] anima vae decode OOM at tile=%d, retrying at tile=%d",
-                tile, new_tile)
-            tile = new_tile
-            _mm.soft_empty_cache()
+    """Thin wrapper around the shared OOM-safe helper so all three nodes
+    (anima, sdxl, detailer) share tile policy."""
+    return oom_safe_vae_decode(vae, latent, mode=mode)
 
 
 def _interpolation_upscale(latent: dict, scale: float, method: str) -> dict:
@@ -179,7 +149,7 @@ def _apply_anima_hires_fix(script: dict, *,
     # whole function only runs at sample time when torch is loaded).
     from .sampler_sdxl import (
         _HiresIterPlan, _preflight_size_warning, _between_iterations_cleanup,
-        _peak_vram_reset, _log_hires_iter,
+        _peak_vram_reset, _log_hires_iter, _check_interrupt,
     )
     try:
         from .runtime import hip_sync
@@ -196,6 +166,7 @@ def _apply_anima_hires_fix(script: dict, *,
     cur = latent
     denoise = script["hires_denoise"]
     for i in range(plan.iterations):
+        _check_interrupt()
         pre_mb = _peak_vram_reset()
         if not plan.skip_upscale:
             cur = _interpolation_upscale(cur, plan.per_iter, script["upscale_method"])
