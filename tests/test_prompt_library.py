@@ -1511,6 +1511,51 @@ class PromptLibraryTests(unittest.TestCase):
         self.assertEqual(added, 0)
         self.assertTrue(any("empty name" in e for e in errors))
 
+    def test_import_zip_rejects_zip_bomb_via_uncompressed_cap(self):
+        # Zip-bomb defence: sum of `info.file_size` across the central
+        # directory is checked before any member is decompressed. Build a
+        # legit small zip and shrink the cap to a value below it so the
+        # guard fires deterministically without a multi-GB fixture.
+        items = [{"id": "abc", "name": "n", "text": "t" * 200}]
+        zip_bytes = self.mod._build_export_zip(items, "test")
+        original_cap = self.mod._MAX_IMPORT_ZIP_UNCOMPRESSED_BYTES
+        self.mod._MAX_IMPORT_ZIP_UNCOMPRESSED_BYTES = 16  # cap below manifest size
+        try:
+            added, updated, skipped, errors = self.mod._import_zip(zip_bytes)
+        finally:
+            self.mod._MAX_IMPORT_ZIP_UNCOMPRESSED_BYTES = original_cap
+        self.assertEqual((added, updated, skipped), (0, 0, 0))
+        self.assertTrue(any("zip-bomb guard" in e for e in errors), errors)
+
+    def test_import_zip_route_rejects_oversized_compressed_upload(self):
+        # The route also has a compressed-bytes cap so a huge multipart
+        # upload is rejected before the inner _import_zip tries to parse it.
+        items = [{"id": "abc", "name": "n", "text": "t"}]
+        zip_bytes = self.mod._build_export_zip(items, "test")
+        original_cap = self.mod._MAX_IMPORT_ZIP_BYTES
+        self.mod._MAX_IMPORT_ZIP_BYTES = 1
+        try:
+            req = FakeRequest(post_data={"file": FakeFileField("x.zip", zip_bytes)})
+            resp = asyncio.run(self.mod.import_zip_route(req))
+        finally:
+            self.mod._MAX_IMPORT_ZIP_BYTES = original_cap
+        self.assertEqual(resp.status, 400)
+        self.assertIn(b"zip too large", resp.body)
+
+    def test_import_csv_route_rejects_oversized_body(self):
+        # CSV uploads are capped consistent with image and zip uploads;
+        # without this guard a multi-GB CSV would parse into memory.
+        body = "name,prompt\nfoo,hello\n"
+        original_cap = self.mod._MAX_IMPORT_CSV_BYTES
+        self.mod._MAX_IMPORT_CSV_BYTES = 5
+        try:
+            req = FakeRequest(post_data={"csv": body})
+            resp = asyncio.run(self.mod.import_csv_route(req))
+        finally:
+            self.mod._MAX_IMPORT_CSV_BYTES = original_cap
+        self.assertEqual(resp.status, 400)
+        self.assertIn(b"CSV too large", resp.body)
+
     # ---- snapshot / undo ----------------------------------------------
 
     def test_snapshot_and_restore(self):
