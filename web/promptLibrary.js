@@ -372,8 +372,6 @@ const CSS = `
   border-radius: var(--pl-r-sm); color: #0c0c0c; letter-spacing: 0.5px;
   font-size: 11px; text-transform: uppercase; }
 .pl-det-h.face  { background: #479f5b; }
-.pl-det-h.skin  { background: #bbb247; }
-.pl-det-h.mouth { background: #bb6347; }
 .pl-det-h.eyes  { background: #479ebb; }
 .pl-det-h.feet  { background: #7b47bb; color: #fff; }
 .pl-det-h.hands { background: #bb479e; }
@@ -3516,9 +3514,9 @@ function registerComicFrameNode(nodeType) {
 }
 
 // -----------------------------------------------------------------------------
-// Smart Detailer per-target grid — replaces the long stack of 16+4 hidden
-// widgets (enable/threshold/denoise/max/steps × face/eyes/hands/skin) with a
-// compact 5-column grid: 1 row-label column + 4 target columns. The
+// Smart Detailer per-target grid — replaces the long stack of hidden widgets
+// (enable/threshold/denoise/max/steps/crop/cycles × face/eyes/hands/feet) with
+// a compact 5-column grid: 1 row-label column + 4 target columns. The
 // underlying widgets stay in `node.widgets` (so workflow JSON serialises
 // correctly) but get hidden behind the DOM grid; reads + writes go through
 // each cell input -> the underlying widget's .value setter.
@@ -3526,11 +3524,12 @@ function registerComicFrameNode(nodeType) {
 const SMART_DETAILER_NAME = "GrimmRibbitySmartDetailer";
 
 function _buildSmartDetailerGrid(node) {
-  const TARGETS = ["face", "skin", "mouth", "eyes", "feet", "hands"];
+  const TARGETS = ["face", "eyes", "hands", "feet"];
   // sentinel: the "use global / preset value" placeholder. Cells holding
   // the sentinel render dimmed-italic so override status is visible at a
   // glance. -1 for the global-fallback floats; 0 for max/steps; 0 for
-  // crop_factor (uses preset). Booleans don't dim.
+  // crop_factor (uses preset); 1 for cycles (default is one pass).
+  // Booleans don't dim.
   const ROWS = [
     { key: "enable",    label: "enable",    pat: "enable_X",      kind: "bool" },
     { key: "threshold", label: "threshold", pat: "X_threshold",   kind: "float", step: 0.01, min: -1, max: 1, sentinel: -1 },
@@ -3538,6 +3537,7 @@ function _buildSmartDetailerGrid(node) {
     { key: "max",       label: "max N",     pat: "X_max",         kind: "int",   step: 1, min: 0, max: 64,    sentinel: 0  },
     { key: "steps",     label: "steps",     pat: "X_steps",       kind: "int",   step: 1, min: 0, max: 200,   sentinel: 0  },
     { key: "crop",      label: "crop",      pat: "X_crop_factor", kind: "float", step: 0.05, min: 0, max: 10, sentinel: 0  },
+    { key: "cycles",    label: "cycles",    pat: "X_cycles",      kind: "int",   step: 1, min: 1, max: 8,     sentinel: 1  },
   ];
   const ROW_TOOLTIPS = {
     enable:    "Run the detailer pass on this category. Unchecked = column is skipped entirely.",
@@ -3546,6 +3546,7 @@ function _buildSmartDetailerGrid(node) {
     max:       "Max detections to process per image, ranked top-down by confidence. 0 = use the preset default.",
     steps:     "Sampler steps for the inpaint pass on this category. 0 = use the preset default.",
     crop:      "Crop factor around each detection before sampling. 1.0 = tight, 2.0 = generous context. 0 = use the preset default.",
+    cycles:    "How many times to re-run this pass on the same detections. 2-3 cycles compound detail when one pass barely moves the result. Linear time cost.",
   };
 
   const widgetsByName = {};

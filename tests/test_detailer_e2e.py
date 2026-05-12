@@ -151,7 +151,7 @@ class _DetailerMatrix(unittest.TestCase):
         defaults = dict(
             image=self.image, model="MODEL", clip="CLIP", vae=self.vae,
             positive=[("pos", {})], negative=[("neg", {})],
-            enable_face=False, enable_eyes=False, enable_hands=False, enable_skin=False,
+            enable_face=False, enable_eyes=False, enable_hands=False,
             bbox_face=detailer_node._NONE,
             bbox_eyes=detailer_node._NONE,
             bbox_hands=detailer_node._NONE,
@@ -162,11 +162,10 @@ class _DetailerMatrix(unittest.TestCase):
             bbox_threshold=0.45, max_per_target=0,
             tiled_decode=True, tiled_encode=False,
             mask_strength=1.0, same_seed_per_target=False,
-            enable_mouth=False, enable_feet=False,
-            bbox_mouth=detailer_node._NONE,
+            enable_feet=False,
             bbox_feet=detailer_node._NONE,
-            face_crop_factor=0.0, eyes_crop_factor=0.0, mouth_crop_factor=0.0,
-            hands_crop_factor=0.0, feet_crop_factor=0.0, skin_crop_factor=0.0,
+            face_crop_factor=0.0, eyes_crop_factor=0.0,
+            hands_crop_factor=0.0, feet_crop_factor=0.0,
             bypass=False,
         )
         defaults.update(overrides)
@@ -226,9 +225,9 @@ class _DetailerMatrix(unittest.TestCase):
         node = detailer_node.GrimmRibbitySmartDetailer()
         out = node.detail(**self._kwargs(
             enable_face=True, enable_eyes=True,
-            enable_hands=True, enable_skin=True,
+            enable_hands=True, enable_feet=True,
             bbox_face="face_yolov8m.pt", bbox_eyes="Eyeful_v2-Paired.pt",
-            bbox_hands="hand_yolov8s.pt",
+            bbox_hands="hand_yolov8s.pt", bbox_feet="feet_yolov8.pt",
             sam_model="sam2.1_hiera_large.pt"))
         self._assert_clean_output(*out, label="all_with_sam")
 
@@ -342,9 +341,10 @@ class _DetailerMatrix(unittest.TestCase):
                                                same_seed_per_target=same))
             self._assert_clean_output(*out, label=f"same_seed={same}")
 
-    def test_sam_cache_face_skin_share_bbox(self):
-        # Both face + skin enabled (both use bbox_face). With SAM, the mask
-        # cache should hit on the second pass — predict should be called once.
+    def test_sam_cache_face_eyes_share_bbox(self):
+        # Face + eyes enabled with no dedicated bbox_eyes — eyes falls back
+        # to bbox_face, so both passes hit the same bbox. With SAM, the mask
+        # cache should fire on the second pass — predict should run once.
         self._patch_yolo([((100, 80, 156, 140), 0.87)])
         call_count = {"n": 0}
         sam_mask = torch.zeros((256, 256))
@@ -360,7 +360,7 @@ class _DetailerMatrix(unittest.TestCase):
         detailer_node._sam_predict_batch = lambda *_a, **_kw: None  # force per-bbox
 
         node = detailer_node.GrimmRibbitySmartDetailer()
-        out = node.detail(**self._kwargs(enable_face=True, enable_skin=True,
+        out = node.detail(**self._kwargs(enable_face=True, enable_eyes=True,
                                            bbox_face="face_yolov8m.pt",
                                            sam_model="sam2.1_hiera_large.pt"))
         self._assert_clean_output(*out, label="sam_cache")

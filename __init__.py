@@ -3071,7 +3071,7 @@ async def fix_orphans(request):
     return web.json_response({"removed": removed, "errors": errors})
 
 
-__version__ = "0.58.0"
+__version__ = "0.59.0"
 
 
 def _autobackup_on_version_change() -> None:

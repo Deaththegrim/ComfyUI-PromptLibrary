@@ -380,6 +380,15 @@ def _load_checkpoint_cached(ckpt_name: str):
     global _HIRES_CKPT_CACHE
     if _HIRES_CKPT_CACHE is not None and _HIRES_CKPT_CACHE[0] == ckpt_name:
         return _HIRES_CKPT_CACHE[1]
+    # Cache miss: a second full SDXL won't fit alongside the primary on a
+    # 16 GB card under --highvram. Drop any previous hires entry, evict
+    # Comfy's loaded models, and free the allocator's reserved blocks
+    # before constructing the new one. The primary reloads on the next
+    # workflow run; the hires ckpt stays cached for re-runs of this one.
+    import comfy.model_management as _mm
+    _HIRES_CKPT_CACHE = None
+    _mm.unload_all_models()
+    _mm.soft_empty_cache()
     out = _load_checkpoint(ckpt_name)
     _HIRES_CKPT_CACHE = (ckpt_name, out)
     return out

@@ -236,7 +236,7 @@ class BypassAndPassthroughTests(unittest.TestCase):
         defaults = dict(
             image=self.image, model="MODEL", clip="CLIP", vae="VAE",
             positive="POS", negative="NEG",
-            enable_face=False, enable_eyes=False, enable_hands=False, enable_skin=False,
+            enable_face=False, enable_eyes=False, enable_hands=False,
             bbox_face=detailer_node._NONE,
             bbox_eyes=detailer_node._NONE,
             bbox_hands=detailer_node._NONE,
@@ -288,27 +288,26 @@ class InputTypesShapeTests(unittest.TestCase):
     def test_input_types_minimum_keys(self):
         spec = detailer_node.GrimmRibbitySmartDetailer.INPUT_TYPES()
         for k in ("image", "model", "clip", "vae", "positive", "negative",
-                  "enable_face", "enable_eyes", "enable_hands", "enable_skin",
+                  "enable_face", "enable_eyes", "enable_hands",
                   "bbox_face", "bbox_eyes", "bbox_hands", "sam_model",
                   "seed", "steps", "cfg", "sampler_name", "scheduler",
                   "denoise", "guide_size", "max_size",
                   "bbox_threshold", "max_per_target",
                   "tiled_decode", "tiled_encode", "mask_strength",
                   "same_seed_per_target",
-                  "enable_mouth", "enable_feet", "bbox_mouth", "bbox_feet",
+                  "enable_feet", "bbox_feet",
                   "bypass"):
             self.assertIn(k, spec["required"], f"missing required: {k}")
         for k in ("wildcard_prefix", "force_inpaint", "drop_size",
-                  "nms_iou", "yolo_imgsz",
+                  "min_detail_size", "nms_iou", "yolo_imgsz",
                   "max_bbox_area_pct", "draw_preview",
                   "face_threshold", "face_denoise", "face_max", "face_steps",
                   "eyes_threshold", "eyes_denoise", "eyes_max", "eyes_steps",
                   "hands_threshold", "hands_denoise", "hands_max", "hands_steps",
-                  "skin_threshold", "skin_denoise", "skin_max", "skin_steps",
-                  "mouth_threshold", "mouth_denoise", "mouth_max", "mouth_steps",
                   "feet_threshold", "feet_denoise", "feet_max", "feet_steps",
-                  "face_crop_factor", "eyes_crop_factor", "mouth_crop_factor",
-                  "hands_crop_factor", "feet_crop_factor", "skin_crop_factor"):
+                  "face_crop_factor", "eyes_crop_factor",
+                  "hands_crop_factor", "feet_crop_factor",
+                  "face_cycles", "eyes_cycles", "hands_cycles", "feet_cycles"):
             self.assertIn(k, spec["optional"], f"missing optional: {k}")
 
     def test_per_target_overrides_default_to_minus_one(self):
@@ -316,7 +315,7 @@ class InputTypesShapeTests(unittest.TestCase):
         for k in ("face_threshold", "face_denoise",
                   "eyes_threshold", "eyes_denoise",
                   "hands_threshold", "hands_denoise",
-                  "skin_threshold", "skin_denoise"):
+                  "feet_threshold", "feet_denoise"):
             self.assertEqual(spec["optional"][k][1]["default"], -1.0,
                              f"{k} should default to -1.0 (= use global)")
 
@@ -391,21 +390,15 @@ class HelperUtilsTests(unittest.TestCase):
 
 class PresetTests(unittest.TestCase):
     def test_all_four_targets_have_presets(self):
-        for t in ("face", "eyes", "hands", "skin"):
+        for t in ("face", "eyes", "hands", "feet"):
             self.assertIn(t, detailer_node._PRESETS)
             preset = detailer_node._PRESETS[t]
             for key in ("denoise", "feather", "crop_factor", "wildcard"):
                 self.assertIn(key, preset, f"{t} preset missing {key}")
 
-    def test_skin_has_lowest_denoise(self):
-        skin = detailer_node._PRESETS["skin"]["denoise"]
-        for other in ("face", "eyes", "hands"):
-            self.assertLess(skin, detailer_node._PRESETS[other]["denoise"],
-                            f"skin should have lower denoise than {other}")
-
     def test_hands_has_highest_denoise(self):
         hands = detailer_node._PRESETS["hands"]["denoise"]
-        for other in ("face", "eyes", "skin"):
+        for other in ("face", "eyes", "feet"):
             self.assertGreaterEqual(hands, detailer_node._PRESETS[other]["denoise"])
 
 
