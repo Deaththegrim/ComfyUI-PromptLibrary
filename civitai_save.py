@@ -95,9 +95,21 @@ def _file_signature(path: str) -> str | None:
 
 
 def _compute_sha256(path: str) -> str:
+    """SHA256 a file in 1 MB chunks. First-time hash of a 5-15 GB checkpoint
+    takes ~30s on fast SSD — check for interrupt between chunks so Cancel
+    stays responsive. The check is best-effort: comfy not importable
+    (test/standalone) means the loop is uninterruptible but still bounded
+    by file size."""
+    try:
+        import comfy.model_management as _mm
+        check_interrupt = _mm.throw_exception_if_processing_interrupted
+    except (ImportError, ModuleNotFoundError, AttributeError):
+        check_interrupt = None
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            if check_interrupt is not None:
+                check_interrupt()
             h.update(chunk)
     return h.hexdigest()
 
@@ -962,8 +974,19 @@ class CivitaiSaveImage:
             for k, v in extra_pnginfo.items():
                 extra_text.append((k, json.dumps(v)))
 
+        try:
+            import comfy.model_management as _mm
+            check_interrupt = _mm.throw_exception_if_processing_interrupted
+        except (ImportError, ModuleNotFoundError, AttributeError):
+            check_interrupt = None
+
         results = []
         for frame in images:
+            # PNG encode + write of a 4K image takes 1-2 s; a 100-frame batch
+            # without a cancel-check would ignore the Interrupt button for
+            # the whole save. Per-frame check keeps Cancel responsive.
+            if check_interrupt is not None:
+                check_interrupt()
             arr = frame
             if hasattr(arr, "cpu"):
                 arr = arr.cpu().numpy()

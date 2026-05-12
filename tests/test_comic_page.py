@@ -188,7 +188,11 @@ class ComicPageNodeTests(unittest.TestCase):
         self.assertEqual(len(_ENCODE_CALLS), 1)
         self.assertEqual(_ENCODE_CALLS[0]["prompt"], "y")
 
-    def test_no_active_panels_returns_empty_conditioning(self):
+    def test_no_active_panels_returns_fallback_empty_prompt_conditioning(self):
+        # v0.33.1: an empty CONDITIONING list crashes any downstream sampler,
+        # so when no panels have prompts the node encodes a single empty-prompt
+        # fallback via the supplied CLIP. No mask call is made (no panel to
+        # mask), and the output is the encoder's 1-entry conditioning.
         out = self.node.build(
             clip="CLIP", panel_layout=self.layout, shared_prompt="", strength=1.0, set_cond_area="default",
             panel_1_prompt="", panel_1_color="#FF0000",
@@ -198,9 +202,29 @@ class ComicPageNodeTests(unittest.TestCase):
             panel_5_prompt="", panel_5_color="#FF00FF",
             panel_6_prompt="", panel_6_color="#00FFFF",
         )
-        self.assertEqual(_ENCODE_CALLS, [])
+        self.assertEqual(len(_ENCODE_CALLS), 1)
+        self.assertEqual(_ENCODE_CALLS[0], {"clip": "CLIP", "prompt": ""})
         self.assertEqual(_MASK_CALLS, [])
-        self.assertEqual(out, ([],))
+        # ([(tensor, dict)],) — a valid CONDITIONING the sampler can consume.
+        self.assertEqual(len(out), 1)
+        self.assertEqual(len(out[0]), 1)
+
+    def test_no_active_panels_with_shared_prompt_uses_shared_as_fallback(self):
+        # The fallback encodes `shared_prompt` (not "") when shared is set,
+        # so a user who only filled the shared field still gets a meaningful
+        # prompt rather than a blank one.
+        self.node.build(
+            clip="CLIP", panel_layout=self.layout, shared_prompt="cinematic", strength=1.0, set_cond_area="default",
+            panel_1_prompt="", panel_1_color="#FF0000",
+            panel_2_prompt="", panel_2_color="#00FF00",
+            panel_3_prompt="", panel_3_color="#0000FF",
+            panel_4_prompt="", panel_4_color="#FFFF00",
+            panel_5_prompt="", panel_5_color="#FF00FF",
+            panel_6_prompt="", panel_6_color="#00FFFF",
+        )
+        self.assertEqual(len(_ENCODE_CALLS), 1)
+        self.assertEqual(_ENCODE_CALLS[0]["prompt"], "cinematic")
+        self.assertEqual(_MASK_CALLS, [])
 
     def test_strength_and_set_cond_area_propagate(self):
         self.node.build(

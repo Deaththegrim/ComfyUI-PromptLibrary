@@ -36,6 +36,13 @@ import comfy.utils
 import folder_paths
 import nodes  # for common_ksampler
 
+try:
+    from .runtime import (register_cache, ensure_unload_hook, hip_sync,
+                          oom_safe_vae_decode, oom_safe_vae_encode)
+except ImportError:
+    from runtime import (register_cache, ensure_unload_hook, hip_sync,
+                         oom_safe_vae_decode, oom_safe_vae_encode)
+
 
 # Shared iteration math + UI feedback for any HiResFix variant. Both the
 # SDXL and Anima samplers consume one of these per stage; the dataclass
@@ -100,6 +107,48 @@ def _between_iterations_cleanup() -> None:
         comfy.model_management.soft_empty_cache()
     except Exception:
         pass
+
+
+def _check_interrupt() -> None:
+    """Raise InterruptProcessingException if the user clicked Cancel.
+    common_ksampler checks internally during sampling, but encode/upscale/
+    composite work between iterations is not covered — call this at
+    iteration boundaries so the Cancel button stays responsive."""
+    try:
+        import comfy.model_management as _mm
+        _mm.throw_exception_if_processing_interrupted()
+    except (ImportError, ModuleNotFoundError, AttributeError):
+        pass
+
+
+def _peak_vram_reset() -> float | None:
+    """Reset the peak-memory counter and return the current allocated MB
+    as a baseline. Caller passes the baseline to _log_hires_iter after
+    the iteration body. Returns None on non-CUDA / failure paths so the
+    log call no-ops cleanly. Shared by both SDXL and Anima HiResFix
+    iteration loops via the cross-module borrow in sampler_anima."""
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+            return torch.cuda.memory_allocated() / (1024 * 1024)
+    except Exception:
+        pass
+    return None
+
+
+def _log_hires_iter(mode: str, i: int, pre_mb: float | None) -> None:
+    """Per-iteration HiResFix log line with peak/delta VRAM. Mirrors the
+    detailer's per-pass telemetry from v0.57.2 so wedge investigations
+    have the same numbers across nodes."""
+    if pre_mb is None:
+        logging.info("[GrimmRibbity HiRes] %s iter %d done", mode, i + 1)
+        return
+    try:
+        peak_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
+        logging.info("[GrimmRibbity HiRes] %s iter %d done peak_vram_mb=%.0f delta_mb=%+.0f",
+                      mode, i + 1, peak_mb, peak_mb - pre_mb)
+    except Exception:
+        logging.info("[GrimmRibbity HiRes] %s iter %d done", mode, i + 1)
 
 
 def _preflight_size_warning(latent: dict, total_scale: float, *, sampler: str) -> None:
@@ -183,47 +232,20 @@ def _encode_sdxl(clip, text_g: str, text_l: str,
     })
 
 
-def _vae_decode(vae, latent, *, mode: str = "true"):
-    """Decode honouring the user's vae_decode mode. 'false' returns None."""
-    if mode == "false":
-        return None
-    samples = latent["samples"]
-    if mode == "true (tiled)":
-        return vae.decode_tiled(samples, tile_x=512, tile_y=512, overlap=64)
-    return vae.decode(samples)
-
-
-# Auto-tile threshold (in latent pixels). Above this, decode falls back to
-# the tiled path even when the user picked 'true' — non-tiled decode of a
-# 256-latent (= 2048px image) often OOMs on 16GB GPUs. SDXL's default
-# 128-latent (= 1024px image) stays on the fast path; HiResFix at 2x or
-# higher promotes itself.
-_AUTO_TILE_LATENT_THRESHOLD = 192
-
-
 def _smart_vae_decode(vae, latent, *, mode: str = "true"):
-    """Like _vae_decode but auto-promotes 'true' → tiled for large latents.
-    Saves the user from picking 'true (tiled)' manually for HiResFix outputs
-    that would OOM the non-tiled path. The user's explicit 'true (tiled)'
-    or 'false' choice is honoured verbatim — promotion only applies to 'true'."""
-    if mode == "false":
-        return None
-    samples = latent["samples"]
-    latent_max = max(samples.shape[-1], samples.shape[-2])
-    if mode == "true" and latent_max > _AUTO_TILE_LATENT_THRESHOLD and hasattr(vae, "decode_tiled"):
-        return vae.decode_tiled(samples, tile_x=512, tile_y=512, overlap=64)
-    if mode == "true (tiled)":
-        return vae.decode_tiled(samples, tile_x=512, tile_y=512, overlap=64)
-    return vae.decode(samples)
+    """Decode honouring the user's vae_decode mode, auto-promoting 'true'
+    to tiled for large latents. Routes through the shared OOM-safe helper
+    so all three nodes (sampler, anima, detailer) share tile policy
+    (256→128→64 shrink, overlap=64, fall-through to vae.decode())."""
+    return oom_safe_vae_decode(vae, latent, mode=mode)
 
 
 def _vae_encode(vae, image, *, auto_tile: bool = False):
-    """Encode an HWC image. auto_tile=True falls back to vae.encode_tiled
-    for large images so the inverse of _smart_vae_decode doesn't OOM."""
+    """Encode an HWC image. auto_tile=True routes through the shared OOM-safe
+    helper which auto-promotes to tiled when the image is large enough that
+    non-tiled would OOM. auto_tile=False is non-tiled."""
     if auto_tile:
-        side_max = max(image.shape[-2], image.shape[-3])
-        if side_max > _AUTO_TILE_LATENT_THRESHOLD * 8 and hasattr(vae, "encode_tiled"):
-            return {"samples": vae.encode_tiled(image)}
+        return oom_safe_vae_encode(vae, image, mode="true")
     return {"samples": vae.encode(image)}
 
 
@@ -241,10 +263,11 @@ def _pixel_upscale_with_model(pixel_image, upscale_model, *, keep_on_device: boo
     one device-transfer instead of five."""
     import comfy.model_management
     device = comfy.model_management.get_torch_device()
-    memory_required = comfy.model_management.module_size(upscale_model.model)
-    memory_required += (512 * 512 * 3) * pixel_image.element_size() * max(upscale_model.scale, 1.0) * 384.0
-    memory_required += pixel_image.nelement() * pixel_image.element_size()
-    comfy.model_management.free_memory(memory_required, device)
+    # Upstream Comfy's heuristic free_memory(384× factor) reservation
+    # over-estimates on a 16GB AMD card and feeds the TTM eviction storm
+    # we're already absorbing via kernel patches. Skip it: the allocator
+    # handles real demand lazily on first allocation. Tile-shrink loop
+    # below is the actual OOM safety net.
     upscale_model.to(device)
     in_img = pixel_image.movedim(-1, -3).to(device)
     # Default 256 (was 512). On RX 9070 XT under PYTORCH_NO_HIP_MEMORY_CACHING=1
@@ -325,6 +348,15 @@ def _load_upscale_model_cached(model_name: str):
     return out
 
 
+def _clear_upscale_model_cache() -> None:
+    """Drop the single-slot upscale model cache. Wired into the runtime
+    unload hook so the "Unload Models" button actually reclaims the
+    ~50-200 MB held here. Cache is a tuple-or-None rebind, not a dict
+    mutation, so we need `global` + reassign to clear it."""
+    global _UPSCALE_MODEL_CACHE
+    _UPSCALE_MODEL_CACHE = None
+
+
 def _load_checkpoint(ckpt_name: str):
     ckpt_path = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
     out = comfy.sd.load_checkpoint_guess_config(
@@ -348,9 +380,27 @@ def _load_checkpoint_cached(ckpt_name: str):
     global _HIRES_CKPT_CACHE
     if _HIRES_CKPT_CACHE is not None and _HIRES_CKPT_CACHE[0] == ckpt_name:
         return _HIRES_CKPT_CACHE[1]
+    # Cache miss: a second full SDXL won't fit alongside the primary on a
+    # 16 GB card under --highvram. Drop any previous hires entry, evict
+    # Comfy's loaded models, and free the allocator's reserved blocks
+    # before constructing the new one. The primary reloads on the next
+    # workflow run; the hires ckpt stays cached for re-runs of this one.
+    import comfy.model_management as _mm
+    _HIRES_CKPT_CACHE = None
+    _mm.unload_all_models()
+    _mm.soft_empty_cache()
     out = _load_checkpoint(ckpt_name)
     _HIRES_CKPT_CACHE = (ckpt_name, out)
     return out
+
+
+def _clear_hires_ckpt_cache() -> None:
+    """Drop the single-slot hires checkpoint cache. The biggest ticket
+    item — checkpoints are 5-15 GB. Without this, "Unload Models" leaves
+    the swapped-in hires model resident even though Comfy thinks the
+    only loaded model is the primary."""
+    global _HIRES_CKPT_CACHE
+    _HIRES_CKPT_CACHE = None
 
 
 def _load_controlnet(name: str):
@@ -623,6 +673,7 @@ def _hires_one_iteration(*, model, clip, vae, positive, negative, latent,
         # has pushed the latent past the threshold so iteration N doesn't
         # OOM where iteration N-1 fit comfortably.
         decoded = _smart_vae_decode(vae, latent, mode="true")
+        hip_sync("post-vae-decode-hires")
         upscaled = _pixel_upscale_with_model(decoded, upscale_model,
                                               keep_on_device=True)
         target_w = round(decoded.shape[-2] * per_scale)
@@ -701,6 +752,7 @@ def _hires_one_iteration(*, model, clip, vae, positive, negative, latent,
         iter_sampler, iter_sched, pos, neg, cur,
         denoise=script["hires_denoise"],
     )
+    hip_sync("post-ksampler-hires")
     return sampled[0]
 
 
@@ -763,7 +815,9 @@ def _apply_hires_fix(script: dict, *,
                                          total_steps=total_iters)
             for stage_idx, stage_mode in enumerate(("both_latent", "both_pixel")):
                 for i in range(plan.iterations):
+                    _check_interrupt()
                     seed = base_seed + stage_idx * plan.iterations + i
+                    pre_mb = _peak_vram_reset()
                     cur = _hires_one_iteration(
                         model=sampling_model, clip=sampling_clip, vae=sampling_vae,
                         positive=positive, negative=negative, latent=cur,
@@ -772,12 +826,15 @@ def _apply_hires_fix(script: dict, *,
                         seed=seed, upscale_model=upscale_model,
                         control_net=control_net,
                     )
+                    _log_hires_iter(stage_mode, i, pre_mb)
                     plan.pbar.update(1)
                     _between_iterations_cleanup()
         else:
             plan = _HiresIterPlan.build(total_scale=total_scale, iterations=iterations,
                                          total_steps=total_iters)
             for i in range(plan.iterations):
+                _check_interrupt()
+                pre_mb = _peak_vram_reset()
                 cur = _hires_one_iteration(
                     model=sampling_model, clip=sampling_clip, vae=sampling_vae,
                     positive=positive, negative=negative, latent=cur,
@@ -786,6 +843,7 @@ def _apply_hires_fix(script: dict, *,
                     seed=base_seed + i, upscale_model=upscale_model,
                     control_net=control_net,
                 )
+                _log_hires_iter(upscale_type, i, pre_mb)
                 plan.pbar.update(1)
                 _between_iterations_cleanup()
     finally:
@@ -927,6 +985,8 @@ class GrimmRibbitySamplerSDXL:
             print(f"[GrimmRibbitySamplerSDXL] ignoring unknown legacy inputs: "
                   f"{list(legacy_kwargs.keys())}")
 
+        ensure_unload_hook()
+
         # _unpack_sdxl_tuple validates the base slots, normalises the refiner
         # half (warns on partial fills), and always returns 8 elements so
         # the out_tuple construction below is straight indexing.
@@ -991,3 +1051,10 @@ class GrimmRibbitySamplerSDXL:
                 print(f"[GrimmRibbitySamplerSDXL] prompt_log append failed: {e}")
 
         return (image_out, latent_out, base_model, base_clip, vae, int(noise_seed), out_tuple)
+
+
+# Cache eviction wired into the runtime unload hook. Both caches are
+# tuple-or-None rebinds (not dict mutations), so each gets its own clear
+# function rather than a `.clear()` bound-method registration.
+register_cache(_clear_upscale_model_cache)
+register_cache(_clear_hires_ckpt_cache)
