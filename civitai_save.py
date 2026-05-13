@@ -860,16 +860,6 @@ class CivitaiSaveImage:
                 "filename_prefix": ("STRING", {"default": "GrimmRibbity",
                     "tooltip": "Prefix for the saved file (counter and .png are appended). "
                                "Supports ComfyUI's date/time substitutions like %date:yyyy-MM-dd%."}),
-                "append_counter": ("BOOLEAN", {"default": True,
-                    "tooltip": "When True (default), append Comfy's zero-padded counter "
-                               "to the filename (e.g. 'GrimmRibbity_00007_.png') so each "
-                               "save resumes from the highest existing index and never "
-                               "overwrites prior work. When False, write the filename "
-                               "exactly as given (e.g. 'GrimmRibbity.png') — an existing "
-                               "file at that path WILL be overwritten. For batch saves "
-                               "of N>1 frames, a small index suffix (_00, _01, …) is "
-                               "still appended so the frames within one save don't "
-                               "clobber each other."}),
             },
             "optional": {
                 "output_path": ("STRING", {"default": "", "multiline": False,
@@ -891,6 +881,25 @@ class CivitaiSaveImage:
                 "negative_override": ("STRING", {"default": "", "multiline": True,
                                                   "placeholder": "leave blank to auto-detect",
                     "tooltip": "Pin the negative prompt in metadata."}),
+                # KEEP append_counter AT THE END. ComfyUI maps a workflow's
+                # saved widgets_values to current widgets by positional index,
+                # not by name — inserting a new widget anywhere but the end
+                # shifts every saved value one slot off and breaks every
+                # workflow saved before the change. v0.59.3 originally put
+                # this widget after filename_prefix (required-block), which
+                # made `output_path` adopt a stale INT/FLOAT value on load
+                # and crashed the folder-picker's .trim() helper. Append-
+                # only is the contract for any future widget added here.
+                "append_counter": ("BOOLEAN", {"default": True,
+                    "tooltip": "When True (default), append Comfy's zero-padded counter "
+                               "to the filename (e.g. 'GrimmRibbity_00007_.png') so each "
+                               "save resumes from the highest existing index and never "
+                               "overwrites prior work. When False, write the filename "
+                               "exactly as given (e.g. 'GrimmRibbity.png') — an existing "
+                               "file at that path WILL be overwritten. For batch saves "
+                               "of N>1 frames, a small index suffix (_00, _01, …) is "
+                               "still appended so the frames within one save don't "
+                               "clobber each other."}),
             },
             "hidden": {
                 "prompt": "PROMPT",

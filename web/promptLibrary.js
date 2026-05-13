@@ -4334,14 +4334,23 @@ function registerCivitaiSaveNode(nodeType) {
     bar.appendChild(clearBtn);
 
     const refreshCurrent = () => {
-      const v = (pathWidget.value || "").trim();
+      // Defensive String() coercion: if a workflow was saved with a prior
+      // version where the widget order was different, ComfyUI maps saved
+      // widgets_values to current widgets by index — so a numeric value
+      // can land here and crash a naive `.trim()` call. Stringifying first
+      // means a stale int just renders as its string form until the user
+      // picks a real folder. Use raw `.value` (no `|| ""`) because falsy
+      // values like 0 should still stringify, not collapse to empty.
+      const raw = pathWidget.value;
+      const v = String(raw == null ? "" : raw).trim();
       current.textContent = v ? v : "(default: ComfyUI/output)";
       current.title = v || "ComfyUI/output";
     };
     refreshCurrent();
 
     browseBtn.addEventListener("click", () => {
-      _openCivitaiFolderBrowser(pathWidget.value || "", (chosen) => {
+      const initial = String(pathWidget.value == null ? "" : pathWidget.value);
+      _openCivitaiFolderBrowser(initial, (chosen) => {
         if (!chosen) return;
         pathWidget.value = chosen;
         refreshCurrent();

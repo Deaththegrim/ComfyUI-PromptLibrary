@@ -3534,7 +3534,7 @@ async def grimmribbity_mkdir(request):
     return web.json_response({"ok": True, "path": str(target)})
 
 
-__version__ = "0.61.0"
+__version__ = "0.61.1"
 
 
 def _autobackup_on_version_change() -> None:
