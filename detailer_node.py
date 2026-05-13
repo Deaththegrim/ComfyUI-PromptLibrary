@@ -892,13 +892,14 @@ def _enhance_one_pass(
         # End of bbox: drop the per-iteration tensors so the allocator can
         # reuse them for the next bbox. We do NOT call soft_empty_cache()
         # here — flushing every iteration defeats allocator pooling and
-        # under HIP forces an alloc/free roundtrip to amdgpu per bbox,
-        # which is exactly the churn pattern that produced the 2026-05-08
-        # gfxhub-page-fault wedge. Coarser flush at end of pass.
-        # Assumption depends on HIP allocator caching being ON. If
-        # PYTORCH_NO_HIP_MEMORY_CACHING=1 is set in launch.sh (currently
-        # disabled per the 2026-05-09 VM-leak A/B), pooling is off anyway
-        # and an inter-bbox soft_empty_cache() becomes free again —
+        # forces an alloc/free roundtrip to the driver per bbox, which is
+        # exactly the churn pattern that produced the 2026-05-08 HIP
+        # gfxhub-page-fault wedge on the prior AMD setup. Coarser flush
+        # at end of pass.
+        # Assumption depends on the torch allocator caching being ON. If
+        # PYTORCH_NO_CUDA_MEMORY_CACHING=1 is set in launch.sh (currently
+        # disabled), pooling is off anyway and an inter-bbox
+        # soft_empty_cache() becomes free again —
         # re-evaluate this branch if that env var flips back on.
         del refined_image, composite_mask, blended, crop
         if progress_bar is not None:

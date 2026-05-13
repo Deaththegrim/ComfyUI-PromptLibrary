@@ -1359,15 +1359,20 @@ _SCENE_MOOD = [_SCENE_NONE,
     "heroic", "triumphant", "epic",
     "romantic", "intimate", "mysterious", "dreamy", "surreal"]
 _SCENE_FRAMING = [_SCENE_NONE,
-    # Framing concepts from photography composition; the few in Danbooru's
-    # composition tag group (negative space, symmetry, letterboxed) are
-    # included but most of these stay as photography vocabulary.
-    "centered", "rule of thirds", "leading lines",
-    "symmetrical", "asymmetrical",
-    "frame within a frame", "negative space",
-    "letterboxed", "pillarboxed", "out of frame",
+    # Ordered by how strongly SDXL binds these concepts. Strong-binding
+    # entries (Danbooru-canonical or visually concrete) come first; abstract
+    # photo-meta lower down; artifact-prone entries last.
+    # Strong-binding
+    "centered",
+    "shallow depth of field", "deep depth of field",
+    "negative space",
+    "letterboxed", "pillarboxed",
+    # Weak-binding photo concepts (kept for completeness; SDXL responds loosely)
+    "rule of thirds", "leading lines",
+    "frame within a frame", "asymmetrical",
     "dynamic diagonal", "low horizon", "high horizon",
-    "shallow depth of field", "deep depth of field"]
+    # Risky — can introduce artifacts; use intentionally
+    "symmetrical", "out of frame"]
 
 
 class PromptLibraryScene:
@@ -1397,16 +1402,23 @@ class PromptLibraryScene:
                 "lighting": (_SCENE_LIGHTING, {
                     "tooltip": "Light source/quality. Mix with time_of_day for the full atmosphere."}),
                 "camera_angle": (_SCENE_CAMERA_ANGLE, {
-                    "tooltip": "Camera perspective and shot distance — close-up vs wide, low vs high."}),
+                    "tooltip": "Camera perspective. List mixes view-angle (from above, three-quarter view) "
+                               "with framing-the-body (full body, cowboy shot, portrait). Pick whichever "
+                               "matters most; the other can go in 'extra'."}),
                 "mood": (_SCENE_MOOD, {
-                    "tooltip": "Emotional tone. Influences color grading, expression cues."}),
+                    "tooltip": "Emotional tone. Influences color grading, expression cues. "
+                               "Strongest binders: ominous, tense, dramatic, mysterious. "
+                               "Loose binders: melancholic, nostalgic, contemplative."}),
                 "framing": (_SCENE_FRAMING, {
-                    "tooltip": "Composition rule — how the subject sits in the frame."}),
+                    "tooltip": "Composition rule. List is ordered: strong-binding tags first "
+                               "(centered, depth of field, letterboxed); weak photo-meta below; "
+                               "artifact-prone at the bottom. Avoid 'symmetrical' unless you want "
+                               "mirror artifacts."}),
                 "extra": ("STRING", {"default": "", "multiline": True,
-                                      "placeholder": "anything the dropdowns don't cover: lens, "
-                                                     "art style, composition refs...",
+                                      "placeholder": "backdrop, lens, art style, composition refs...",
                     "tooltip": "Free-form extra description appended to the joined scene. "
-                               "Use for lens (50mm, anamorphic), art style refs, or anything else."}),
+                               "The dropdowns set mood/light/weather but NOT a backdrop — add one here "
+                               "(e.g. 'dark moonlit moor, distant tombstones') or use the Background node."}),
                 "separator": ("STRING", {"default": ", ", "multiline": False,
                     "tooltip": "Glue between non-empty fields."}),
             },
@@ -3071,7 +3083,7 @@ async def fix_orphans(request):
     return web.json_response({"removed": removed, "errors": errors})
 
 
-__version__ = "0.59.0"
+__version__ = "0.59.1"
 
 
 def _autobackup_on_version_change() -> None:
