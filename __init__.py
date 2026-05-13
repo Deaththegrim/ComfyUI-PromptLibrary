@@ -3160,7 +3160,133 @@ async def grimmribbity_detailer_presets_delete(request):
     return web.json_response({"ok": True})
 
 
-__version__ = "0.59.3"
+# ----------------------------------------------------------------------------
+# Filesystem browser — backs the Civitai Save node's folder picker so users
+# don't have to hand-type output_path. Lists subdirs of a given path and
+# can create new ones. ComfyUI runs locally as the user, so navigation
+# anywhere the user can reach is the existing trust model — we don't try
+# to sandbox; we just refuse path traversal beyond what the user typed.
+# ----------------------------------------------------------------------------
+
+def _grimmribbity_resolve_browse_path(raw: str) -> Path:
+    """Normalise a browse path. Empty → ComfyUI output. '~' is expanded.
+    Relative paths are joined onto ComfyUI's output dir (mirrors the
+    Civitai Save node's output_path resolution semantics)."""
+    raw = (raw or "").strip()
+    output_default = Path("output")
+    try:
+        import folder_paths as _fp
+        output_default = Path(_fp.get_output_directory())
+    except (ImportError, AttributeError, Exception):
+        pass
+    if not raw:
+        return output_default
+    expanded = Path(os.path.expanduser(raw))
+    if not expanded.is_absolute():
+        expanded = output_default / expanded
+    return expanded
+
+
+@routes.get("/grimmribbity/browse_dirs")
+async def grimmribbity_browse_dirs(request):
+    """List subdirectories of the given path. Used by the Civitai Save
+    node's folder picker. Returns the resolved current path, its parent,
+    every immediate subdir (sorted, hidden dirs filtered), and a small
+    set of quick-jump roots (ComfyUI output, home, root)."""
+    raw = request.query.get("path", "")
+    target = _grimmribbity_resolve_browse_path(raw)
+    try:
+        target_resolved = target.resolve(strict=False)
+    except (OSError, RuntimeError) as e:
+        return web.json_response(
+            {"error": f"could not resolve path: {e}"}, status=400)
+
+    dirs: list[dict] = []
+    error: str | None = None
+    if target_resolved.exists():
+        if not target_resolved.is_dir():
+            return web.json_response(
+                {"error": f"{target_resolved} is not a directory"}, status=400)
+        try:
+            with os.scandir(target_resolved) as it:
+                for entry in it:
+                    if entry.name.startswith("."):
+                        continue
+                    try:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
+                    dirs.append({
+                        "name": entry.name,
+                        "path": str(Path(target_resolved) / entry.name),
+                    })
+        except OSError as e:
+            error = f"could not list directory: {e}"
+    else:
+        # Don't 404 — the picker UI is happy to render a "doesn't exist
+        # yet" state so the user can navigate up. Just return no dirs.
+        error = "directory does not exist"
+
+    dirs.sort(key=lambda d: d["name"].lower())
+
+    parent = target_resolved.parent if target_resolved != target_resolved.parent else None
+
+    roots: list[dict] = []
+    try:
+        import folder_paths as _fp
+        roots.append({"label": "ComfyUI output",
+                      "path": str(Path(_fp.get_output_directory()))})
+    except (ImportError, AttributeError, Exception):
+        pass
+    roots.append({"label": "Home (~)", "path": str(Path.home())})
+    roots.append({"label": "/", "path": "/"})
+
+    return web.json_response({
+        "path": str(target_resolved),
+        "parent": str(parent) if parent is not None else None,
+        "exists": target_resolved.exists(),
+        "dirs": dirs,
+        "roots": roots,
+        "error": error,
+    })
+
+
+@routes.post("/grimmribbity/mkdir")
+async def grimmribbity_mkdir(request):
+    """Create a subdirectory under the given parent path. The parent must
+    already exist; the child name is rejected if it tries to traverse
+    (contains '/', '\\', '..', or starts with '.'). Returns the new
+    directory's absolute path so the caller can immediately descend."""
+    payload, err = await _json_payload(request)
+    if err is not None:
+        return err
+    parent_raw = (payload.get("parent") or "").strip()
+    name = (payload.get("name") or "").strip()
+    if not name:
+        return web.json_response({"error": "name required"}, status=400)
+    if "/" in name or "\\" in name or ".." in name or name.startswith("."):
+        return web.json_response(
+            {"error": f"invalid folder name {name!r}"}, status=400)
+    parent = _grimmribbity_resolve_browse_path(parent_raw)
+    try:
+        parent_resolved = parent.resolve(strict=False)
+    except (OSError, RuntimeError) as e:
+        return web.json_response(
+            {"error": f"could not resolve parent: {e}"}, status=400)
+    if not parent_resolved.exists() or not parent_resolved.is_dir():
+        return web.json_response(
+            {"error": f"parent directory does not exist: {parent_resolved}"},
+            status=400)
+    target = parent_resolved / name
+    try:
+        target.mkdir(parents=False, exist_ok=True)
+    except OSError as e:
+        return web.json_response({"error": str(e)}, status=500)
+    return web.json_response({"ok": True, "path": str(target)})
+
+
+__version__ = "0.60.0"
 
 
 def _autobackup_on_version_change() -> None:

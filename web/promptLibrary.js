@@ -431,6 +431,76 @@ const CSS = `
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6);
   font-family: sans-serif; white-space: normal; }
 .pl-tooltip.show { opacity: 1; }
+/* Civitai save folder picker — inline bar in the node + modal browser */
+.pl-civ-pathbar { display: flex; flex-wrap: wrap; align-items: center;
+  gap: var(--pl-sp-sm); padding: var(--pl-sp-xs) var(--pl-sp-sm);
+  background: #161616; border: 1px solid #3a3a3a; border-radius: var(--pl-r-sm);
+  font-size: 11px; color: var(--pl-fg); margin-top: var(--pl-sp-xs);
+  box-sizing: border-box; }
+.pl-civ-pathbar .pl-civ-current { flex: 1 1 auto; min-width: 0;
+  font-family: monospace; color: var(--pl-fg-strong);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pl-civ-pathbar button { padding: 3px 8px; font-size: 11px;
+  background: var(--pl-bg-elevated); color: var(--pl-fg-strong);
+  border: 1px solid var(--pl-border); border-radius: var(--pl-r-sm);
+  cursor: pointer; font-family: inherit; }
+.pl-civ-pathbar button:hover { border-color: var(--pl-accent); }
+.pl-browser-overlay { position: fixed; inset: 0; z-index: 11000;
+  background: rgba(0, 0, 0, 0.55); display: flex;
+  align-items: center; justify-content: center; }
+.pl-browser-modal { width: min(640px, 92vw); max-height: 80vh;
+  background: var(--pl-bg-deep, #1a1a1a); color: var(--pl-fg);
+  border: 1px solid var(--pl-border, #3a3a3a); border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.7); display: flex; flex-direction: column;
+  font-family: sans-serif; font-size: 12px; overflow: hidden; }
+.pl-browser-modal header { padding: var(--pl-sp-md);
+  border-bottom: 1px solid var(--pl-border); display: flex;
+  flex-direction: column; gap: var(--pl-sp-sm); }
+.pl-browser-modal header h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.pl-browser-roots { display: flex; flex-wrap: wrap; gap: var(--pl-sp-xs); }
+.pl-browser-roots button { padding: 2px 8px; font-size: 11px;
+  background: var(--pl-bg-elevated); color: var(--pl-fg);
+  border: 1px solid var(--pl-border); border-radius: 12px;
+  cursor: pointer; font-family: inherit; }
+.pl-browser-roots button:hover { border-color: var(--pl-accent); }
+.pl-browser-pathrow { display: flex; align-items: stretch;
+  gap: var(--pl-sp-xs); }
+.pl-browser-pathrow input { flex: 1 1 auto; min-width: 0;
+  background: var(--pl-bg-input); color: var(--pl-fg-strong);
+  border: 1px solid var(--pl-border); border-radius: var(--pl-r-sm);
+  padding: 4px 8px; font-size: 11px; font-family: monospace; }
+.pl-browser-pathrow button { padding: 3px 10px; font-size: 11px;
+  background: var(--pl-bg-elevated); color: var(--pl-fg-strong);
+  border: 1px solid var(--pl-border); border-radius: var(--pl-r-sm);
+  cursor: pointer; font-family: inherit; }
+.pl-browser-list { flex: 1 1 auto; min-height: 200px; overflow-y: auto;
+  padding: var(--pl-sp-sm); display: flex; flex-direction: column;
+  gap: 2px; }
+.pl-browser-row { padding: 4px 8px; border-radius: var(--pl-r-sm);
+  cursor: pointer; display: flex; align-items: center; gap: var(--pl-sp-sm);
+  user-select: none; }
+.pl-browser-row:hover { background: rgba(255, 255, 255, 0.05); }
+.pl-browser-row.parent { color: var(--pl-fg-muted); font-style: italic; }
+.pl-browser-row .icon { width: 16px; text-align: center; opacity: 0.8; }
+.pl-browser-status { padding: 4px var(--pl-sp-md); font-size: 11px;
+  color: var(--pl-fg-muted); border-top: 1px solid var(--pl-border); }
+.pl-browser-status.error { color: #ff8a8a; }
+.pl-browser-modal footer { padding: var(--pl-sp-md);
+  border-top: 1px solid var(--pl-border); display: flex; gap: var(--pl-sp-sm);
+  align-items: center; justify-content: flex-end; }
+.pl-browser-modal footer button { padding: 5px 14px; font-size: 12px;
+  background: var(--pl-bg-elevated); color: var(--pl-fg-strong);
+  border: 1px solid var(--pl-border); border-radius: var(--pl-r-sm);
+  cursor: pointer; font-family: inherit; }
+.pl-browser-modal footer button.primary { background: var(--pl-accent);
+  color: var(--pl-accent-fg, #0a0a0a); border-color: var(--pl-accent); }
+.pl-browser-modal footer button.primary:hover { filter: brightness(1.1); }
+.pl-browser-mkdir { display: flex; gap: var(--pl-sp-xs); align-items: center;
+  margin-right: auto; }
+.pl-browser-mkdir input { flex: 0 0 160px;
+  background: var(--pl-bg-input); color: var(--pl-fg-strong);
+  border: 1px solid var(--pl-border); border-radius: var(--pl-r-sm);
+  padding: 4px 8px; font-size: 11px; font-family: inherit; }
 `;
 
 function injectStyle() {
@@ -4024,6 +4094,290 @@ function _buildSmartDetailerGrid(node) {
   return { grid, refresh, reloadPresets: presetToolbarHandle.reload };
 }
 
+const CIVITAI_SAVE_NAME = "GrimmRibbityCivitaiSave";
+
+async function _civitaiBrowseDirs(path) {
+  const url = `/grimmribbity/browse_dirs?path=${encodeURIComponent(path || "")}`;
+  try {
+    const res = await api.fetchApi(url);
+    if (!res.ok) return { error: `HTTP ${res.status}`, dirs: [], roots: [] };
+    return await res.json();
+  } catch (e) {
+    return { error: String(e.message || e), dirs: [], roots: [] };
+  }
+}
+
+async function _civitaiMkdir(parent, name) {
+  const body = JSON.stringify({ parent, name });
+  const res = await api.fetchApi("/grimmribbity/mkdir", {
+    method: "POST", body,
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try { msg = (await res.json()).error || msg; } catch (_e) {}
+    throw new Error(msg);
+  }
+  return (await res.json()).path;
+}
+
+function _openCivitaiFolderBrowser(initialPath, onPick) {
+  // Build modal once, populate from the backend, return chosen path through
+  // onPick callback. Modal closes on Esc, Cancel, or successful pick.
+  const overlay = document.createElement("div");
+  overlay.className = "pl-browser-overlay";
+
+  const modal = document.createElement("div");
+  modal.className = "pl-browser-modal";
+  overlay.appendChild(modal);
+
+  const header = document.createElement("header");
+  const title = document.createElement("h3");
+  title.textContent = "Pick a save folder";
+  header.appendChild(title);
+
+  const roots = document.createElement("div");
+  roots.className = "pl-browser-roots";
+  header.appendChild(roots);
+
+  const pathRow = document.createElement("div");
+  pathRow.className = "pl-browser-pathrow";
+  const pathInput = document.createElement("input");
+  pathInput.type = "text";
+  pathInput.spellcheck = false;
+  pathInput.value = initialPath || "";
+  pathInput.placeholder = "type or paste a path…";
+  const goBtn = document.createElement("button");
+  goBtn.type = "button";
+  goBtn.textContent = "Go";
+  pathRow.appendChild(pathInput);
+  pathRow.appendChild(goBtn);
+  header.appendChild(pathRow);
+
+  modal.appendChild(header);
+
+  const list = document.createElement("div");
+  list.className = "pl-browser-list";
+  modal.appendChild(list);
+
+  const status = document.createElement("div");
+  status.className = "pl-browser-status";
+  modal.appendChild(status);
+
+  const footer = document.createElement("footer");
+  const mkdirGroup = document.createElement("div");
+  mkdirGroup.className = "pl-browser-mkdir";
+  const mkdirInput = document.createElement("input");
+  mkdirInput.type = "text";
+  mkdirInput.placeholder = "new folder name…";
+  mkdirInput.maxLength = 80;
+  const mkdirBtn = document.createElement("button");
+  mkdirBtn.type = "button";
+  mkdirBtn.textContent = "📂 Create";
+  mkdirGroup.appendChild(mkdirInput);
+  mkdirGroup.appendChild(mkdirBtn);
+  footer.appendChild(mkdirGroup);
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.textContent = "Cancel";
+  const pickBtn = document.createElement("button");
+  pickBtn.type = "button";
+  pickBtn.className = "primary";
+  pickBtn.textContent = "✅ Use this folder";
+  footer.appendChild(cancelBtn);
+  footer.appendChild(pickBtn);
+  modal.appendChild(footer);
+
+  let currentPath = initialPath || "";
+
+  const setStatus = (msg, isError = false) => {
+    status.textContent = msg || "";
+    status.classList.toggle("error", !!isError);
+  };
+
+  const navigate = async (target) => {
+    setStatus("Loading…");
+    const data = await _civitaiBrowseDirs(target);
+    currentPath = data.path || target || "";
+    pathInput.value = currentPath;
+    // Repopulate roots quick-jumps every time so they're always available.
+    // Using replaceChildren() instead of innerHTML="" keeps the security
+    // hook quiet — we never assign untrusted HTML, just clear children.
+    roots.replaceChildren();
+    for (const r of (data.roots || [])) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = r.label;
+      btn.addEventListener("click", () => navigate(r.path));
+      roots.appendChild(btn);
+    }
+    // Render dir entries. Parent first (when present), then alpha subdirs.
+    list.replaceChildren();
+    if (data.parent && data.parent !== currentPath) {
+      const parentRow = document.createElement("div");
+      parentRow.className = "pl-browser-row parent";
+      const ic = document.createElement("span");
+      ic.className = "icon"; ic.textContent = "🆙";
+      const lbl = document.createElement("span");
+      lbl.textContent = ".. (parent)";
+      parentRow.appendChild(ic);
+      parentRow.appendChild(lbl);
+      parentRow.addEventListener("click", () => navigate(data.parent));
+      list.appendChild(parentRow);
+    }
+    for (const d of (data.dirs || [])) {
+      const row = document.createElement("div");
+      row.className = "pl-browser-row";
+      const ic = document.createElement("span");
+      ic.className = "icon"; ic.textContent = "📁";
+      const lbl = document.createElement("span");
+      lbl.textContent = d.name;
+      row.appendChild(ic);
+      row.appendChild(lbl);
+      row.addEventListener("dblclick", () => {
+        // Double-click descends AND picks — common power-user shortcut.
+        navigate(d.path);
+      });
+      row.addEventListener("click", () => navigate(d.path));
+      list.appendChild(row);
+    }
+    if (data.error) {
+      setStatus(data.error, true);
+    } else {
+      setStatus(`${(data.dirs || []).length} subfolder(s)`);
+    }
+  };
+
+  const close = () => {
+    document.removeEventListener("keydown", onKey);
+    overlay.remove();
+  };
+
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); close(); }
+    else if (e.key === "Enter" && document.activeElement === pathInput) {
+      e.preventDefault(); navigate(pathInput.value);
+    }
+  };
+
+  goBtn.addEventListener("click", () => navigate(pathInput.value));
+  cancelBtn.addEventListener("click", close);
+  pickBtn.addEventListener("click", () => {
+    const chosen = pathInput.value || currentPath;
+    close();
+    onPick?.(chosen);
+  });
+  overlay.addEventListener("click", (e) => {
+    // Click on the backdrop (not the modal) closes.
+    if (e.target === overlay) close();
+  });
+
+  mkdirBtn.addEventListener("click", async () => {
+    const name = (mkdirInput.value || "").trim();
+    if (!name) { mkdirInput.focus(); return; }
+    mkdirBtn.disabled = true;
+    setStatus(`Creating "${name}"…`);
+    try {
+      const fresh = await _civitaiMkdir(currentPath, name);
+      mkdirInput.value = "";
+      await navigate(fresh);
+      setStatus(`Created ${fresh}`);
+    } catch (e) {
+      setStatus(String(e.message || e), true);
+    } finally {
+      mkdirBtn.disabled = false;
+    }
+  });
+  mkdirInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); mkdirBtn.click(); }
+  });
+
+  document.body.appendChild(overlay);
+  document.addEventListener("keydown", onKey);
+  navigate(initialPath);
+}
+
+function registerCivitaiSaveNode(nodeType) {
+  const onNodeCreated = nodeType.prototype.onNodeCreated;
+  nodeType.prototype.onNodeCreated = function () {
+    const r = onNodeCreated?.apply(this, arguments);
+    const node = this;
+    const pathWidget = (node.widgets || []).find(w => w.name === "output_path");
+    if (!pathWidget) return r;
+
+    // Inline bar under (after, in widget order) the existing string widget.
+    // We keep the underlying STRING widget editable so power users can paste
+    // / type / use date-substitution tokens directly. The DOM widget just
+    // adds a Browse button and a clearer "current path" view.
+    const bar = document.createElement("div");
+    bar.className = "pl-civ-pathbar";
+
+    const label = document.createElement("span");
+    label.textContent = "📁";
+    bar.appendChild(label);
+
+    const current = document.createElement("span");
+    current.className = "pl-civ-current";
+    bar.appendChild(current);
+
+    const browseBtn = document.createElement("button");
+    browseBtn.type = "button";
+    browseBtn.textContent = "Browse…";
+    browseBtn.title = "Open the folder picker to choose a save directory.";
+    bar.appendChild(browseBtn);
+
+    const clearBtn = document.createElement("button");
+    clearBtn.type = "button";
+    clearBtn.textContent = "↺";
+    clearBtn.title = "Reset to ComfyUI/output (default).";
+    bar.appendChild(clearBtn);
+
+    const refreshCurrent = () => {
+      const v = (pathWidget.value || "").trim();
+      current.textContent = v ? v : "(default: ComfyUI/output)";
+      current.title = v || "ComfyUI/output";
+    };
+    refreshCurrent();
+
+    browseBtn.addEventListener("click", () => {
+      _openCivitaiFolderBrowser(pathWidget.value || "", (chosen) => {
+        if (!chosen) return;
+        pathWidget.value = chosen;
+        refreshCurrent();
+        node.setDirtyCanvas?.(true, true);
+      });
+    });
+    clearBtn.addEventListener("click", () => {
+      pathWidget.value = "";
+      refreshCurrent();
+      node.setDirtyCanvas?.(true, true);
+    });
+
+    node.addDOMWidget("output_path_browser", "GrimmRibbityCivitaiFolderBar",
+                      bar, {
+      serialize: false,
+      hideOnZoom: false,
+      getMinHeight: () => 32,
+      getValue: () => "",
+      setValue: () => {},
+    });
+
+    node._civitaiRefreshPath = refreshCurrent;
+    return r;
+  };
+
+  const onConfigure = nodeType.prototype.onConfigure;
+  nodeType.prototype.onConfigure = function () {
+    const ret = onConfigure?.apply(this, arguments);
+    // Workflow load just rehydrated output_path on the underlying STRING
+    // widget; reflect that in the bar's path display.
+    this._civitaiRefreshPath?.();
+    return ret;
+  };
+}
+
+
 function registerSmartDetailerNode(nodeType) {
   const onNodeCreated = nodeType.prototype.onNodeCreated;
   nodeType.prototype.onNodeCreated = function () {
@@ -4203,6 +4557,11 @@ app.registerExtension({
     if (nodeData.name === SMART_DETAILER_NAME) {
       injectStyle();
       registerSmartDetailerNode(nodeType);
+      return;
+    }
+    if (nodeData.name === CIVITAI_SAVE_NAME) {
+      injectStyle();
+      registerCivitaiSaveNode(nodeType);
       return;
     }
     if (!GALLERY_NODE_NAMES.has(nodeData.name)) return;
