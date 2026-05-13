@@ -1781,6 +1781,254 @@ class PromptLibraryComicFrame:
         return (prompt, action, seed, len(frames), negative)
 
 
+# Token-id sentinels common to the OpenAI CLIP vocab (used by both SD1.5 and
+# SDXL tokenizers). Used for "real token" counts in the encoder's diagnostic
+# output. 49406=<|startoftext|>, 49407=<|endoftext|>, 0=pad. Counting any of
+# these as "real" would lie about how many user-typed tokens landed in the
+# chunk.
+_CLIP_TOKEN_PAD_IDS = (49406, 49407, 0)
+
+
+def _comicframe_section_token_stats(clip, text: str) -> dict:
+    """Tokenize `text` through the CLIP model the way CLIPTextEncode does
+    and return ``{real, chunks}`` — real-token count and how many 77-token
+    chunks the prompt occupies. Used to print a per-section diagnostic so
+    the user can spot a chunk overflow before it produces noisy output.
+
+    Tolerates SD1.5-style (``{"tokens": [...]}``) and SDXL-style
+    (``{"g": [...], "l": [...]}``) tokenizer return shapes. On any error
+    returns zeros — diagnostics are advisory; never raise from a path
+    that's also doing real work."""
+    try:
+        tokens = clip.tokenize(text)
+    except Exception:
+        return {"real": 0, "chunks": 0}
+    if not isinstance(tokens, dict) or not tokens:
+        return {"real": 0, "chunks": 0}
+    # All CLIP families chunk at the same 77-token cadence; the per-clip
+    # chunk lists are the same length, so sampling the first one is enough.
+    first_key = next(iter(tokens))
+    chunks = tokens.get(first_key) or []
+    real = 0
+    for chunk in chunks:
+        for tid, _w in chunk:
+            if tid not in _CLIP_TOKEN_PAD_IDS:
+                real += 1
+    return {"real": real, "chunks": len(chunks)}
+
+
+class PromptLibraryComicFrameEncode:
+    """ComicFrame + per-section CLIP encoding.
+
+    Replaces the chain ``ComicFrame (STRING) → CLIPTextEncode`` with a
+    single node that takes CLIP plus the same character / scene /
+    background / action strings and emits CONDITIONING directly.
+
+    Why: ``CLIPTextEncode`` chunks a long prompt into 77-token windows.
+    Once a combined character + scene + background prompt crosses ~75
+    tokens (very common with a detailed character entry + a scene
+    builder), the chunk boundary lands mid-phrase and weighted phrases
+    like ``(full_body:1.5)`` that straddle the seam stop binding cleanly
+    — the model sees what looks like two separate sub-prompts plus a
+    padded tail, and the output drifts noisy / over-saturated.
+
+    This node encodes each *section* as its own CLIP pass (so the
+    boundaries fall on semantic edges instead of arbitrary 75-token
+    cuts) and ``ConditioningConcat``s the results on the sequence axis.
+    Each section also gets a console diagnostic — ``⚠ OVER 75`` flags
+    a section that still chunks internally, telling you which one is
+    the long one. Same character / scene / background / negative wires
+    as the original ComicFrame; same frame-index + base_seed semantics.
+
+    Wire the CLIP input from your Library / Style node so the LoRA-
+    patched CLIP is what encodes both positive AND negative — avoiding
+    the workflow-level footgun where ``Clip`` (raw checkpoint) feeds
+    one side and ``LIB-Clip`` (patched) feeds the other.
+    """
+
+    DESCRIPTION = (
+        "ComicFrame + per-section CLIP encoding. Each of character / scene / "
+        "background / action is encoded as its own CLIP pass, so 77-token "
+        "chunk boundaries land on semantic edges instead of mid-phrase. "
+        "Emits CONDITIONING directly — drop in place of ComicFrame + "
+        "CLIPTextEncode. Wire CLIP from Library/Style so positive and "
+        "negative share the LoRA-patched encoder. Console prints per-section "
+        "token counts; '⚠ OVER 75' marks a section that still chunks."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "clip": ("CLIP", {"tooltip":
+                    "CLIP model. Wire from GrimmRibbity — Library / Style so any "
+                    "LoRA modifications to the text encoder are baked into BOTH "
+                    "positive and negative encodings (the common workflow bug "
+                    "this node sidesteps: positive and negative reading two "
+                    "different CLIPs)."}),
+                "frames_json": ("STRING", {"default": "[]", "multiline": True,
+                    "tooltip": "JSON array of per-frame action texts. Driven by the frame "
+                               "editor widget in the node — you don't normally type here."}),
+                "frame_index": ("INT", {"default": 1, "min": 1, "max": 999,
+                    "tooltip": "1-based index of the panel to render. Auto-clamped to the "
+                               "frame count. Bump between queues to render each panel."}),
+            },
+            "optional": {
+                "character": ("STRING", {"default": "", "multiline": True,
+                                          "forceInput": True,
+                    "tooltip": "Wire from a Library node filtered to your character entries. "
+                               "Encoded as its own CLIP pass — keep under 75 tokens to avoid "
+                               "internal chunking."}),
+                "scene": ("STRING", {"default": "", "multiline": True,
+                                      "forceInput": True,
+                    "tooltip": "Wire from a GrimmRibbity Scene node. Encoded separately from "
+                               "character so the scene's weighted tags don't fight character "
+                               "weights at a chunk seam."}),
+                "background": ("STRING", {"default": "", "multiline": True,
+                                           "forceInput": True,
+                    "tooltip": "Wire from a Background node. Encoded as its own section."}),
+                "extra": ("STRING", {"default": "", "multiline": True,
+                    "placeholder": "extra positive tokens, ad-hoc style overrides…",
+                    "tooltip": "Free-form additions appended as the LAST positive section "
+                               "(after action). Useful for one-off style overrides."}),
+                "character_negative": ("STRING", {"default": "", "multiline": True,
+                                                   "forceInput": True,
+                    "tooltip": "Optional negative-prompt counterpart for the character wire. "
+                               "Encoded separately and ConditioningConcat'd."}),
+                "scene_negative": ("STRING", {"default": "", "multiline": True,
+                                               "forceInput": True,
+                    "tooltip": "Optional negative-prompt counterpart for the scene wire."}),
+                "background_negative": ("STRING", {"default": "", "multiline": True,
+                                                    "forceInput": True,
+                    "tooltip": "Optional negative-prompt counterpart for the background wire."}),
+                "extra_negative": ("STRING", {"default": "", "multiline": True,
+                    "placeholder": "extra negative tokens (lowres, blurry, …)",
+                    "tooltip": "Free-form negative tokens appended as the last negative section."}),
+                "base_seed": ("INT", {"default": 0, "min": 0, "max": _INT_MAX,
+                    "tooltip": "Base for the per-frame seed output. Frame N emits "
+                               "base_seed + (N - 1). Wire into CivitaiSaveImage.seed_override."}),
+                "diagnostic_print": ("BOOLEAN", {"default": True,
+                    "tooltip": "When True, prints per-section token counts and chunk warnings "
+                               "to the ComfyUI console on each run. Turn off for quiet logs."}),
+            },
+        }
+
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "STRING", "INT", "INT")
+    RETURN_NAMES = ("positive", "negative", "action", "seed", "frame_count")
+    OUTPUT_TOOLTIPS = (
+        "Positive CONDITIONING. Each non-empty section encoded separately "
+        "and ConditioningConcat'd on the sequence axis.",
+        "Negative CONDITIONING built the same way from the *_negative inputs.",
+        "Just the per-frame action text. Useful for filename builders.",
+        "base_seed + (frame_index - 1). Wire into CivitaiSaveImage.seed_override.",
+        "Total number of authored frames. Useful for downstream branching/looping.",
+    )
+    FUNCTION = "encode"
+    CATEGORY = "GrimmRibbity/Comic"
+
+    @staticmethod
+    def _resolve_action(frames_json: str, frame_index: int) -> tuple[str, int]:
+        """Mirror ComicFrame's parsing exactly so frame indexing matches.
+        Returns (action_text, frame_count). Empty / malformed JSON yields
+        ('', 0); index is clamped 1..frame_count."""
+        try:
+            data = json.loads(frames_json or "[]")
+        except (json.JSONDecodeError, TypeError):
+            data = []
+        if not isinstance(data, list):
+            data = []
+        frames = [str(f).strip() for f in data]
+        if not frames:
+            return ("", 0)
+        idx = max(1, min(int(frame_index), len(frames))) - 1
+        return (frames[idx], len(frames))
+
+    @staticmethod
+    def _active_sections(sections: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        """Drop empty/whitespace entries while keeping the original order."""
+        return [(name, text.strip()) for name, text in sections
+                if text and text.strip()]
+
+    @staticmethod
+    def _encode_one(clip, text: str):
+        """Encode a single section the way ComfyUI's CLIPTextEncode does.
+        Centralised so future tokeniser/encoder changes only touch one
+        place. clip.encode_from_tokens_scheduled is the modern entry
+        point (handles weight scheduling); we use it unconditionally."""
+        tokens = clip.tokenize(text)
+        return clip.encode_from_tokens_scheduled(tokens)
+
+    @staticmethod
+    def _concat(conditioning_to, conditioning_from):
+        """Sequence-axis concat — bit-for-bit equivalent of ComfyUI's
+        ConditioningConcat. The pooled_output dict on conditioning_to is
+        preserved; conditioning_from's pooled_output is discarded (matches
+        upstream semantics — pooled is one vector for the whole
+        conditioning, not a sequence)."""
+        import torch
+        out = []
+        cond_from = conditioning_from[0][0]
+        for i in range(len(conditioning_to)):
+            t1 = conditioning_to[i][0]
+            tw = torch.cat((t1, cond_from), 1)
+            n = [tw, conditioning_to[i][1].copy()]
+            out.append(n)
+        return out
+
+    def _encode_sections(self, clip, sections, side_label: str,
+                         diagnostic_print: bool):
+        """Encode every non-empty section in order and concat. If all
+        sections are empty, returns conditioning for an empty string so
+        the output port still carries a valid CONDITIONING shape (matches
+        how stock CLIPTextEncode handles ''). Diagnostic output is best-
+        effort and never blocks the encoding path."""
+        active = self._active_sections(sections)
+        if not active:
+            if diagnostic_print:
+                print(f"[GrimmRibbity ComicFrameEncode/{side_label}] "
+                      f"no sections wired — encoding empty string as fallback")
+            return self._encode_one(clip, "")
+        if diagnostic_print:
+            print(f"[GrimmRibbity ComicFrameEncode/{side_label}] "
+                  f"{len(active)} section(s):")
+        accum = None
+        for name, text in active:
+            cond = self._encode_one(clip, text)
+            if diagnostic_print:
+                stats = _comicframe_section_token_stats(clip, text)
+                warn = " ⚠ OVER 75 (chunks internally)" if stats["chunks"] > 1 else ""
+                print(f"  - {name}: {stats['real']} tokens "
+                      f"({stats['chunks']} chunk(s)){warn}")
+            accum = cond if accum is None else self._concat(accum, cond)
+        return accum
+
+    def encode(self, clip, frames_json, frame_index,
+               character="", scene="", background="", extra="",
+               character_negative="", scene_negative="",
+               background_negative="", extra_negative="",
+               base_seed=0, diagnostic_print=True):
+        action, frame_count = self._resolve_action(frames_json, frame_index)
+        positive_sections = [
+            ("character", character),
+            ("scene", scene),
+            ("background", background),
+            ("action", action),
+            ("extra", extra),
+        ]
+        negative_sections = [
+            ("character_negative", character_negative),
+            ("scene_negative", scene_negative),
+            ("background_negative", background_negative),
+            ("extra_negative", extra_negative),
+        ]
+        positive_cond = self._encode_sections(
+            clip, positive_sections, "positive", diagnostic_print)
+        negative_cond = self._encode_sections(
+            clip, negative_sections, "negative", diagnostic_print)
+        seed = (int(base_seed) + max(0, int(frame_index) - 1)) & _INT_MAX
+        return (positive_cond, negative_cond, action, seed, frame_count)
+
+
 if PromptServer is not None:
     routes = PromptServer.instance.routes
 else:
@@ -3286,7 +3534,7 @@ async def grimmribbity_mkdir(request):
     return web.json_response({"ok": True, "path": str(target)})
 
 
-__version__ = "0.60.0"
+__version__ = "0.61.0"
 
 
 def _autobackup_on_version_change() -> None:
@@ -3427,6 +3675,7 @@ NODE_CLASS_MAPPINGS = {
     "PromptLibraryScene": PromptLibraryScene,
     "PromptLibraryBackground": PromptLibraryBackground,
     "PromptLibraryComicFrame": PromptLibraryComicFrame,
+    "PromptLibraryComicFrameEncode": PromptLibraryComicFrameEncode,
     **_civitai_node,
     **_sampler_node,
     **_lora_node,
@@ -3447,6 +3696,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptLibraryScene": "GrimmRibbity — Scene",
     "PromptLibraryBackground": "GrimmRibbity — Background (locked)",
     "PromptLibraryComicFrame": "GrimmRibbity — Comic Frame",
+    "PromptLibraryComicFrameEncode": "GrimmRibbity — Comic Frame (Conditioning)",
     **_civitai_label,
     **_sampler_label,
     **_lora_label,

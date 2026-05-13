@@ -4444,6 +4444,7 @@ const NODE_COLORS = {
   "PromptLibraryScene":      "#e8852f",
   "PromptLibraryBackground": "#e8852f",
   "PromptLibraryComicFrame": "#e8852f",
+  "PromptLibraryComicFrameEncode": "#e8852f",
   // Sampling — deep teal
   "GrimmRibbitySamplerSDXL":    "#34a4c8",
   "GrimmRibbityHiResFixScript": "#34a4c8",
