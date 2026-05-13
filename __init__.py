@@ -312,7 +312,11 @@ def _unique_id(base: str, existing_ids: set[str]) -> str:
 
 
 def _parse_tags(value) -> list[str]:
-    """Accept a comma-separated string or a list; return cleaned, deduped, lowercased tags."""
+    """Accept a comma-separated string or a list; return cleaned, case-preserved tags
+    with case-insensitive dedupe (first occurrence wins). The project's
+    `prefix:label` convention uses capitalized prefixes (`Cards:beast`,
+    `Character:duo`) — lowercasing here used to clobber that on every modal
+    save and produce ghost duplicate chip rows."""
     if value is None:
         return []
     if isinstance(value, str):
@@ -321,12 +325,18 @@ def _parse_tags(value) -> list[str]:
         parts = value
     else:
         return []
-    seen = []
+    out: list[str] = []
+    seen: set[str] = set()
     for p in parts:
-        t = str(p).strip().lower()
-        if t and t not in seen:
-            seen.append(t)
-    return seen
+        t = str(p).strip()
+        if not t:
+            continue
+        key = t.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+    return out
 
 
 _LORAS_PER_ENTRY_CAP = 10
@@ -2452,11 +2462,19 @@ async def list_loras(_request):
 async def list_tags(_request):
     with _lock:
         items = _load()
-    seen = set()
+    # Case-insensitive dedupe, but emit the most-common casing per tag so the
+    # suggestion dropdown matches what's actually in storage (and doesn't list
+    # both "Cards" and "cards" when only one stray entry has the lowercase form).
+    from collections import Counter
+    variants: dict[str, Counter] = {}
     for item in items:
         for t in item.get("tags", []) or []:
-            seen.add(str(t).strip().lower())
-    return web.json_response({"tags": sorted(t for t in seen if t)})
+            t = str(t).strip()
+            if not t:
+                continue
+            variants.setdefault(t.lower(), Counter())[t] += 1
+    canonical = [c.most_common(1)[0][0] for c in variants.values()]
+    return web.json_response({"tags": sorted(canonical, key=str.lower)})
 
 
 @routes.get("/prompt_library/image/{prompt_id}")

@@ -622,13 +622,22 @@ class PromptLibraryTests(unittest.TestCase):
 
     # ---- tags ----------------------------------------------------------
 
-    def test_parse_tags_string_normalizes(self):
+    def test_parse_tags_string_preserves_case_with_ci_dedupe(self):
+        # Case-preserving: keeps the user's `Cards:beast` capitalization.
+        # Case-insensitive dedupe: drops the trailing lowercase "character"
+        # duplicate but keeps the first occurrence "Character".
         self.assertEqual(self.mod._parse_tags("Character, Fantasy, character"),
-                         ["character", "fantasy"])
+                         ["Character", "Fantasy"])
 
     def test_parse_tags_list(self):
         self.assertEqual(self.mod._parse_tags(["Sci-Fi", "Sci-Fi", "  noir "]),
-                         ["sci-fi", "noir"])
+                         ["Sci-Fi", "noir"])
+
+    def test_parse_tags_preserves_prefix_capitalization(self):
+        self.assertEqual(
+            self.mod._parse_tags(["Cards", "Cards:beast", "cards:beast"]),
+            ["Cards", "Cards:beast"],
+        )
 
     def test_parse_tags_none_or_empty(self):
         self.assertEqual(self.mod._parse_tags(None), [])
@@ -636,11 +645,11 @@ class PromptLibraryTests(unittest.TestCase):
         self.assertEqual(self.mod._parse_tags(",,, ,"), [])
 
     def test_upsert_persists_tags(self):
-        req = FakeRequest(post_data={"name": "Knight", "text": "armor", "tags": "character, fantasy"})
+        req = FakeRequest(post_data={"name": "Knight", "text": "armor", "tags": "Character, Fantasy"})
         body = json.loads(asyncio.run(self.mod.upsert_prompt(req)).body)
-        self.assertEqual(body["tags"], ["character", "fantasy"])
+        self.assertEqual(body["tags"], ["Character", "Fantasy"])
         items = self.mod._load()
-        self.assertEqual(items[0]["tags"], ["character", "fantasy"])
+        self.assertEqual(items[0]["tags"], ["Character", "Fantasy"])
 
     def test_list_route_returns_tags(self):
         req1 = FakeRequest(post_data={"name": "Knight", "text": "x", "tags": "character"})
@@ -662,7 +671,7 @@ class PromptLibraryTests(unittest.TestCase):
         _, pid = node.save(name="Wizard", text="staff", tags="Character, Fantasy")
         items = self.mod._load()
         entry = next(i for i in items if i["id"] == pid)
-        self.assertEqual(entry["tags"], ["character", "fantasy"])
+        self.assertEqual(entry["tags"], ["Character", "Fantasy"])
 
     # ---- timestamps ----------------------------------------------------
 
