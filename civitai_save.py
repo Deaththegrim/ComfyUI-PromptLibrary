@@ -20,7 +20,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
+import time
 from pathlib import Path
 
 try:
@@ -53,6 +55,105 @@ def _build_civitai_filename(base: str, counter: int, frame_idx: int,
     if batch_size <= 1:
         return f"{base}.png"
     return f"{base}_{frame_idx:02d}.png"
+
+
+# Maps the C#/save-image-extended-style format codes used inside
+# ``%date:...%`` tokens to strftime equivalents. Order matters: longer
+# tokens must come first so e.g. "yyyy" is replaced before "yy", and
+# "MM" before "M". Python strftime is the underlying implementation.
+_DATE_TOKEN_MAP = [
+    ("yyyy", "%Y"),     # 4-digit year     → 2026
+    ("yy",   "%y"),     # 2-digit year     → 26
+    ("MMMM", "%B"),     # full month name  → May
+    ("MMM",  "%b"),     # short month name → May / Jan
+    ("MM",   "%m"),     # 2-digit month    → 05
+    ("dddd", "%A"),     # full weekday     → Wednesday
+    ("ddd",  "%a"),     # short weekday    → Wed
+    ("dd",   "%d"),     # 2-digit day      → 13
+    ("HH",   "%H"),     # 24h hour 2-digit → 19
+    ("hh",   "%I"),     # 12h hour 2-digit → 07
+    ("mm",   "%M"),     # 2-digit minute   → 30  (lowercase, vs MM=month)
+    ("ss",   "%S"),     # 2-digit second   → 45
+    ("tt",   "%p"),     # AM/PM            → PM
+]
+
+_DATE_TOKEN_RE = re.compile(r"%date:([^%]+)%")
+
+
+def _expand_filename_tokens(prefix: str, *, now=None) -> str:
+    """Expand ``%date:<format>%`` tokens in a filename prefix.
+
+    Cross-tool convention: the save-image-extended-comfyui pack
+    popularised the ``%date:yyyy-MM-dd%`` syntax with C#-style format
+    codes (``yyyy`` ``MM`` ``dd`` ``HH`` ``mm`` ``ss`` ``MMMM`` etc).
+    This is the most common pattern users paste into a Civitai-save
+    prefix expecting it to work — core ComfyUI's
+    ``folder_paths.get_save_image_path`` doesn't recognise it (only
+    single-field tokens like ``%year%`` / ``%month%``), so a plain
+    Civitai save without expansion leaves the literal
+    ``%date:yyyy-MM-dd%`` in the filename — visible artifact of "my
+    naming doesn't actually work."
+
+    This helper runs BEFORE ``get_save_image_path`` so the prefix
+    handed downstream is already expanded. Format codes that aren't
+    recognised pass through untouched so the user can still mix in
+    arbitrary strftime directives if they want.
+
+    Side note: this does NOT touch core's ``%year%`` / ``%month%``
+    tokens — those are handled downstream in ``get_save_image_path``
+    independently. Both conventions can coexist in one prefix.
+    """
+    if "%date:" not in prefix:
+        return prefix
+    if now is None:
+        now = time.localtime()
+
+    def _replace(match: re.Match) -> str:
+        fmt = match.group(1)
+        # Substitute each known token to its strftime equivalent.
+        for src, dst in _DATE_TOKEN_MAP:
+            fmt = fmt.replace(src, dst)
+        try:
+            return time.strftime(fmt, now)
+        except (ValueError, TypeError):
+            # Unparseable format — keep the literal so the user can
+            # spot the failure on disk rather than silently shipping
+            # garbage timestamps.
+            return match.group(0)
+
+    return _DATE_TOKEN_RE.sub(_replace, prefix)
+
+
+def _coerce_append_counter(value) -> bool:
+    """Normalise the ``append_counter`` widget value to a real bool.
+
+    A workflow saved with a stale or off-by-one widget order can land
+    a non-bool value (empty string, None, the literal "True"/"False",
+    or even a model-override string) in this slot. Without coercion
+    Python's truthiness reads the user as "no counter" the moment the
+    value is the empty string — files overwrite each other and the
+    user sees one PNG that keeps getting rewritten.
+
+    Policy:
+    - Real bools pass through.
+    - "false"/"no"/"0"/"off" (case-insensitive) → False.
+    - Empty / None / anything unrecognised → True (the documented
+      default; preferring "more files" over "silent overwrite" when
+      we can't tell what the user wanted).
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None or value == "":
+        return True
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ("false", "no", "0", "off", "n"):
+            return False
+        if s in ("true", "yes", "1", "on", "y"):
+            return True
+    return True
 
 # The folders that hold full checkpoints / single-file models. `unet/` is the
 # legacy name for what is now `diffusion_models/` on newer ComfyUIs; we list
@@ -858,8 +959,24 @@ class CivitaiSaveImage:
             "required": {
                 "images": ("IMAGE", {"tooltip": "The IMAGE batch to save. Each frame becomes one PNG."}),
                 "filename_prefix": ("STRING", {"default": "GrimmRibbity",
-                    "tooltip": "Prefix for the saved file (counter and .png are appended). "
-                               "Supports ComfyUI's date/time substitutions like %date:yyyy-MM-dd%."}),
+                    "tooltip":
+                        "Prefix for the saved file (counter and .png are appended).\n"
+                        "\n"
+                        "Date/time tokens you can use anywhere in the prefix:\n"
+                        "\n"
+                        "  %date:yyyy-MM-dd%         → 2026-05-13\n"
+                        "  %date:yyyyMMdd_HHmmss%    → 20260513_193045\n"
+                        "  %date:yyyy-MM-dd_HH-mm%   → 2026-05-13_19-30\n"
+                        "  %date:MMMM_dd_yyyy%       → May_13_2026\n"
+                        "\n"
+                        "Format codes inside %date:...% (C# / save-image-extended style):\n"
+                        "  yyyy yy   year (4/2-digit)        HH hh   hour (24h/12h)\n"
+                        "  MMMM MMM MM   month (long/short/2-digit)   mm   minute\n"
+                        "  dddd ddd dd   day (long/short/2-digit)     ss   second\n"
+                        "                                              tt   AM/PM\n"
+                        "\n"
+                        "Single-field core tokens also work without %date:...%:\n"
+                        "  %year% %month% %day% %hour% %minute% %second% %width% %height%"}),
             },
             "optional": {
                 "output_path": ("STRING", {"default": "", "multiline": False,
@@ -957,6 +1074,22 @@ class CivitaiSaveImage:
              prompt=None, extra_pnginfo=None):
         from PIL import Image, PngImagePlugin
         import numpy as np
+
+        # Expand %date:<format>% tokens BEFORE handing off to ComfyUI's
+        # filename helper — core ComfyUI's compute_vars only handles
+        # single-field tokens (%year% / %month% / etc.), so leaving the
+        # %date:...% unexpanded would land literal '%date:yyyy-MM-dd%'
+        # text in the filename. _expand_filename_tokens is a no-op on a
+        # prefix that doesn't contain %date:, so the override-the-default
+        # case is free.
+        filename_prefix = _expand_filename_tokens(filename_prefix or "GrimmRibbity")
+
+        # Coerce append_counter — a workflow with a stale or off-by-one
+        # widget order can land an empty string (falsy) here, which
+        # silently disables the counter and overwrites the same file
+        # on every run. _coerce_append_counter falls back to True when
+        # the value isn't a clear-cut bool/0/1/yes/no.
+        append_counter = _coerce_append_counter(append_counter)
 
         meta = extract_workflow_metadata(prompt)
 

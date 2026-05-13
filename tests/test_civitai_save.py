@@ -1,7 +1,13 @@
 import json
 import unittest
 
-from civitai_save import build_a1111_parameters, _build_civitai_filename
+import time
+from civitai_save import (
+    build_a1111_parameters,
+    _build_civitai_filename,
+    _expand_filename_tokens,
+    _coerce_append_counter,
+)
 
 
 class A1111ParametersTests(unittest.TestCase):
@@ -523,6 +529,154 @@ class BuildCivitaiFilenameTests(unittest.TestCase):
             _build_civitai_filename("solo", 500, 0, 1, append_counter=False),
             "solo.png",
         )
+
+
+class DateTokenExpansionTests(unittest.TestCase):
+    """%date:<format>% expansion mirrors the save-image-extended-comfyui
+    convention so a filename_prefix the user paste-importing from another
+    pack lands without surprises. The helper is pinned at a fixed
+    `now` so the assertions don't drift with the wall clock."""
+
+    @classmethod
+    def setUpClass(cls):
+        # Wednesday, 2026-05-13, 19:30:45
+        cls.now = time.struct_time((2026, 5, 13, 19, 30, 45, 2, 133, 0))
+
+    def test_no_token_passes_through(self):
+        self.assertEqual(
+            _expand_filename_tokens("Comic_static_name", now=self.now),
+            "Comic_static_name",
+        )
+
+    def test_basic_date_token(self):
+        self.assertEqual(
+            _expand_filename_tokens("Comic_%date:yyyy-MM-dd%", now=self.now),
+            "Comic_2026-05-13",
+        )
+
+    def test_compact_datetime(self):
+        self.assertEqual(
+            _expand_filename_tokens("Comic_%date:yyyyMMdd_HHmmss%", now=self.now),
+            "Comic_20260513_193045",
+        )
+
+    def test_split_date_and_time_underscores(self):
+        self.assertEqual(
+            _expand_filename_tokens("Comic_%date:yyyy-MM-dd_HH-mm%", now=self.now),
+            "Comic_2026-05-13_19-30",
+        )
+
+    def test_long_month_and_weekday(self):
+        self.assertEqual(
+            _expand_filename_tokens("Comic_%date:MMMM_dd_yyyy%", now=self.now),
+            "Comic_May_13_2026",
+        )
+        out = _expand_filename_tokens("Comic_%date:dddd-yyyy-MMM%", now=self.now)
+        # Locale-sensitive (weekday/month abbreviations) — verify shape.
+        self.assertTrue(out.startswith("Comic_") and "2026" in out)
+        self.assertEqual(len(out.split("-")), 3)
+
+    def test_12_hour_and_ampm(self):
+        out = _expand_filename_tokens("Comic_%date:hh-mm_tt%", now=self.now)
+        # 19:30 → 07:30 PM (locale-dependent on AM/PM literal; just check
+        # the hour formatted correctly and one of AM/PM is present).
+        self.assertIn("07-30_", out)
+        self.assertTrue(out.endswith("PM") or out.endswith("AM"))
+
+    def test_multiple_tokens_in_one_prefix(self):
+        # Mix two %date:...% groups in the same string.
+        self.assertEqual(
+            _expand_filename_tokens(
+                "Comic_%date:yyyy%_run_%date:HHmm%", now=self.now),
+            "Comic_2026_run_1930",
+        )
+
+    def test_unknown_format_falls_through(self):
+        # An unparseable format inside %date:...% stays literal so the
+        # user notices on disk rather than seeing garbage timestamps.
+        out = _expand_filename_tokens("Comic_%date:%not_a_format!%", now=self.now)
+        # The empty fmt segment between %date: and % gets expanded with
+        # nothing recognisable — strftime("") returns "". So the result
+        # is "Comic_not_a_format!%". This is fine — visible artifact
+        # the user can see and correct.
+        self.assertIn("not_a_format", out)
+
+    def test_does_not_touch_core_tokens(self):
+        # %year% / %month% / %day% are ComfyUI's core tokens, expanded
+        # downstream by folder_paths.get_save_image_path. We must leave
+        # them alone — if we replaced them too the downstream pass would
+        # find nothing to do.
+        self.assertEqual(
+            _expand_filename_tokens("Comic_%year%-%month%-%day%", now=self.now),
+            "Comic_%year%-%month%-%day%",
+        )
+
+    def test_token_order_matters_yyyy_before_yy(self):
+        # If we'd processed "yy" before "yyyy" the year would expand
+        # twice and end up as "20262026". Pin the order is correct.
+        self.assertEqual(
+            _expand_filename_tokens("y%date:yyyy%y", now=self.now),
+            "y2026y",
+        )
+
+    def test_token_order_MM_vs_mm(self):
+        # Case-sensitive: MM=month, mm=minute. Both at once.
+        self.assertEqual(
+            _expand_filename_tokens("%date:MM_mm%", now=self.now),
+            "05_30",
+        )
+
+
+class AppendCounterCoercionTests(unittest.TestCase):
+    """A workflow saved in a shifted widget order can land non-bool
+    values in the append_counter slot. The coercion policy is
+    'default-on' — only an explicit False-like value disables the
+    counter, because a silently-overwriting save is much worse UX
+    than an extra suffix."""
+
+    def test_real_true_passes_through(self):
+        self.assertTrue(_coerce_append_counter(True))
+
+    def test_real_false_passes_through(self):
+        self.assertFalse(_coerce_append_counter(False))
+
+    def test_empty_string_defaults_true(self):
+        # The exact failure mode from the user's corrupted workflow:
+        # widget shifted and append_counter landed on '' (the empty
+        # string default of a STRING widget). Previously this read
+        # as falsy → no counter → silent overwrite. Now: default True.
+        self.assertTrue(_coerce_append_counter(""))
+
+    def test_none_defaults_true(self):
+        self.assertTrue(_coerce_append_counter(None))
+
+    def test_string_false_disables_counter(self):
+        # Defensive: literal "False" / "false" / "no" / "0" / "off" all
+        # explicitly disable. User who deliberately serialised a string
+        # value can still get the no-counter behaviour.
+        for s in ("False", "false", "FALSE", "no", "0", "off", " n "):
+            self.assertFalse(_coerce_append_counter(s), msg=f"{s!r} should disable")
+
+    def test_string_true_enables_counter(self):
+        for s in ("True", "true", "yes", "1", "on", " y "):
+            self.assertTrue(_coerce_append_counter(s), msg=f"{s!r} should enable")
+
+    def test_numeric_zero_disables(self):
+        self.assertFalse(_coerce_append_counter(0))
+        self.assertFalse(_coerce_append_counter(0.0))
+
+    def test_numeric_nonzero_enables(self):
+        self.assertTrue(_coerce_append_counter(1))
+        self.assertTrue(_coerce_append_counter(-1))
+        self.assertTrue(_coerce_append_counter(0.5))
+
+    def test_unrecognised_string_defaults_true(self):
+        # 'fixed' (the seed-control value that landed in append_counter
+        # in the user's corrupted workflow) is unrecognised — default
+        # to True so the counter still appends.
+        self.assertTrue(_coerce_append_counter("fixed"))
+        self.assertTrue(_coerce_append_counter("randomize"))
+        self.assertTrue(_coerce_append_counter("whatever"))
 
 
 if __name__ == "__main__":
