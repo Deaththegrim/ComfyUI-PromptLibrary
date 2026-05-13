@@ -7,6 +7,14 @@ from civitai_save import (
     _build_civitai_filename,
     _expand_filename_tokens,
     _coerce_append_counter,
+    _expand_prompt_tokens,
+    _extract_prompt_library_ids,
+    _extract_random_pick_ids,
+    _sanitize_for_filename,
+    _replay_random_pick_from_items,
+    _build_library_entry_snapshot,
+    _normalize_lora_for_snapshot,
+    _resolve_individual_pids,
 )
 
 
@@ -677,6 +685,534 @@ class AppendCounterCoercionTests(unittest.TestCase):
         self.assertTrue(_coerce_append_counter("fixed"))
         self.assertTrue(_coerce_append_counter("randomize"))
         self.assertTrue(_coerce_append_counter("whatever"))
+
+
+class PromptIdTokenTests(unittest.TestCase):
+    """Cover %prompt_id% expansion + the helpers it leans on."""
+
+    def test_sanitize_strips_unsafe_chars(self):
+        self.assertEqual(_sanitize_for_filename("cult_card_ember_initiate"),
+                         "cult_card_ember_initiate")
+        self.assertEqual(_sanitize_for_filename("a,b,c"), "a_b_c")
+        self.assertEqual(_sanitize_for_filename("path/with spaces!"),
+                         "path_with_spaces")
+        self.assertEqual(_sanitize_for_filename(""), "prompt")
+        self.assertEqual(_sanitize_for_filename("---"), "prompt")
+
+    def test_extract_from_single_library_node(self):
+        prompt = {
+            "4": {"class_type": "PromptLibrary",
+                  "inputs": {"prompt_id": "cult_card_ember_initiate"}},
+        }
+        self.assertEqual(_extract_prompt_library_ids(prompt),
+                         ["cult_card_ember_initiate"])
+
+    def test_extract_from_style_node(self):
+        prompt = {
+            "10": {"class_type": "PromptLibraryStyle",
+                   "inputs": {"prompt_id": "gremmy_cartoon"}},
+        }
+        self.assertEqual(_extract_prompt_library_ids(prompt), ["gremmy_cartoon"])
+
+    def test_extract_from_multi_library_3_panels(self):
+        prompt = {
+            "5": {"class_type": "PromptLibraryMulti", "inputs": {
+                "prompt_id_1": "char_a",
+                "prompt_id_2": "scene_b",
+                "prompt_id_3": "bg_c",
+            }},
+        }
+        self.assertEqual(_extract_prompt_library_ids(prompt),
+                         ["char_a", "scene_b", "bg_c"])
+
+    def test_extract_skips_save_node(self):
+        # PromptLibrarySave's prompt_id input names the entry being WRITTEN,
+        # not the one being used — don't pull it into the filename.
+        prompt = {
+            "9": {"class_type": "PromptLibrarySave",
+                  "inputs": {"prompt_id": "should_be_ignored"}},
+        }
+        self.assertEqual(_extract_prompt_library_ids(prompt), [])
+
+    def test_extract_skips_unrelated_nodes(self):
+        prompt = {
+            "1": {"class_type": "CheckpointLoaderSimple",
+                  "inputs": {"ckpt_name": "x.safetensors"}},
+            "2": {"class_type": "KSampler",
+                  "inputs": {"seed": 666}},
+        }
+        self.assertEqual(_extract_prompt_library_ids(prompt), [])
+
+    def test_extract_handles_empty_or_missing_inputs(self):
+        # An unused library node (prompt_id left blank) shouldn't show up.
+        prompt = {
+            "4": {"class_type": "PromptLibrary",
+                  "inputs": {"prompt_id": ""}},
+            "5": {"class_type": "PromptLibrary",
+                  "inputs": {"prompt_id": "   "}},
+            "6": {"class_type": "PromptLibrary", "inputs": {}},
+            "7": {"class_type": "PromptLibrary"},
+        }
+        self.assertEqual(_extract_prompt_library_ids(prompt), [])
+
+    def test_expand_single_id(self):
+        prompt = {"4": {"class_type": "PromptLibrary",
+                        "inputs": {"prompt_id": "cult_card_frog"}}}
+        self.assertEqual(
+            _expand_prompt_tokens("%prompt_id%", prompt),
+            "cult_card_frog",
+        )
+
+    def test_expand_multi_pick_comma_to_underscore(self):
+        # A single PromptLibrary node can hold a comma-separated multi-pick.
+        # Sanitization must collapse the commas to underscores so the
+        # filename stays safe across platforms.
+        prompt = {"4": {"class_type": "PromptLibrary", "inputs": {
+            "prompt_id": "cult_card_ribbity_rabbity,judy_hopps_sdxl"}}}
+        self.assertEqual(
+            _expand_prompt_tokens("%prompt_id%", prompt),
+            "cult_card_ribbity_rabbity_judy_hopps_sdxl",
+        )
+
+    def test_expand_multi_library_panels_joined(self):
+        prompt = {"5": {"class_type": "PromptLibraryMulti", "inputs": {
+            "prompt_id_1": "alpha", "prompt_id_2": "beta", "prompt_id_3": "gamma"}}}
+        self.assertEqual(
+            _expand_prompt_tokens("%prompt_id%", prompt),
+            "alpha_beta_gamma",
+        )
+
+    def test_expand_fallback_when_no_loader(self):
+        # No PromptLibrary loader in the workflow → never leak the literal
+        # `%prompt_id%` to disk; fall back to 'GrimmRibbity'.
+        prompt = {"1": {"class_type": "KSampler", "inputs": {"seed": 1}}}
+        self.assertEqual(
+            _expand_prompt_tokens("%prompt_id%", prompt),
+            "GrimmRibbity",
+        )
+
+    def test_expand_no_token_passes_through(self):
+        prompt = {"4": {"class_type": "PromptLibrary",
+                        "inputs": {"prompt_id": "x"}}}
+        self.assertEqual(
+            _expand_prompt_tokens("StaticName", prompt),
+            "StaticName",
+        )
+
+    def test_expand_with_none_prompt(self):
+        # No workflow context at all — still fall back rather than crash.
+        self.assertEqual(_expand_prompt_tokens("%prompt_id%", None),
+                         "GrimmRibbity")
+
+    def test_expand_inside_a_larger_prefix(self):
+        # Token can be embedded anywhere in the prefix string.
+        prompt = {"4": {"class_type": "PromptLibrary",
+                        "inputs": {"prompt_id": "cult_card_frog"}}}
+        self.assertEqual(
+            _expand_prompt_tokens("renders/%prompt_id%_v2", prompt),
+            "renders/cult_card_frog_v2",
+        )
+
+
+# Fixture: 5 library entries spanning the tags we use in the Random tests.
+_REPLAY_ITEMS = [
+    {"id": "cult_card_ember_initiate", "tags": ["Cards", "creature"]},
+    {"id": "cult_card_frog",           "tags": ["Cards", "creature"]},
+    {"id": "cult_card_drown_kid",      "tags": ["Cards", "creature"]},
+    {"id": "cult_card_beast_pit",      "tags": ["Cards", "trap"]},
+    {"id": "gremmy_cartoon",           "tags": ["gremmy"]},
+]
+
+
+class ReplayRandomPickTests(unittest.TestCase):
+    """The pure-function half of the Random replay path."""
+
+    def test_seed_picks_deterministically_within_filter(self):
+        # Same (seed, tag_filter, items) must always produce the same id —
+        # this is the only reason we can replay the pick at save time
+        # without wiring anything from the Random node.
+        a = _replay_random_pick_from_items(_REPLAY_ITEMS, "Cards", 42)
+        b = _replay_random_pick_from_items(_REPLAY_ITEMS, "Cards", 42)
+        self.assertEqual(a, b)
+        # And the picked id must actually be Cards-tagged.
+        picked = next(i for i in _REPLAY_ITEMS if i["id"] == a)
+        self.assertIn("Cards", picked["tags"])
+
+    def test_different_seeds_can_diverge(self):
+        # Sanity: across a reasonable seed sweep we see more than one
+        # distinct pick (otherwise the test above is vacuous).
+        seeds = range(0, 50)
+        ids = {_replay_random_pick_from_items(_REPLAY_ITEMS, "Cards", s)
+               for s in seeds}
+        self.assertGreater(len(ids), 1)
+
+    def test_tag_filter_and_aware(self):
+        # Multi-tag filter is AND: every tag must be on the entry. Only
+        # the trap card has both Cards+trap, so the pick is forced.
+        pid = _replay_random_pick_from_items(_REPLAY_ITEMS, "Cards,trap", 0)
+        self.assertEqual(pid, "cult_card_beast_pit")
+
+    def test_empty_filter_matches_all(self):
+        pid = _replay_random_pick_from_items(_REPLAY_ITEMS, "", 0)
+        self.assertIn(pid, [i["id"] for i in _REPLAY_ITEMS])
+
+    def test_no_matches_returns_empty(self):
+        self.assertEqual(
+            _replay_random_pick_from_items(_REPLAY_ITEMS, "no_such_tag", 0),
+            "",
+        )
+
+    def test_non_list_items_returns_empty(self):
+        # Defensive — bad return from the lazy fetcher.
+        self.assertEqual(_replay_random_pick_from_items(None, "", 0), "")
+        self.assertEqual(_replay_random_pick_from_items({}, "", 0), "")
+
+    def test_bad_seed_returns_empty(self):
+        self.assertEqual(
+            _replay_random_pick_from_items(_REPLAY_ITEMS, "Cards", "not-an-int"),
+            "",
+        )
+
+    def test_missing_seed_defaults_to_zero(self):
+        # None seed → 0. Still deterministic, never crashes.
+        pid = _replay_random_pick_from_items(_REPLAY_ITEMS, "Cards", None)
+        self.assertEqual(pid,
+                         _replay_random_pick_from_items(_REPLAY_ITEMS, "Cards", 0))
+
+
+class RandomPickWorkflowTests(unittest.TestCase):
+    """Walk a real-shaped workflow dict + assert the right ids surface
+    in %prompt_id% expansion. items_fetcher is injected so the test
+    doesn't touch the real prompts.json on disk."""
+
+    def _fetcher(self):
+        return list(_REPLAY_ITEMS)
+
+    def test_random_node_replay_produces_picked_id(self):
+        # The exact case the user wants to work without wiring: workflow
+        # has a PromptLibraryRandom and a sampler; no PromptLibrary
+        # loader. The save node walks, replays, and names the file.
+        prompt = {
+            "5": {"class_type": "PromptLibraryRandom",
+                  "inputs": {"tag_filter": "Cards", "seed": 42}},
+            "9": {"class_type": "KSampler", "inputs": {"seed": 666}},
+        }
+        expected_id = _replay_random_pick_from_items(_REPLAY_ITEMS, "Cards", 42)
+        self.assertEqual(
+            _expand_prompt_tokens("%prompt_id%", prompt,
+                                   items_fetcher=self._fetcher),
+            expected_id,
+        )
+
+    def test_extract_random_pick_ids_skips_when_no_random_node(self):
+        # If the workflow has no Random node we never call the fetcher
+        # — and the result is empty.
+        called = []
+
+        def fetcher():
+            called.append(1)
+            return list(_REPLAY_ITEMS)
+
+        prompt = {"4": {"class_type": "PromptLibrary",
+                        "inputs": {"prompt_id": "x"}}}
+        self.assertEqual(_extract_random_pick_ids(prompt, items_fetcher=fetcher), [])
+        self.assertFalse(called, "fetcher should not be called without a Random node")
+
+    def test_static_loader_and_random_combine(self):
+        # Mixed graph: a static PromptLibrary picks character_a, and a
+        # Random by Tag picks the scene from the Cards pool. Both
+        # collapse into one underscore-joined filename token, in walk
+        # order (loaders first, then randoms).
+        prompt = {
+            "4": {"class_type": "PromptLibrary",
+                  "inputs": {"prompt_id": "character_a"}},
+            "5": {"class_type": "PromptLibraryRandom",
+                  "inputs": {"tag_filter": "Cards", "seed": 42}},
+        }
+        random_pick = _replay_random_pick_from_items(_REPLAY_ITEMS, "Cards", 42)
+        self.assertEqual(
+            _expand_prompt_tokens("%prompt_id%", prompt,
+                                   items_fetcher=self._fetcher),
+            f"character_a_{random_pick}",
+        )
+
+    def test_multiple_random_nodes_join_in_walk_order(self):
+        # Overnight loop with two Random panels (e.g. character + scene).
+        prompt = {
+            "5": {"class_type": "PromptLibraryRandom",
+                  "inputs": {"tag_filter": "Cards", "seed": 1}},
+            "6": {"class_type": "PromptLibraryRandom",
+                  "inputs": {"tag_filter": "Cards", "seed": 2}},
+        }
+        a = _replay_random_pick_from_items(_REPLAY_ITEMS, "Cards", 1)
+        b = _replay_random_pick_from_items(_REPLAY_ITEMS, "Cards", 2)
+        self.assertEqual(
+            _expand_prompt_tokens("%prompt_id%", prompt,
+                                   items_fetcher=self._fetcher),
+            f"{a}_{b}",
+        )
+
+    def test_random_node_with_no_matches_falls_back(self):
+        # Random node's tag_filter doesn't match any library entry — the
+        # replay returns "", we drop empties, and nothing else feeds the
+        # token → fallback to 'GrimmRibbity'.
+        prompt = {
+            "5": {"class_type": "PromptLibraryRandom",
+                  "inputs": {"tag_filter": "no_such_tag", "seed": 0}},
+        }
+        self.assertEqual(
+            _expand_prompt_tokens("%prompt_id%", prompt,
+                                   items_fetcher=self._fetcher),
+            "GrimmRibbity",
+        )
+
+    def test_fetcher_returning_empty_falls_back(self):
+        # The package wasn't importable (test harness, standalone) so
+        # the lazy fetcher returns []. Random replay produces nothing,
+        # so the static walk's result (or fallback) wins.
+        prompt = {
+            "5": {"class_type": "PromptLibraryRandom",
+                  "inputs": {"tag_filter": "Cards", "seed": 0}},
+        }
+        self.assertEqual(
+            _expand_prompt_tokens("%prompt_id%", prompt,
+                                   items_fetcher=lambda: []),
+            "GrimmRibbity",
+        )
+
+
+# Realistic items list reused across the snapshot tests — mirrors the
+# shape we actually ship: id/name/tags/negative present, loras a mix of
+# old (lora_name/strength) and new (name/strength_model/strength_clip)
+# shapes so the normalizer is exercised end-to-end.
+_SNAPSHOT_ITEMS = [
+    {
+        "id": "cult_card_ghoul",
+        "name": "Pit Ghoul -- Cult Card",
+        "tags": ["Cards", "Cards:nuke", "Cards:creature"],
+        "negative": "lowres, blurry, watermark",
+        "loras": [
+            {"name": "wasteland.safetensors", "strength_model": 0.7,
+             "strength_clip": 0.6, "enabled": True},
+        ],
+    },
+    {
+        "id": "gremmy_cartoon",
+        "name": "Cartoon Gremmy",
+        "tags": ["Gremmy"],
+        "negative": "noisy",
+        "loras": [
+            {"lora_name": "gremmy_v1.safetensors", "strength": 1.0},
+        ],
+    },
+    {
+        "id": "raw_neg",
+        "name": "Raw",
+        "tags": ["Cards"],
+        "negative": "x" * 5000,
+        "loras": [],
+    },
+]
+
+
+class LoraNormalizerTests(unittest.TestCase):
+    """Round-trip the per-LoRA shape coercion the snapshot depends on."""
+
+    def test_new_shape_passthrough(self):
+        out = _normalize_lora_for_snapshot({
+            "name": "x.safetensors", "strength_model": 0.7,
+            "strength_clip": 0.6, "enabled": True,
+        })
+        self.assertEqual(out["name"], "x.safetensors")
+        self.assertAlmostEqual(out["strength_model"], 0.7)
+        self.assertAlmostEqual(out["strength_clip"], 0.6)
+        self.assertTrue(out["enabled"])
+
+    def test_legacy_shape_normalized(self):
+        # Old library entries used lora_name + a single strength field.
+        out = _normalize_lora_for_snapshot({
+            "lora_name": "old.safetensors", "strength": 0.8,
+        })
+        self.assertEqual(out["name"], "old.safetensors")
+        self.assertAlmostEqual(out["strength_model"], 0.8)
+        self.assertAlmostEqual(out["strength_clip"], 0.8)
+        self.assertTrue(out["enabled"])
+
+    def test_missing_name_returns_none(self):
+        self.assertIsNone(_normalize_lora_for_snapshot({"strength": 1.0}))
+        self.assertIsNone(_normalize_lora_for_snapshot({}))
+        self.assertIsNone(_normalize_lora_for_snapshot(None))
+        self.assertIsNone(_normalize_lora_for_snapshot("not a dict"))
+
+    def test_bad_strength_defaults_to_one(self):
+        out = _normalize_lora_for_snapshot({
+            "name": "x.safetensors", "strength_model": "not-a-number",
+        })
+        self.assertAlmostEqual(out["strength_model"], 1.0)
+
+
+class ResolveIndividualPidsTests(unittest.TestCase):
+    """The pid-set the snapshot iterates over: multi-pick gets split."""
+
+    def test_single_pid_passthrough(self):
+        prompt = {"4": {"class_type": "PromptLibrary",
+                        "inputs": {"prompt_id": "cult_card_ghoul"}}}
+        self.assertEqual(
+            _resolve_individual_pids(prompt, items_fetcher=lambda: []),
+            ["cult_card_ghoul"],
+        )
+
+    def test_multi_pick_split(self):
+        # Filename naming joins "a,b" → "a_b" — snapshot SPLITS to ["a","b"]
+        # so each entry gets serialized once.
+        prompt = {"4": {"class_type": "PromptLibrary",
+                        "inputs": {"prompt_id": "a, b ,c"}}}
+        self.assertEqual(
+            _resolve_individual_pids(prompt, items_fetcher=lambda: []),
+            ["a", "b", "c"],
+        )
+
+    def test_dedup_across_loaders(self):
+        # If two PromptLibrary nodes happen to reference the same id, the
+        # snapshot should still list it once.
+        prompt = {
+            "4": {"class_type": "PromptLibrary",
+                  "inputs": {"prompt_id": "shared"}},
+            "5": {"class_type": "PromptLibraryStyle",
+                  "inputs": {"prompt_id": "shared"}},
+        }
+        self.assertEqual(
+            _resolve_individual_pids(prompt, items_fetcher=lambda: []),
+            ["shared"],
+        )
+
+
+class LibrarySnapshotTests(unittest.TestCase):
+    """End-to-end shape of the grimmribbity_library PNG chunk payload."""
+
+    def _fetcher(self):
+        return list(_SNAPSHOT_ITEMS)
+
+    def test_no_loader_returns_none(self):
+        # No library node in the workflow → snapshot is None and the save
+        # path skips writing the chunk entirely. Keeps non-library saves
+        # clean.
+        prompt = {"1": {"class_type": "KSampler", "inputs": {"seed": 1}}}
+        self.assertIsNone(
+            _build_library_entry_snapshot(prompt, items_fetcher=self._fetcher))
+
+    def test_single_entry_shape(self):
+        prompt = {"4": {"class_type": "PromptLibrary",
+                        "inputs": {"prompt_id": "cult_card_ghoul"}}}
+        snap = _build_library_entry_snapshot(prompt, items_fetcher=self._fetcher)
+        self.assertEqual(snap["schema"], 1)
+        self.assertEqual(snap["source"], "GrimmRibbity")
+        self.assertEqual(len(snap["entries"]), 1)
+        e = snap["entries"][0]
+        self.assertEqual(e["id"], "cult_card_ghoul")
+        self.assertEqual(e["name"], "Pit Ghoul -- Cult Card")
+        self.assertEqual(e["tags"], ["Cards", "Cards:nuke", "Cards:creature"])
+        self.assertEqual(len(e["loras"]), 1)
+        self.assertEqual(e["loras"][0]["name"], "wasteland.safetensors")
+        self.assertAlmostEqual(e["loras"][0]["strength_clip"], 0.6)
+
+    def test_multi_pick_expands_into_separate_entries(self):
+        # Comma-split in one library node = N entries in the snapshot.
+        # Distinct from the filename builder which joins with underscores.
+        prompt = {"4": {"class_type": "PromptLibrary",
+                        "inputs": {"prompt_id": "cult_card_ghoul,gremmy_cartoon"}}}
+        snap = _build_library_entry_snapshot(prompt, items_fetcher=self._fetcher)
+        ids = [e["id"] for e in snap["entries"]]
+        self.assertEqual(ids, ["cult_card_ghoul", "gremmy_cartoon"])
+
+    def test_missing_entry_flagged_not_skipped(self):
+        # An id that no longer exists in the library still gets a stub —
+        # tells the consumer "this was referenced but is gone" rather than
+        # dropping silently.
+        prompt = {"4": {"class_type": "PromptLibrary",
+                        "inputs": {"prompt_id": "ghost_entry"}}}
+        snap = _build_library_entry_snapshot(prompt, items_fetcher=self._fetcher)
+        self.assertEqual(len(snap["entries"]), 1)
+        e = snap["entries"][0]
+        self.assertEqual(e["id"], "ghost_entry")
+        self.assertTrue(e.get("missing"))
+        # No name/tags/loras keys on the stub — consumer must check "missing".
+        self.assertNotIn("name", e)
+
+    def test_negative_truncated_with_ellipsis(self):
+        # Negatives can run 700+ chars on cult cards. The snapshot caps at
+        # _SNAPSHOT_NEGATIVE_MAX (default 500) + "..." so the PNG chunk
+        # stays compact across a 100-frame batch save.
+        prompt = {"4": {"class_type": "PromptLibrary",
+                        "inputs": {"prompt_id": "raw_neg"}}}
+        snap = _build_library_entry_snapshot(prompt, items_fetcher=self._fetcher,
+                                              negative_max=80)
+        neg = snap["entries"][0]["negative"]
+        self.assertLessEqual(len(neg), 83)  # 80 chars + "..."
+        self.assertTrue(neg.endswith("..."))
+
+    def test_random_node_replay_resolves(self):
+        # PromptLibraryRandom doesn't expose its picked id as an input —
+        # the snapshot reuses the same deterministic replay path the
+        # filename builder uses. The replayed id then resolves to the
+        # full entry record.
+        prompt = {"5": {"class_type": "PromptLibraryRandom",
+                        "inputs": {"tag_filter": "Cards:nuke", "seed": 0}}}
+        items = [
+            {"id": "cult_card_ghoul", "tags": ["Cards:nuke"],
+             "negative": "x", "loras": []},
+        ]
+        snap = _build_library_entry_snapshot(prompt, items_fetcher=lambda: items)
+        self.assertEqual(snap["entries"][0]["id"], "cult_card_ghoul")
+
+    def test_fetcher_returning_empty_returns_none(self):
+        # Standalone install / test harness: lazy fetcher returns []. No
+        # entries resolve, so the snapshot returns None and the save path
+        # doesn't write a chunk for an unresolvable workflow.
+        prompt = {"4": {"class_type": "PromptLibrary",
+                        "inputs": {"prompt_id": "x"}}}
+        snap = _build_library_entry_snapshot(prompt, items_fetcher=lambda: [])
+        # x has no record, but it's still mentioned → snapshot keeps the
+        # stub. (None only when there's nothing to mention at all.)
+        self.assertIsNotNone(snap)
+        self.assertEqual(snap["entries"][0]["id"], "x")
+        self.assertTrue(snap["entries"][0].get("missing"))
+
+    def test_snapshot_serializes_to_json(self):
+        # The save loop json.dumps the snapshot before writing the PNG
+        # chunk. Defensive check: nothing in the snapshot is non-JSON.
+        prompt = {"4": {"class_type": "PromptLibrary",
+                        "inputs": {"prompt_id": "cult_card_ghoul,gremmy_cartoon"}}}
+        snap = _build_library_entry_snapshot(prompt, items_fetcher=self._fetcher)
+        encoded = json.dumps(snap, ensure_ascii=False)
+        # And it round-trips.
+        self.assertEqual(json.loads(encoded), snap)
+
+
+class LibrarySnapshotPngRoundTripTests(unittest.TestCase):
+    """Confirm the PIL chunk-write path used by save() actually carries
+    the JSON through a real PNG encode/decode cycle. Doesn't call save()
+    (which needs torch + folder_paths) — exercises the PNG layer."""
+
+    def test_chunk_writes_and_reads_back(self):
+        from PIL import Image, PngImagePlugin
+        import io
+        snap = {"schema": 1, "source": "GrimmRibbity",
+                "entries": [{"id": "cult_card_frog", "tags": ["Cards"]}]}
+        info = PngImagePlugin.PngInfo()
+        info.add_text("grimmribbity_library", json.dumps(snap))
+        buf = io.BytesIO()
+        Image.new("RGB", (4, 4), (0, 0, 0)).save(
+            buf, format="PNG", pnginfo=info)
+        buf.seek(0)
+        reloaded = Image.open(buf)
+        # PIL surfaces text chunks as .info[key] after load().
+        reloaded.load()
+        self.assertIn("grimmribbity_library", reloaded.info)
+        self.assertEqual(
+            json.loads(reloaded.info["grimmribbity_library"]),
+            snap,
+        )
 
 
 if __name__ == "__main__":

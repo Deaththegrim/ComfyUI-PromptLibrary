@@ -124,6 +124,285 @@ def _expand_filename_tokens(prefix: str, *, now=None) -> str:
     return _DATE_TOKEN_RE.sub(_replace, prefix)
 
 
+# class_types that expose a `prompt_id` / `prompt_id_<n>` input naming
+# the library entry being loaded for this render. PromptLibrarySave is
+# excluded — its prompt_id names what's being WRITTEN, not used.
+_LIBRARY_LOADER_CLASS_TYPES = frozenset((
+    "PromptLibrary",
+    "PromptLibraryStyle",
+    "PromptLibraryMulti",
+))
+
+_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _sanitize_for_filename(s: str) -> str:
+    """Collapse anything outside [A-Za-z0-9._-] to `_` so the result is
+    filesystem-safe on every platform. Empty / all-bad input falls back
+    to 'prompt' so we never produce a zero-length token."""
+    out = _SAFE_FILENAME_RE.sub("_", s or "")
+    out = out.strip("._-")
+    return out or "prompt"
+
+
+def _extract_prompt_library_ids(prompt: dict | None) -> list[str]:
+    """Pull every `prompt_id` value off any library-loader node in the
+    workflow. Order is workflow-node-iteration order (a dict in CPython
+    3.7+ preserves insertion). Multi-pick within one node keeps its
+    comma-separated string as a single list entry — sanitization
+    happens later, comma to underscore."""
+    if not isinstance(prompt, dict):
+        return []
+    ids: list[str] = []
+    for node in prompt.values():
+        if not isinstance(node, dict):
+            continue
+        if node.get("class_type") not in _LIBRARY_LOADER_CLASS_TYPES:
+            continue
+        inputs = node.get("inputs") or {}
+        pid = inputs.get("prompt_id")
+        if isinstance(pid, str) and pid.strip():
+            ids.append(pid.strip())
+        for k, v in inputs.items():
+            if k.startswith("prompt_id_") and isinstance(v, str) and v.strip():
+                ids.append(v.strip())
+    return ids
+
+
+def _replay_random_pick_from_items(items, tag_filter, seed) -> str:
+    """Pure re-run of PromptLibraryRandom.pick's choice step.
+
+    Same `(seed, tag_filter, items)` deterministically reproduces the
+    picked entry id — `random.Random(seed).choice(matches)` is what the
+    Random node does at runtime. We don't need to replay the wildcard
+    expansion because that consumes the rng *after* the choice, so the
+    id is fixed by the choice call alone.
+
+    Returns the id, or '' on any failure (bad seed, empty matches, no
+    items). Caller is expected to drop empty strings before sanitizing.
+    """
+    import random
+    if not isinstance(items, list):
+        return ""
+    tag_str = tag_filter if isinstance(tag_filter, str) else ""
+    wanted = [t.strip() for t in tag_str.split(",") if t.strip()]
+    if wanted:
+        matches = [i for i in items
+                   if all(t in (i.get("tags") or []) for t in wanted)]
+    else:
+        matches = list(items)
+    if not matches:
+        return ""
+    try:
+        s = int(seed if seed is not None else 0)
+    except (TypeError, ValueError):
+        return ""
+    chosen = random.Random(s).choice(matches)
+    return chosen.get("id", "") or ""
+
+
+def _fetch_library_items_for_replay() -> list:
+    """Lazy-pull the current prompts.json contents via the package's
+    `_load`. Used only by the Random-replay path so a save without any
+    Random node never touches the library at all.
+
+    Returns [] when the package isn't importable (test harness with the
+    stubbed __init__, civitai_save imported standalone, etc.) — the
+    replay path treats [] as "no matches", same as an empty filter."""
+    try:
+        import importlib
+        pkg_name = __package__ or "__init__"
+        pkg = importlib.import_module(pkg_name)
+        loader = getattr(pkg, "_load", None)
+        if loader is None:
+            return []
+        items = loader()
+        return items if isinstance(items, list) else []
+    except Exception:
+        return []
+
+
+def _resolve_individual_pids(prompt: dict | None,
+                               items_fetcher=None) -> list[str]:
+    """Return every individual prompt_id mentioned in the workflow.
+
+    Differs from `_extract_prompt_library_ids` in that comma-separated
+    multi-pick within a single library node gets split — the round-trip
+    snapshot wants one entry per real id, not the multi-pick blob the
+    filename builder uses. Random by Tag picks are included via replay.
+    De-dupes while preserving first-seen order so the snapshot reads in
+    workflow-walk order."""
+    fetcher = items_fetcher or _fetch_library_items_for_replay
+    raw = list(_extract_prompt_library_ids(prompt))
+    raw.extend(_extract_random_pick_ids(prompt, items_fetcher=fetcher))
+    out: list[str] = []
+    seen: set[str] = set()
+    for blob in raw:
+        for pid in str(blob).split(","):
+            pid = pid.strip()
+            if pid and pid not in seen:
+                seen.add(pid)
+                out.append(pid)
+    return out
+
+
+# Cap on the negative-prompt string saved inside the per-entry snapshot.
+# A few entries in the wild have ~700-character negatives; the rest
+# trend ~100-200. Truncate so the PNG chunk stays compact (one library
+# entry with 6 LoRAs + tags + a 500-char negative serializes to ~1 KB).
+_SNAPSHOT_NEGATIVE_MAX = 500
+_SNAPSHOT_SCHEMA = 1
+
+
+def _normalize_lora_for_snapshot(raw) -> dict | None:
+    """Coerce one library LoRA record into the snapshot's stable shape.
+
+    Library entries store LoRAs as dicts but the key set has drifted
+    across versions: older entries use `lora_name`/`strength`, newer use
+    `name`/`strength_model`+`strength_clip`/`enabled`. The snapshot
+    presents one fixed shape so round-trip consumers don't branch."""
+    if not isinstance(raw, dict):
+        return None
+    name = raw.get("name") or raw.get("lora_name") or ""
+    if not isinstance(name, str) or not name:
+        return None
+    base = raw.get("strength_model", raw.get("strength", 1.0))
+    clip = raw.get("strength_clip", base)
+    try:
+        sm = float(base if base is not None else 1.0)
+        sc = float(clip if clip is not None else sm)
+    except (TypeError, ValueError):
+        sm, sc = 1.0, 1.0
+    return {
+        "name": name,
+        "strength_model": sm,
+        "strength_clip": sc,
+        "enabled": bool(raw.get("enabled", True)),
+    }
+
+
+def _build_library_entry_snapshot(prompt: dict | None,
+                                    items_fetcher=None,
+                                    negative_max: int = _SNAPSHOT_NEGATIVE_MAX
+                                    ) -> dict | None:
+    """Capture the upstream library entries that drove this render so a
+    future drag-the-PNG-into-Comfy can rehydrate them.
+
+    The save node already walks the workflow to recover prompt_id values
+    for filename naming + `%prompt_id%` expansion. This helper does the
+    same walk, fetches the full library record for each id, strips it to
+    a stable subset (id, display name, tags, LoRA stack, truncated
+    negative), and returns one combined dict that the save loop writes
+    as a `grimmribbity_library` text chunk in each PNG.
+
+    Returns None when the workflow has no library loaders OR no entries
+    resolved — caller skips writing the chunk in that case, so saves
+    from non-library workflows stay clean.
+
+    `items_fetcher` is a seam for tests + the same lazy-load path that
+    the Random replay branch uses (so a missing/standalone install
+    silently degrades rather than crashing the save)."""
+    fetcher = items_fetcher or _fetch_library_items_for_replay
+    pids = _resolve_individual_pids(prompt, items_fetcher=fetcher)
+    if not pids:
+        return None
+    items = fetcher() or []
+    by_id: dict[str, dict] = {}
+    for item in items:
+        if isinstance(item, dict):
+            iid = item.get("id")
+            if isinstance(iid, str):
+                by_id[iid] = item
+    entries: list[dict] = []
+    for pid in pids:
+        item = by_id.get(pid)
+        if item is None:
+            # Keep a stub so the consumer knows the id was referenced but
+            # the library no longer has it (deleted entry, ported PNG).
+            entries.append({"id": pid, "missing": True})
+            continue
+        loras = []
+        for raw_lora in item.get("loras") or []:
+            normalized = _normalize_lora_for_snapshot(raw_lora)
+            if normalized is not None:
+                loras.append(normalized)
+        negative = item.get("negative") or ""
+        if not isinstance(negative, str):
+            negative = ""
+        if len(negative) > negative_max:
+            negative = negative[:negative_max] + "..."
+        tags = item.get("tags") or []
+        if not isinstance(tags, list):
+            tags = []
+        entries.append({
+            "id": item.get("id"),
+            "name": item.get("name"),
+            "tags": [str(t) for t in tags if isinstance(t, str)],
+            "loras": loras,
+            "negative": negative,
+        })
+    if not entries:
+        return None
+    return {
+        "schema": _SNAPSHOT_SCHEMA,
+        "source": "GrimmRibbity",
+        "entries": entries,
+    }
+
+
+def _extract_random_pick_ids(prompt: dict | None,
+                              items_fetcher=_fetch_library_items_for_replay) -> list[str]:
+    """Walk the workflow for `PromptLibraryRandom` nodes and replay each
+    one's pick to recover the runtime-chosen entry id. `items_fetcher`
+    is a seam for tests so we can hand in a known prompts list without
+    poking at module globals."""
+    if not isinstance(prompt, dict):
+        return []
+    has_random = any(
+        isinstance(n, dict) and n.get("class_type") == "PromptLibraryRandom"
+        for n in prompt.values()
+    )
+    if not has_random:
+        return []
+    items = items_fetcher()
+    ids: list[str] = []
+    for node in prompt.values():
+        if not isinstance(node, dict):
+            continue
+        if node.get("class_type") != "PromptLibraryRandom":
+            continue
+        inputs = node.get("inputs") or {}
+        picked = _replay_random_pick_from_items(
+            items, inputs.get("tag_filter"), inputs.get("seed"))
+        if picked:
+            ids.append(picked)
+    return ids
+
+
+def _expand_prompt_tokens(prefix: str, prompt: dict | None,
+                          items_fetcher=_fetch_library_items_for_replay) -> str:
+    """Expand `%prompt_id%` to the sanitized id(s) for this render.
+
+    Resolution order (zero wiring required for any of them):
+      1. `PromptLibrary` / `PromptLibraryStyle` / `PromptLibraryMulti`
+         static `prompt_id` inputs from the workflow trace. Multi-pick
+         (comma-list in one node) and multi-library (multiple loader
+         nodes) both collapse into one underscore-joined token.
+      2. `PromptLibraryRandom` runtime picks, replayed deterministically
+         from each node's `(seed, tag_filter)` against the current
+         prompts.json. Overnight loops with control_after_generate=
+         randomize Just Work.
+      3. Fallback: literal `'GrimmRibbity'`, so a stray `%prompt_id%`
+         never ships to disk.
+    """
+    if "%prompt_id%" not in (prefix or ""):
+        return prefix
+    ids = _extract_prompt_library_ids(prompt)
+    ids.extend(_extract_random_pick_ids(prompt, items_fetcher=items_fetcher))
+    joined = "_".join(_sanitize_for_filename(i) for i in ids) if ids else "GrimmRibbity"
+    return prefix.replace("%prompt_id%", joined)
+
+
 def _coerce_append_counter(value) -> bool:
     """Normalise the ``append_counter`` widget value to a real bool.
 
@@ -958,9 +1237,16 @@ class CivitaiSaveImage:
         return {
             "required": {
                 "images": ("IMAGE", {"tooltip": "The IMAGE batch to save. Each frame becomes one PNG."}),
-                "filename_prefix": ("STRING", {"default": "GrimmRibbity",
+                "filename_prefix": ("STRING", {"default": "%prompt_id%",
                     "tooltip":
                         "Prefix for the saved file (counter and .png are appended).\n"
+                        "\n"
+                        "Library tokens (resolved from the workflow):\n"
+                        "\n"
+                        "  %prompt_id%   → id of the entry on any GrimmRibbity Library /\n"
+                        "                  Style / Multi Library node in the graph.\n"
+                        "                  Multi-pick + multi-library are joined with '_'.\n"
+                        "                  Falls back to 'GrimmRibbity' if none is found.\n"
                         "\n"
                         "Date/time tokens you can use anywhere in the prefix:\n"
                         "\n"
@@ -998,15 +1284,15 @@ class CivitaiSaveImage:
                 "negative_override": ("STRING", {"default": "", "multiline": True,
                                                   "placeholder": "leave blank to auto-detect",
                     "tooltip": "Pin the negative prompt in metadata."}),
-                # KEEP append_counter AT THE END. ComfyUI maps a workflow's
-                # saved widgets_values to current widgets by positional index,
-                # not by name — inserting a new widget anywhere but the end
-                # shifts every saved value one slot off and breaks every
-                # workflow saved before the change. v0.59.3 originally put
-                # this widget after filename_prefix (required-block), which
-                # made `output_path` adopt a stale INT/FLOAT value on load
-                # and crashed the folder-picker's .trim() helper. Append-
-                # only is the contract for any future widget added here.
+                # ComfyUI maps a workflow's saved widgets_values to current
+                # widgets by positional index, not by name — inserting a new
+                # widget anywhere but the end shifts every saved value one
+                # slot off and breaks every workflow saved before the change.
+                # v0.59.3 originally put append_counter after filename_prefix
+                # (required-block), which made `output_path` adopt a stale
+                # INT/FLOAT value on load and crashed the folder-picker's
+                # .trim() helper. Append-only is the contract for any future
+                # widget added here.
                 "append_counter": ("BOOLEAN", {"default": True,
                     "tooltip": "When True (default), append Comfy's zero-padded counter "
                                "to the filename (e.g. 'GrimmRibbity_00007_.png') so each "
@@ -1075,13 +1361,14 @@ class CivitaiSaveImage:
         from PIL import Image, PngImagePlugin
         import numpy as np
 
-        # Expand %date:<format>% tokens BEFORE handing off to ComfyUI's
-        # filename helper — core ComfyUI's compute_vars only handles
-        # single-field tokens (%year% / %month% / etc.), so leaving the
-        # %date:...% unexpanded would land literal '%date:yyyy-MM-dd%'
-        # text in the filename. _expand_filename_tokens is a no-op on a
-        # prefix that doesn't contain %date:, so the override-the-default
-        # case is free.
+        # Expand library + date tokens BEFORE handing off to ComfyUI's
+        # filename helper — core's compute_vars only handles single-field
+        # tokens (%year% / %month% / etc.), so leaving the %date:...% or
+        # %prompt_id% unexpanded would land literal text in the filename.
+        # Both helpers are no-ops when their token isn't present, so the
+        # override-the-default case is free.
+        filename_prefix = _expand_prompt_tokens(
+            filename_prefix or "%prompt_id%", prompt)
         filename_prefix = _expand_filename_tokens(filename_prefix or "GrimmRibbity")
 
         # Coerce append_counter — a workflow with a stale or off-by-one
@@ -1191,6 +1478,21 @@ class CivitaiSaveImage:
             for k, v in extra_pnginfo.items():
                 extra_text.append((k, json.dumps(v)))
 
+        # Library snapshot: capture the upstream PromptLibrary entries that
+        # drove this render — id, name, tags, LoRA stack, truncated negative —
+        # so a future drag-the-PNG-into-Comfy flow can rehydrate them. Same
+        # for every frame in the batch (workflow shape doesn't vary mid-save),
+        # so build once outside the loop. Save returns None on a workflow
+        # with no library loaders; nothing is written in that case.
+        library_snapshot_text: str | None = None
+        try:
+            library_snapshot = _build_library_entry_snapshot(prompt)
+        except Exception as e:
+            print(f"[CivitaiSave] library snapshot extraction failed: {e}")
+            library_snapshot = None
+        if library_snapshot is not None:
+            library_snapshot_text = json.dumps(library_snapshot, ensure_ascii=False)
+
         try:
             import comfy.model_management as _mm
             check_interrupt = _mm.throw_exception_if_processing_interrupted
@@ -1215,6 +1517,8 @@ class CivitaiSaveImage:
             png_info.add_text("parameters", params)
             if prompt_text is not None:
                 png_info.add_text("prompt", prompt_text)
+            if library_snapshot_text is not None:
+                png_info.add_text("grimmribbity_library", library_snapshot_text)
             for k, v in extra_text:
                 png_info.add_text(k, v)
 
