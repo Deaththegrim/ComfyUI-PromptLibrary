@@ -4348,20 +4348,26 @@ function registerCivitaiSaveNode(nodeType) {
     };
     refreshCurrent();
 
+    // Setting a widget's value with `widget.value = x` alone updates the
+    // underlying object but doesn't always trigger the Vue/Pinia reactivity
+    // that renders the on-node text input. Calling widget.callback (when
+    // it exists) is the contract ComfyUI's frontend uses to mark a value
+    // change — without it, my browse-picked path stayed invisible in the
+    // STRING widget even though the saved widgets_values had it correctly.
+    const writePath = (value) => {
+      pathWidget.value = value;
+      try { pathWidget.callback?.(value); } catch (_e) { /* renderer-tolerant */ }
+      refreshCurrent();
+      node.setDirtyCanvas?.(true, true);
+    };
     browseBtn.addEventListener("click", () => {
       const initial = String(pathWidget.value == null ? "" : pathWidget.value);
       _openCivitaiFolderBrowser(initial, (chosen) => {
         if (!chosen) return;
-        pathWidget.value = chosen;
-        refreshCurrent();
-        node.setDirtyCanvas?.(true, true);
+        writePath(chosen);
       });
     });
-    clearBtn.addEventListener("click", () => {
-      pathWidget.value = "";
-      refreshCurrent();
-      node.setDirtyCanvas?.(true, true);
-    });
+    clearBtn.addEventListener("click", () => writePath(""));
 
     node.addDOMWidget("output_path_browser", "GrimmRibbityCivitaiFolderBar",
                       bar, {
