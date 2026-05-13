@@ -917,6 +917,37 @@ class CivitaiSaveImage:
     OUTPUT_NODE = True
     CATEGORY = "GrimmRibbity/Output"
 
+    @classmethod
+    def VALIDATE_INPUTS(cls, model_override=None, **kwargs):
+        """Tolerant validation override.
+
+        Default ComfyUI behaviour validates COMBO inputs against their
+        declared choices list and refuses to queue the prompt when a
+        value doesn't match (visible as "Value not in list:" +
+        "Output will be ignored" in the runtime log — meaning the node
+        is dropped from the execution graph and never writes a file).
+
+        Two real-world failure modes that should not block a save:
+
+        1. **Stale workflow widget state.** A workflow saved with one
+           widget order (or by an older version of this node) re-loaded
+           after a widget reorder, refactor, or auto-decoration shift
+           can land non-COMBO values (e.g. ``"fixed"``) in the
+           model_override slot. The save path tolerates anything that
+           isn't a real model name (falls back to the auto-detected
+           model from the workflow trace), so the validator should too.
+
+        2. **Workflow ported between machines.** A model name baked
+           into model_override may not exist on the new host's
+           checkpoint list. The auto-detect fallback handles that
+           gracefully; validation shouldn't refuse the queue.
+
+        Returning True for any model_override value bypasses the COMBO
+        check for that input only — every other input still gets normal
+        validation. Empty kwargs catch-all means future widget additions
+        don't need to be enumerated here."""
+        return True
+
     def save(self, images, filename_prefix,
              append_counter=True,
              output_path="",
@@ -930,11 +961,22 @@ class CivitaiSaveImage:
         meta = extract_workflow_metadata(prompt)
 
         # Model: explicit override wins, else auto-detected, else empty.
+        # An override value that doesn't resolve to a real checkpoint
+        # (stale workflow with a removed model, off-by-one widget shift
+        # putting a non-name like "fixed" in this slot, etc.) silently
+        # falls back to the auto-detected model — never let metadata
+        # confusion block the actual save.
         model_label = (
             model_override if (model_override and model_override != _AUTO_LABEL)
             else meta.get("model_label")
         )
         model_resolved = resolve_model_path(model_label) if model_label else None
+        if model_label and not model_resolved:
+            print(f"[CivitaiSave] model_override {model_label!r} doesn't resolve "
+                  f"to a known checkpoint — falling back to auto-detected "
+                  f"{meta.get('model_label')!r}")
+            model_label = meta.get("model_label")
+            model_resolved = resolve_model_path(model_label) if model_label else None
         model_name = model_resolved[0] if model_resolved else None
         model_sha = (get_cached_sha256(model_label, model_resolved[1])
                      if model_resolved else None)
