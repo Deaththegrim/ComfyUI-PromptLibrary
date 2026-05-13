@@ -32,6 +32,28 @@ ROOT = Path(__file__).parent
 DATA_DIR = ROOT / "data"
 HASH_CACHE_PATH = DATA_DIR / "hash_cache.json"
 
+
+def _build_civitai_filename(base: str, counter: int, frame_idx: int,
+                            batch_size: int, append_counter: bool) -> str:
+    """Pick the per-frame filename for one frame in a batch.
+
+    append_counter=True (default) matches Comfy's SaveImage scheme:
+    ``{base}_{NNNNN}_.png`` so a fresh save resumes from the highest
+    existing index in the folder and never overwrites prior work.
+
+    append_counter=False writes ``{base}.png`` for a single-frame batch —
+    the user owns the name and an existing file at that path will be
+    overwritten. For batches >1, frames are still suffixed with a small
+    index (``{base}_{i:02d}.png``); otherwise N frames in one save would
+    overwrite each other inside the same call. The caller decides when
+    to use this mode; the helper just renders the string.
+    """
+    if append_counter:
+        return f"{base}_{counter:05d}_.png"
+    if batch_size <= 1:
+        return f"{base}.png"
+    return f"{base}_{frame_idx:02d}.png"
+
 # The folders that hold full checkpoints / single-file models. `unet/` is the
 # legacy name for what is now `diffusion_models/` on newer ComfyUIs; we list
 # both because installs with --extra-model-paths can populate either.
@@ -838,6 +860,16 @@ class CivitaiSaveImage:
                 "filename_prefix": ("STRING", {"default": "GrimmRibbity",
                     "tooltip": "Prefix for the saved file (counter and .png are appended). "
                                "Supports ComfyUI's date/time substitutions like %date:yyyy-MM-dd%."}),
+                "append_counter": ("BOOLEAN", {"default": True,
+                    "tooltip": "When True (default), append Comfy's zero-padded counter "
+                               "to the filename (e.g. 'GrimmRibbity_00007_.png') so each "
+                               "save resumes from the highest existing index and never "
+                               "overwrites prior work. When False, write the filename "
+                               "exactly as given (e.g. 'GrimmRibbity.png') — an existing "
+                               "file at that path WILL be overwritten. For batch saves "
+                               "of N>1 frames, a small index suffix (_00, _01, …) is "
+                               "still appended so the frames within one save don't "
+                               "clobber each other."}),
             },
             "optional": {
                 "output_path": ("STRING", {"default": "", "multiline": False,
@@ -877,6 +909,7 @@ class CivitaiSaveImage:
     CATEGORY = "GrimmRibbity/Output"
 
     def save(self, images, filename_prefix,
+             append_counter=True,
              output_path="",
              seed_override=-1,
              model_override=_AUTO_LABEL,
@@ -981,7 +1014,8 @@ class CivitaiSaveImage:
             check_interrupt = None
 
         results = []
-        for frame in images:
+        batch_size = len(images)
+        for frame_idx, frame in enumerate(images):
             # PNG encode + write of a 4K image takes 1-2 s; a 100-frame batch
             # without a cancel-check would ignore the Interrupt button for
             # the whole save. Per-frame check keeps Cancel responsive.
@@ -1000,7 +1034,8 @@ class CivitaiSaveImage:
             for k, v in extra_text:
                 png_info.add_text(k, v)
 
-            file_name = f"{filename}_{counter:05d}_.png"
+            file_name = _build_civitai_filename(
+                filename, counter, frame_idx, batch_size, append_counter)
             counter += 1
             full_path = os.path.join(full_prefix, file_name)
             pil.save(full_path, format="PNG", pnginfo=png_info, compress_level=4)

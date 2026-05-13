@@ -3160,7 +3160,7 @@ async def grimmribbity_detailer_presets_delete(request):
     return web.json_response({"ok": True})
 
 
-__version__ = "0.59.2"
+__version__ = "0.59.3"
 
 
 def _autobackup_on_version_change() -> None:

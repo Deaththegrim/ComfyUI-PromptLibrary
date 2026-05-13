@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from civitai_save import build_a1111_parameters
+from civitai_save import build_a1111_parameters, _build_civitai_filename
 
 
 class A1111ParametersTests(unittest.TestCase):
@@ -467,6 +467,62 @@ class WalkModelChainCycleTests(unittest.TestCase):
         # node the walker visits first — what matters is that the call
         # returns (a finite dict) rather than recursing forever.
         self.assertIsInstance(meta, dict)
+
+
+class BuildCivitaiFilenameTests(unittest.TestCase):
+    """The counter toggle controls whether file names include Comfy's
+    zero-padded suffix. The helper is the single source of truth — tests
+    pin the four shapes the save loop can produce."""
+
+    def test_counter_on_matches_comfy_saveimage_format(self):
+        out = _build_civitai_filename("hero", 7, 0, 1, append_counter=True)
+        self.assertEqual(out, "hero_00007_.png")
+
+    def test_counter_on_pads_to_five_digits(self):
+        self.assertEqual(
+            _build_civitai_filename("x", 0, 0, 1, append_counter=True),
+            "x_00000_.png",
+        )
+        self.assertEqual(
+            _build_civitai_filename("x", 12345, 0, 1, append_counter=True),
+            "x_12345_.png",
+        )
+
+    def test_counter_on_ignores_frame_idx_in_batch(self):
+        # When the counter is on, every frame in a batch advances the counter
+        # in the caller and that counter is what lands in the name. The helper
+        # itself uses `counter`, not `frame_idx`, when append_counter=True.
+        out = _build_civitai_filename("hero", 42, 3, 5, append_counter=True)
+        self.assertEqual(out, "hero_00042_.png")
+
+    def test_counter_off_single_frame_is_clean_name(self):
+        # The exact filename the user typed (plus .png). Existing file at
+        # that path WILL be overwritten by the caller's pil.save — that
+        # contract lives in the docstring and the INPUT_TYPES tooltip.
+        self.assertEqual(
+            _build_civitai_filename("portrait", 99, 0, 1, append_counter=False),
+            "portrait.png",
+        )
+
+    def test_counter_off_batch_uses_two_digit_frame_index(self):
+        # Without an in-batch suffix, N frames would all write to the same
+        # path and only the last would survive. Two-digit zero-pad keeps
+        # the names visibly grouped but compact.
+        names = [
+            _build_civitai_filename("scene", 0, i, 4, append_counter=False)
+            for i in range(4)
+        ]
+        self.assertEqual(names, ["scene_00.png", "scene_01.png",
+                                  "scene_02.png", "scene_03.png"])
+
+    def test_counter_off_batch_size_one_drops_index_even_with_idx_zero(self):
+        # batch_size==1 short-circuits the per-frame suffix path so the
+        # filename stays clean. Defensive: idx and counter values shouldn't
+        # leak into the result when the flag is off and batch is single.
+        self.assertEqual(
+            _build_civitai_filename("solo", 500, 0, 1, append_counter=False),
+            "solo.png",
+        )
 
 
 if __name__ == "__main__":
