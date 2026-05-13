@@ -1452,6 +1452,123 @@ class PromptLibraryScene:
         return (separator.join(parts),)
 
 
+class PromptLibrarySceneFull:
+    """Scene + Background + ambient-action in a single node.
+
+    Successor to ``PromptLibraryScene``. Same dropdown axes (time of day,
+    weather, lighting, camera angle, mood, framing) and same free-form
+    ``extra`` field. Adds:
+
+    - ``background`` + ``background_negative``: a multiline backdrop /
+      environment description that used to live in a separate Background
+      node. Wired through to the Comic Composer so the same Scene drives
+      both atmosphere and physical setting.
+    - ``ambient_action``: a Scene-level cue ("standing on a fire escape,
+      smoking cigarette") that the comic engine layers underneath every
+      panel's per-frame action. Useful when every panel should share a
+      base pose / activity and only specific frame actions vary.
+    - ``scene_negative``: free-form negative tokens specific to the
+      scene (e.g. "noisy background, weird artifacts"). Distinct from
+      the character negatives and from the global quality-tag negatives;
+      this is the scene's own anti-prompt.
+
+    The classic ``PromptLibraryScene`` stays available so workflows that
+    only need atmosphere don't get blast-radius from this consolidation.
+    """
+
+    DESCRIPTION = (
+        "Scene + Background + ambient action in one node. Successor to the "
+        "Scene node — same atmosphere dropdowns, plus a multiline backdrop "
+        "description, a scene-wide ambient action (e.g. 'smoking on a fire "
+        "escape') that layers under every panel, and a scene-specific "
+        "negative-tag field. Wire all four STRING outputs into Comic Composer."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "time_of_day": (_SCENE_TIME_OF_DAY, {
+                    "tooltip": "When the scene is set. Affects sky color, shadow direction, light temperature."}),
+                "weather": (_SCENE_WEATHER, {
+                    "tooltip": "Atmospheric conditions. Drives haze, reflections, mood."}),
+                "lighting": (_SCENE_LIGHTING, {
+                    "tooltip": "Light source/quality. Mix with time_of_day for the full atmosphere."}),
+                "camera_angle": (_SCENE_CAMERA_ANGLE, {
+                    "tooltip": "Camera perspective. List mixes view-angle (from above, three-quarter view) "
+                               "with framing-the-body (full body, cowboy shot, portrait). Pick whichever "
+                               "matters most; the other can go in 'extra'."}),
+                "mood": (_SCENE_MOOD, {
+                    "tooltip": "Emotional tone. Influences color grading, expression cues. "
+                               "Strongest binders: ominous, tense, dramatic, mysterious. "
+                               "Loose binders: melancholic, nostalgic, contemplative."}),
+                "framing": (_SCENE_FRAMING, {
+                    "tooltip": "Composition rule. Strong-binding tags first (centered, depth of field, "
+                               "letterboxed); avoid 'symmetrical' unless you want mirror artifacts."}),
+                "extra": ("STRING", {"default": "", "multiline": True,
+                                      "placeholder": "lens (50mm), art style refs, composition cues...",
+                    "tooltip": "Free-form atmosphere extras. Keep this short — the backdrop description "
+                               "below is where physical setting goes."}),
+                "background": ("STRING", {"default": "", "multiline": True,
+                                          "placeholder": "physical backdrop: 'dark moonlit moor with distant tombstones', "
+                                                         "'fire escape on a brick tenement at night'...",
+                    "tooltip": "Physical environment / backdrop description. Distinct from the atmosphere "
+                               "dropdowns (which set mood/light/weather but not 'where you are'). The Comic "
+                               "Composer encodes this as its own section so a 75-token-strict scene description "
+                               "doesn't bleed into the character or atmosphere sections."}),
+                "ambient_action": ("STRING", {"default": "", "multiline": True,
+                                              "placeholder": "scene-wide pose / activity: "
+                                                             "'standing on the fire escape, smoking', "
+                                                             "'kneeling at the altar', leave empty for none",
+                    "tooltip": "A scene-wide implicit action that layers under every panel's per-frame "
+                               "action. Use when every panel shares a base pose and only frame-level verbs "
+                               "vary (e.g. character on a phone call across multiple panels — the call is "
+                               "ambient_action, what they say in panel N is the per-frame action)."}),
+                "scene_negative": ("STRING", {"default": "", "multiline": True,
+                                              "placeholder": "scene-specific negatives: "
+                                                             "'noisy background, weird artifacts, frame borders'...",
+                    "tooltip": "Negative tokens specific to THIS scene (backdrop / atmosphere only). "
+                               "Wire into Comic Composer.scene_negative so it joins the negative "
+                               "conditioning alongside character-specific and global negatives."}),
+                "separator": ("STRING", {"default": ", ", "multiline": False,
+                    "tooltip": "Glue between joined fields on the atmosphere output."}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("scene", "background", "ambient_action", "scene_negative")
+    OUTPUT_TOOLTIPS = (
+        "Joined atmosphere (time-of-day + weather + lighting + camera + mood + "
+        "framing + extra). Wire into Comic Composer.scene.",
+        "The backdrop / physical-setting multiline. Wire into "
+        "Comic Composer.background — encoded as its own CLIP pass.",
+        "Scene-wide implicit action. Wire into Comic Composer.ambient_action — "
+        "layered under every panel's per-frame action.",
+        "Scene-specific negative tokens. Wire into Comic Composer.scene_negative.",
+    )
+    FUNCTION = "build"
+    CATEGORY = "GrimmRibbity/Comic"
+
+    def build(self, time_of_day, weather, lighting, camera_angle, mood, framing,
+              extra, background, ambient_action, scene_negative, separator=", "):
+        atmosphere_raw = (time_of_day, weather, lighting, camera_angle, mood, framing, extra)
+        parts: list[str] = []
+        for value in atmosphere_raw:
+            if not value:
+                continue
+            text = str(value).strip()
+            if not text or text == _SCENE_NONE:
+                continue
+            parts.append(text)
+        scene_out = separator.join(parts)
+        if not scene_out and not background.strip() and not ambient_action.strip():
+            print("[PromptLibrarySceneFull] every field is empty — emitting empty "
+                  "outputs. Set at least one dropdown, the backdrop, or the "
+                  "ambient_action so the Composer has something to encode.")
+        return (scene_out, background.strip(), ambient_action.strip(),
+                scene_negative.strip())
+
+
 _BG_NONE = "(none)"
 # Visual divider character. Entries that start with this are treated as
 # group headers in the dropdown — selecting one resolves to "(none)" so
@@ -2026,6 +2143,212 @@ class PromptLibraryComicFrameEncode:
         negative_cond = self._encode_sections(
             clip, negative_sections, "negative", diagnostic_print)
         seed = (int(base_seed) + max(0, int(frame_index) - 1)) & _INT_MAX
+        return (positive_cond, negative_cond, action, seed, frame_count)
+
+
+class PromptLibraryComicComposer(PromptLibraryComicFrameEncode):
+    """Comic-strip pipeline collapsed into a single node.
+
+    Subsumes ``PromptLibraryComicFrame`` (string composer), the new
+    ``PromptLibraryComicFrameEncode`` (per-section CLIP encoder), AND
+    the standalone-CLIPTextEncode-plus-ConditioningCombine chain most
+    workflows use for the boilerplate quality-tag negatives. One node,
+    one CLIP input, one positive + negative CONDITIONING pair out.
+
+    Why this exists: the older split (Library → ComicFrame → CLIPTextEncode
+    → SetNode for positive, plus two more CLIPTextEncodes → ConditioningCombine
+    for the global+character negative chain) is six wired nodes that have
+    to agree on a CLIP source. Mistakes show up as either:
+    - positive encoded with raw CLIP, negative with LoRA-patched CLIP →
+      conditioning fights itself, sampler outputs noise / oversaturation
+    - global-negative chain shipping in parallel with per-section
+      negatives, two competing negative tensors
+
+    This node takes ONE CLIP input — the LoRA-patched one from Library —
+    and runs every encoding pass on it. The same CLIP for positive AND
+    negative means there's no way to introduce the mismatch by wiring.
+
+    Inherits the section-encoding helpers from PromptLibraryComicFrameEncode
+    (_resolve_action / _active_sections / _encode_one / _concat /
+    _encode_sections). Adds:
+    - ``ambient_action``: scene-wide implicit action under every panel.
+    - ``global_negative``: free-form multiline that's the merge of what
+      used to be the standalone "lowres, bad anatomy, …" CLIPTextEncode
+      and any tag-pack negatives. Encoded once, ConditioningConcat'd
+      onto the per-section negatives.
+    - ``frame_action_weight``: optional weight multiplier the per-frame
+      action gets emphasised at. 1.0 = no weight; >1.0 puts ``(action:N)``
+      around the encoded text. Useful when the panel-specific verb is
+      getting drowned out by the static character/scene tokens.
+    """
+
+    DESCRIPTION = (
+        "Comic-strip end-to-end composer. Takes Library (character) + "
+        "Scene+Background outputs + your global negative-tag boilerplate and "
+        "emits positive/negative CONDITIONING directly. Every section is "
+        "encoded as its own CLIP pass (no 75-token chunk overflow) on a "
+        "single CLIP input (no positive/negative encoder mismatch). "
+        "Replaces ComicFrame + ComicFrameEncode + the standalone global-"
+        "negative CLIPTextEncode chain in one node."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "clip": ("CLIP", {"tooltip":
+                    "CLIP model. Wire from PromptLibrary / Style — the SAME CLIP "
+                    "drives both positive AND negative encoding inside this node, "
+                    "so the 'positive uses raw CLIP, negative uses patched CLIP' "
+                    "footgun is structurally impossible."}),
+                "frames_json": ("STRING", {"default": "[]", "multiline": True,
+                    "tooltip": "JSON array of per-frame action texts. Driven by the frame "
+                               "editor widget on the node — usually you don't type here directly."}),
+                "frame_index": ("INT", {"default": 1, "min": 1, "max": 999,
+                    "tooltip": "1-based index of the panel to render. Auto-clamped to the "
+                               "frame count. Bump between queues to render each panel."}),
+            },
+            "optional": {
+                # === POSITIVE INPUTS — each becomes one CLIP section ===
+                "character": ("STRING", {"default": "", "multiline": True,
+                                          "forceInput": True,
+                    "tooltip": "Wire from PromptLibrary.prompt. The character description; "
+                               "encoded as its own CLIP pass to keep its weighted tags from "
+                               "bleeding into scene/background sections at a chunk boundary."}),
+                "scene": ("STRING", {"default": "", "multiline": True,
+                                      "forceInput": True,
+                    "tooltip": "Wire from Scene+Background.scene. Atmosphere / time / lighting; "
+                               "encoded separately so weights like (full body:1.5) bind cleanly."}),
+                "background": ("STRING", {"default": "", "multiline": True,
+                                           "forceInput": True,
+                    "tooltip": "Wire from Scene+Background.background. Physical backdrop "
+                               "(e.g. 'fire escape on a brick tenement'); encoded as its own "
+                               "section so a long backdrop description doesn't push other "
+                               "tags past the 75-token mark."}),
+                "ambient_action": ("STRING", {"default": "", "multiline": True,
+                                              "forceInput": True,
+                    "tooltip": "Wire from Scene+Background.ambient_action. A scene-wide "
+                               "implicit action ('standing on fire escape, smoking') that "
+                               "layers under every panel's per-frame action."}),
+                "extra_positive": ("STRING", {"default": "", "multiline": True,
+                                              "placeholder": "extra positive tokens, ad-hoc style overrides…",
+                    "tooltip": "Free-form additions encoded as the LAST positive section. "
+                               "Use for one-shot style overrides without touching the upstream "
+                               "Library / Scene nodes."}),
+
+                # === NEGATIVE INPUTS — each becomes one CLIP section ===
+                "character_negative": ("STRING", {"default": "", "multiline": True,
+                                                   "forceInput": True,
+                    "tooltip": "Wire from PromptLibrary.negative. Character-specific anti-"
+                               "tags (things this character should never look like). "
+                               "Encoded as its own negative section."}),
+                "scene_negative": ("STRING", {"default": "", "multiline": True,
+                                               "forceInput": True,
+                    "tooltip": "Wire from Scene+Background.scene_negative. Scene-specific "
+                               "anti-tags (e.g. 'noisy background, frame borders')."}),
+                "global_negative": ("STRING", {"default": "", "multiline": True,
+                                               "placeholder":
+                                               "lowres, bad anatomy, bad hands, text, error, "
+                                               "missing fingers, extra digit, fewer digits, "
+                                               "cropped, worst quality, low quality, blurry, "
+                                               "jpeg artifacts, signature, watermark, …",
+                    "tooltip": "Boilerplate quality / anatomy / artifact negatives that apply "
+                               "to EVERY generation regardless of character or scene. Replaces "
+                               "the old workflow pattern of a standalone CLIPTextEncode → "
+                               "ConditioningCombine chain. Encoded as its own negative section. "
+                               "Save your preferred default by setting it as the node's default "
+                               "value via right-click → properties, or just leave it set on the "
+                               "node in a workflow you reuse."}),
+                "extra_negative": ("STRING", {"default": "", "multiline": True,
+                                              "placeholder": "extra negative tokens for THIS workflow only",
+                    "tooltip": "Free-form negative tokens encoded as the last negative section. "
+                               "Use for per-workflow ad-hoc bans without polluting the global "
+                               "negative."}),
+
+                # === COMIC-PANEL CONTROL ===
+                "frame_action_weight": ("FLOAT", {"default": 1.0, "min": 0.5, "max": 2.0,
+                                                   "step": 0.05,
+                    "tooltip": "Emphasis multiplier on the per-frame action only (the verb "
+                               "from frames_json at frame_index). 1.0 = no weight applied. "
+                               ">1.0 wraps the action in (text:N) so the panel-specific verb "
+                               "isn't drowned out by the static character/scene tokens. "
+                               "Stay <=1.4 — higher tends to overcook."}),
+                "base_seed": ("INT", {"default": 0, "min": 0, "max": _INT_MAX,
+                    "tooltip": "Base for the per-frame seed output. Frame N emits "
+                               "base_seed + (N - 1). Wire into CivitaiSaveImage.seed_override."}),
+                "diagnostic_print": ("BOOLEAN", {"default": True,
+                    "tooltip": "When True, prints per-section token counts and chunk "
+                               "warnings to the ComfyUI console on each run."}),
+            },
+        }
+
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "STRING", "INT", "INT")
+    RETURN_NAMES = ("positive", "negative", "action", "seed", "frame_count")
+    OUTPUT_TOOLTIPS = (
+        "Positive CONDITIONING. character + scene + ambient_action + background "
+        "+ action + extra, each encoded as its own CLIP pass and concat'd on "
+        "the sequence axis.",
+        "Negative CONDITIONING. character_negative + scene_negative + "
+        "global_negative + extra_negative, same per-section encoding so each "
+        "stays inside the 75-token chunk it owns.",
+        "Just the per-frame action text (post-weighting). Useful for filename "
+        "builders or text overlays.",
+        "base_seed + (frame_index - 1).",
+        "Total number of authored frames.",
+    )
+    FUNCTION = "encode"
+    CATEGORY = "GrimmRibbity/Comic"
+
+    @staticmethod
+    def _weight_wrap(text: str, weight: float) -> str:
+        """Apply Comfy's (text:weight) emphasis syntax. weight==1.0 is a
+        no-op (returns text unchanged) so we don't write `(foo:1.0)` and
+        confuse the tokenizer with redundant parens. Below 1.0 still wraps
+        because de-emphasis is sometimes intentional."""
+        if abs(float(weight) - 1.0) < 1e-6:
+            return text
+        return f"({text}:{float(weight):.2f})"
+
+    def encode(self, clip, frames_json, frame_index,
+               character="", scene="", background="", ambient_action="",
+               extra_positive="",
+               character_negative="", scene_negative="",
+               global_negative="", extra_negative="",
+               frame_action_weight=1.0, base_seed=0, diagnostic_print=True):
+        action, frame_count = self._resolve_action(frames_json, frame_index)
+        weighted_action = (self._weight_wrap(action, frame_action_weight)
+                           if action else action)
+        # Order matters — sections are encoded in this list order and the
+        # resulting conditioning is concat'd in that order on the sequence
+        # axis. Character first (the model needs to "know who" early),
+        # then scene/atmosphere, then ambient action (scene-wide pose),
+        # then physical backdrop, then the specific per-frame action
+        # (model sees most-recent context near the end of the sequence),
+        # then any one-shot extras.
+        positive_sections = [
+            ("character", character),
+            ("scene", scene),
+            ("ambient_action", ambient_action),
+            ("background", background),
+            ("action", weighted_action),
+            ("extra_positive", extra_positive),
+        ]
+        # Negative ordering: character (anti-character) → scene (anti-
+        # scene) → global (quality / anatomy boilerplate) → extras.
+        negative_sections = [
+            ("character_negative", character_negative),
+            ("scene_negative", scene_negative),
+            ("global_negative", global_negative),
+            ("extra_negative", extra_negative),
+        ]
+        positive_cond = self._encode_sections(
+            clip, positive_sections, "positive", diagnostic_print)
+        negative_cond = self._encode_sections(
+            clip, negative_sections, "negative", diagnostic_print)
+        seed = (int(base_seed) + max(0, int(frame_index) - 1)) & _INT_MAX
+        # Emit the unweighted action text on the action output so downstream
+        # filename builders / overlays see what the user typed, not the
+        # weight-wrapped form.
         return (positive_cond, negative_cond, action, seed, frame_count)
 
 
@@ -3534,7 +3857,7 @@ async def grimmribbity_mkdir(request):
     return web.json_response({"ok": True, "path": str(target)})
 
 
-__version__ = "0.61.1"
+__version__ = "0.62.0"
 
 
 def _autobackup_on_version_change() -> None:
@@ -3676,6 +3999,8 @@ NODE_CLASS_MAPPINGS = {
     "PromptLibraryBackground": PromptLibraryBackground,
     "PromptLibraryComicFrame": PromptLibraryComicFrame,
     "PromptLibraryComicFrameEncode": PromptLibraryComicFrameEncode,
+    "PromptLibrarySceneFull": PromptLibrarySceneFull,
+    "PromptLibraryComicComposer": PromptLibraryComicComposer,
     **_civitai_node,
     **_sampler_node,
     **_lora_node,
@@ -3697,6 +4022,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptLibraryBackground": "GrimmRibbity — Background (locked)",
     "PromptLibraryComicFrame": "GrimmRibbity — Comic Frame",
     "PromptLibraryComicFrameEncode": "GrimmRibbity — Comic Frame (Conditioning)",
+    "PromptLibrarySceneFull": "GrimmRibbity — Scene+Background",
+    "PromptLibraryComicComposer": "GrimmRibbity — Comic Composer",
     **_civitai_label,
     **_sampler_label,
     **_lora_label,
