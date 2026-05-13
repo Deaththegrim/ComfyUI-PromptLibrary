@@ -3083,7 +3083,84 @@ async def fix_orphans(request):
     return web.json_response({"removed": removed, "errors": errors})
 
 
-__version__ = "0.59.1"
+# ----------------------------------------------------------------------------
+# Smart Detailer presets — see detailer_presets.py for storage; routes hang
+# off the same RouteTableDef as the prompt-library endpoints so they show up
+# on the same aiohttp app inside ComfyUI.
+#
+# Import tolerant of both package-mode (Comfy loads __init__.py with package
+# context) and standalone-mode (tests load __init__.py via
+# importlib.util.spec_from_file_location, which has no package machinery —
+# `from . import ...` raises ImportError). The bottom-of-file node imports
+# below use the same pattern.
+# ----------------------------------------------------------------------------
+try:
+    from . import detailer_presets as _det_presets  # type: ignore[import-not-found]
+except ImportError:
+    _here = Path(__file__).parent
+    if str(_here) not in sys.path:
+        sys.path.insert(0, str(_here))
+    import detailer_presets as _det_presets  # type: ignore[no-redef]
+
+try:
+    _det_presets.seed_default_presets()
+except OSError as e:
+    print(f"[GrimmRibbity] could not seed detailer presets: {e}")
+
+
+@routes.get("/grimmribbity/detailer_presets")
+async def grimmribbity_detailer_presets_list(_request):
+    return web.json_response({"presets": _det_presets.list_presets()})
+
+
+@routes.get("/grimmribbity/detailer_presets/{preset_id}")
+async def grimmribbity_detailer_presets_get(request):
+    pid = (request.match_info.get("preset_id") or "").strip()
+    preset = _det_presets.get_preset(pid)
+    if preset is None:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response({"preset": preset})
+
+
+@routes.post("/grimmribbity/detailer_presets")
+async def grimmribbity_detailer_presets_save(request):
+    payload, err = await _json_payload(request)
+    if err is not None:
+        return err
+    name = (payload.get("name") or "").strip()
+    settings = payload.get("settings")
+    description = (payload.get("description") or "").strip()
+    preset_id = (payload.get("id") or "").strip() or None
+    if not name:
+        return web.json_response({"error": "name required"}, status=400)
+    if not isinstance(settings, dict):
+        return web.json_response(
+            {"error": "settings must be an object"}, status=400)
+    try:
+        saved = _det_presets.upsert_preset(
+            name, settings, description=description, preset_id=preset_id)
+    except ValueError as ve:
+        return web.json_response({"error": str(ve)}, status=400)
+    except OSError as oe:
+        return web.json_response({"error": str(oe)}, status=500)
+    return web.json_response({"preset": saved})
+
+
+@routes.post("/grimmribbity/detailer_presets/{preset_id}/delete")
+async def grimmribbity_detailer_presets_delete(request):
+    pid = (request.match_info.get("preset_id") or "").strip()
+    if not pid:
+        return web.json_response({"error": "id required"}, status=400)
+    try:
+        removed = _det_presets.delete_preset(pid)
+    except OSError as oe:
+        return web.json_response({"error": str(oe)}, status=500)
+    if not removed:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response({"ok": True})
+
+
+__version__ = "0.59.2"
 
 
 def _autobackup_on_version_change() -> None:

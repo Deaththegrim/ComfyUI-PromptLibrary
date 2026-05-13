@@ -388,6 +388,35 @@ const CSS = `
 .pl-det-i.dim { color: var(--pl-fg-muted); font-style: italic; }
 .pl-det-toggle { width: 16px; height: 16px; accent-color: var(--pl-accent);
   margin: 0 auto; display: block; cursor: pointer; }
+/* Preset toolbar — sits above the per-target grid header. Picker + small
+   buttons live on one row; the inline save form drops down below when
+   active (display:flex toggled in JS). */
+.pl-det-presets { display: flex; flex-wrap: wrap; align-items: center;
+  gap: var(--pl-sp-sm); padding: var(--pl-sp-sm) var(--pl-sp-md);
+  background: #161616; border-bottom: 1px solid #3a3a3a;
+  font-size: 11px; color: var(--pl-fg); }
+.pl-det-presets-label { font-weight: 600; opacity: 0.85; }
+.pl-det-presets select { flex: 1 1 140px; min-width: 0;
+  background: var(--pl-bg-elevated); color: var(--pl-fg-strong);
+  border: 1px solid var(--pl-border); border-radius: var(--pl-r-sm);
+  padding: 3px 6px; font-size: 11px; font-family: inherit; }
+.pl-det-presets button { padding: 3px 8px; font-size: 11px;
+  background: var(--pl-bg-elevated); color: var(--pl-fg-strong);
+  border: 1px solid var(--pl-border); border-radius: var(--pl-r-sm);
+  cursor: pointer; font-family: inherit; }
+.pl-det-presets button:hover { border-color: var(--pl-accent); }
+.pl-det-presets button:disabled { opacity: 0.45; cursor: not-allowed; }
+.pl-det-presets button.danger:hover { border-color: #cc4747; color: #ff8a8a; }
+.pl-det-preset-status { font-size: 10px; opacity: 0.7;
+  flex-basis: 100%; padding-left: 2px; }
+.pl-det-preset-save-form { display: none; flex-basis: 100%; gap: var(--pl-sp-sm);
+  align-items: center; padding-top: var(--pl-sp-xs); }
+.pl-det-preset-save-form.open { display: flex; flex-wrap: wrap; }
+.pl-det-preset-save-form input[type="text"] {
+  flex: 1 1 140px; min-width: 0;
+  background: var(--pl-bg-input); color: var(--pl-fg-strong);
+  border: 1px solid var(--pl-border); border-radius: var(--pl-r-sm);
+  padding: 3px 6px; font-size: 11px; font-family: inherit; }
 /* Custom tooltip — attached to body so it escapes Comfy's widget layer
    z-index/clipping. Native HTML title attributes are unreliable inside
    Comfy's Vue-wrapped DOM widgets (the canvas captures pointer events
@@ -3523,6 +3552,317 @@ function registerComicFrameNode(nodeType) {
 // -----------------------------------------------------------------------------
 const SMART_DETAILER_NAME = "GrimmRibbitySmartDetailer";
 
+// Names of widgets the preset toolbar reads from / writes to. Anything not
+// in this list (image/model/clip/vae/conditioning sockets, the per_target_grid
+// DOM widget) is ignored so wiring isn't disturbed.
+const SMART_DETAILER_PRESET_KEYS = [
+  "enable_face", "enable_eyes", "enable_hands", "enable_feet",
+  "bbox_face", "bbox_eyes", "bbox_hands", "bbox_feet", "sam_model",
+  "seed", "steps", "cfg", "sampler_name", "scheduler",
+  "denoise", "guide_size", "max_size", "bbox_threshold", "max_per_target",
+  "tiled_decode", "tiled_encode", "mask_strength", "same_seed_per_target",
+  "bypass", "wildcard_prefix",
+  "face_threshold", "face_denoise", "face_max", "face_steps",
+  "eyes_threshold", "eyes_denoise", "eyes_max", "eyes_steps",
+  "hands_threshold", "hands_denoise", "hands_max", "hands_steps",
+  "feet_threshold", "feet_denoise", "feet_max", "feet_steps",
+  "face_crop_factor", "eyes_crop_factor", "hands_crop_factor", "feet_crop_factor",
+  "face_cycles", "eyes_cycles", "hands_cycles", "feet_cycles",
+  "force_inpaint", "drop_size", "min_detail_size", "nms_iou",
+  "yolo_imgsz", "max_bbox_area_pct", "draw_preview",
+];
+
+function _snapshotDetailerSettings(node) {
+  // Read the current value of every preset-managed widget on the node.
+  // Widgets not present in this node version (older saves loading newer
+  // workflows, or vice versa) are skipped — the resulting preset is a
+  // sparse map.
+  const out = {};
+  const byName = {};
+  for (const w of node.widgets || []) byName[w.name] = w;
+  for (const key of SMART_DETAILER_PRESET_KEYS) {
+    const w = byName[key];
+    if (!w) continue;
+    out[key] = w.value;
+  }
+  return out;
+}
+
+function _applyDetailerSettings(node, settings) {
+  // Set every preset-managed widget value from the preset's settings dict.
+  // Unknown keys (a future-version preset loaded on an older build) are
+  // silently dropped. Missing keys (an older preset missing widgets added
+  // later) leave the current value in place.
+  if (!settings || typeof settings !== "object") return 0;
+  let applied = 0;
+  const byName = {};
+  for (const w of node.widgets || []) byName[w.name] = w;
+  for (const key of Object.keys(settings)) {
+    if (!SMART_DETAILER_PRESET_KEYS.includes(key)) continue;
+    const w = byName[key];
+    if (!w) continue;
+    const v = settings[key];
+    if (typeof w.callback === "function") {
+      try { w.callback(v); } catch (_e) { /* fall through to direct assignment */ }
+    }
+    w.value = v;
+    applied += 1;
+  }
+  node.setDirtyCanvas?.(true, true);
+  return applied;
+}
+
+async function _fetchDetailerPresets() {
+  try {
+    const res = await api.fetchApi("/grimmribbity/detailer_presets");
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data.presets) ? data.presets : [];
+  } catch (_e) {
+    return [];
+  }
+}
+
+async function _fetchDetailerPreset(id) {
+  if (!id) return null;
+  try {
+    const res = await api.fetchApi(
+      `/grimmribbity/detailer_presets/${encodeURIComponent(id)}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.preset || null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+async function _saveDetailerPreset(name, settings, { id = "", description = "" } = {}) {
+  const body = JSON.stringify({ name, settings, description, id });
+  const res = await api.fetchApi("/grimmribbity/detailer_presets",
+    { method: "POST", body, headers: { "Content-Type": "application/json" } });
+  if (!res.ok) {
+    let msg = `save failed: HTTP ${res.status}`;
+    try { msg = (await res.json()).error || msg; } catch (_e) {}
+    throw new Error(msg);
+  }
+  return (await res.json()).preset;
+}
+
+async function _deleteDetailerPreset(id) {
+  if (!id) return false;
+  const res = await api.fetchApi(
+    `/grimmribbity/detailer_presets/${encodeURIComponent(id)}/delete`,
+    { method: "POST" });
+  return res.ok;
+}
+
+function _buildDetailerPresetToolbar(node, refreshGridCb) {
+  // Returns the toolbar DOM. Lives at the top of the SmartDetailer grid
+  // widget so the picker is visible alongside the per-target overrides.
+  const bar = document.createElement("div");
+  bar.className = "pl-det-presets";
+
+  const label = document.createElement("span");
+  label.className = "pl-det-presets-label";
+  label.textContent = "Preset:";
+  bar.appendChild(label);
+
+  const select = document.createElement("select");
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "(none)";
+  select.appendChild(placeholder);
+  bar.appendChild(select);
+
+  const applyBtn = document.createElement("button");
+  applyBtn.type = "button";
+  applyBtn.textContent = "📋 Apply";
+  applyBtn.title = "Overwrite every detailer widget value with the selected preset.";
+  bar.appendChild(applyBtn);
+
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.textContent = "💾 Save";
+  saveBtn.title = "Save current detailer settings as a new preset (or update the selected one).";
+  bar.appendChild(saveBtn);
+
+  const delBtn = document.createElement("button");
+  delBtn.type = "button";
+  delBtn.textContent = "🗑";
+  delBtn.className = "danger";
+  delBtn.title = "Delete the selected preset.";
+  bar.appendChild(delBtn);
+
+  const status = document.createElement("div");
+  status.className = "pl-det-preset-status";
+  status.textContent = "";
+  bar.appendChild(status);
+
+  // Inline save form — hidden until user clicks Save and we need a name.
+  const saveForm = document.createElement("div");
+  saveForm.className = "pl-det-preset-save-form";
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.placeholder = "preset name…";
+  nameInput.maxLength = 120;
+  const confirmBtn = document.createElement("button");
+  confirmBtn.type = "button";
+  confirmBtn.textContent = "Save";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.textContent = "Cancel";
+  saveForm.appendChild(nameInput);
+  saveForm.appendChild(confirmBtn);
+  saveForm.appendChild(cancelBtn);
+  bar.appendChild(saveForm);
+
+  // Index of preset metadata by id so the picker can describe + delete.
+  let cache = [];
+
+  const setStatus = (text, isError = false) => {
+    status.textContent = text || "";
+    status.style.color = isError ? "#ff8a8a" : "";
+  };
+
+  const repopulateSelect = (selectedId = "") => {
+    // Wipe and rebuild option list, then restore selection if id still present.
+    while (select.options.length > 1) select.remove(1);
+    for (const p of cache) {
+      const opt = document.createElement("option");
+      opt.value = p.id;
+      opt.textContent = p.builtin ? `★ ${p.name}` : p.name;
+      if (p.description) opt.title = p.description;
+      select.appendChild(opt);
+    }
+    const keep = selectedId && cache.some(p => p.id === selectedId)
+      ? selectedId : "";
+    select.value = keep;
+    node.properties = node.properties || {};
+    node.properties.detailerPresetId = keep;
+    updateButtonState();
+  };
+
+  const updateButtonState = () => {
+    const id = select.value;
+    applyBtn.disabled = !id;
+    delBtn.disabled = !id;
+    const picked = cache.find(p => p.id === id);
+    if (picked) {
+      const tag = picked.builtin ? "builtin" : "user";
+      setStatus(`Selected: ${picked.name} (${tag})`);
+    } else {
+      setStatus("");
+    }
+  };
+
+  const openSaveForm = (preName = "") => {
+    saveForm.classList.add("open");
+    nameInput.value = preName;
+    nameInput.focus();
+    nameInput.select();
+  };
+  const closeSaveForm = () => {
+    saveForm.classList.remove("open");
+    nameInput.value = "";
+  };
+
+  const reload = async (selectedId = "") => {
+    cache = await _fetchDetailerPresets();
+    const wanted = selectedId || (node.properties && node.properties.detailerPresetId) || "";
+    repopulateSelect(wanted);
+  };
+
+  select.addEventListener("change", updateButtonState);
+
+  applyBtn.addEventListener("click", async () => {
+    const id = select.value;
+    if (!id) return;
+    applyBtn.disabled = true;
+    setStatus("Loading preset…");
+    const preset = await _fetchDetailerPreset(id);
+    applyBtn.disabled = false;
+    if (!preset) { setStatus("Preset missing — reload?", true); return; }
+    const n = _applyDetailerSettings(node, preset.settings || {});
+    refreshGridCb?.();
+    node.properties = node.properties || {};
+    node.properties.detailerPresetId = preset.id;
+    setStatus(`Applied "${preset.name}" (${n} fields)`);
+  });
+
+  saveBtn.addEventListener("click", () => {
+    const id = select.value;
+    const picked = cache.find(p => p.id === id);
+    // If a non-builtin user preset is selected, default to "update in place"
+    // by prefilling the name; otherwise prompt for a new name.
+    const defaultName = picked && !picked.builtin ? picked.name : "";
+    openSaveForm(defaultName);
+  });
+
+  confirmBtn.addEventListener("click", async () => {
+    const rawName = (nameInput.value || "").trim();
+    if (!rawName) { nameInput.focus(); return; }
+    const id = select.value;
+    const picked = cache.find(p => p.id === id);
+    // Update-in-place only when the user kept the SAME non-builtin preset name.
+    // Builtin or renamed → create new entry (backend dedupes by name too).
+    const sameName = picked && !picked.builtin
+      && rawName.toLowerCase() === picked.name.toLowerCase();
+    const targetId = sameName ? picked.id : "";
+    confirmBtn.disabled = true;
+    setStatus("Saving…");
+    try {
+      const settings = _snapshotDetailerSettings(node);
+      const saved = await _saveDetailerPreset(rawName, settings, { id: targetId });
+      closeSaveForm();
+      await reload(saved.id);
+      setStatus(`Saved "${saved.name}"`);
+    } catch (e) {
+      setStatus(String(e.message || e), true);
+    } finally {
+      confirmBtn.disabled = false;
+    }
+  });
+  cancelBtn.addEventListener("click", closeSaveForm);
+
+  nameInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); confirmBtn.click(); }
+    else if (e.key === "Escape") { e.preventDefault(); closeSaveForm(); }
+  });
+
+  delBtn.addEventListener("click", async () => {
+    const id = select.value;
+    if (!id) return;
+    const picked = cache.find(p => p.id === id);
+    const label = picked ? picked.name : "this preset";
+    // Single-click confirm: button text doubles as the prompt for 3s.
+    if (delBtn.dataset.armed !== "yes") {
+      delBtn.dataset.armed = "yes";
+      const old = delBtn.textContent;
+      delBtn.textContent = `Delete "${label}"?`;
+      const timeout = setTimeout(() => {
+        delBtn.dataset.armed = "";
+        delBtn.textContent = old;
+      }, 3000);
+      delBtn._disarmTimer = timeout;
+      return;
+    }
+    clearTimeout(delBtn._disarmTimer);
+    delBtn.dataset.armed = "";
+    delBtn.textContent = "🗑";
+    setStatus("Deleting…");
+    const ok = await _deleteDetailerPreset(id);
+    if (!ok) { setStatus("Delete failed", true); return; }
+    await reload("");
+    setStatus(`Deleted "${label}"`);
+  });
+
+  // Initial population happens async; expose a reload hook so onConfigure
+  // (workflow reload) can re-sync the picker against the saved properties.
+  reload();
+
+  return { bar, reload };
+}
+
 function _buildSmartDetailerGrid(node) {
   const TARGETS = ["face", "eyes", "hands", "feet"];
   // sentinel: the "use global / preset value" placeholder. Cells holding
@@ -3554,6 +3894,18 @@ function _buildSmartDetailerGrid(node) {
 
   const grid = document.createElement("div");
   grid.className = "pl-det-grid";
+
+  // Preset toolbar at the top: dropdown + Apply/Save/Delete. refreshGridCb
+  // is wired below once `cells` is defined; the closure threads through the
+  // value returned from this function.
+  const presetToolbarHandle = { reload: null };
+  const presetBar = _buildDetailerPresetToolbar(node, () => {
+    // After applying a preset, every cell's input needs to reflect the new
+    // widget value. Forward to the per-cell refresh hook collected below.
+    presetToolbarHandle.refresh?.();
+  });
+  grid.appendChild(presetBar.bar);
+  presetToolbarHandle.reload = presetBar.reload;
 
   // Header row: empty corner + 6 category labels in their own row container.
   const headerRow = document.createElement("div");
@@ -3667,7 +4019,9 @@ function _buildSmartDetailerGrid(node) {
     });
   }
 
-  return { grid, refresh: () => cells.forEach(c => c.refresh()) };
+  const refresh = () => cells.forEach(c => c.refresh());
+  presetToolbarHandle.refresh = refresh;
+  return { grid, refresh, reloadPresets: presetToolbarHandle.reload };
 }
 
 function registerSmartDetailerNode(nodeType) {
@@ -3684,6 +4038,7 @@ function registerSmartDetailerNode(nodeType) {
       setValue: () => {},
     });
     this._smartDetailerRefresh = built.refresh;
+    this._smartDetailerReloadPresets = built.reloadPresets;
     // Bump default node width so the 7 grid columns (label + 6 targets) fit.
     if (Array.isArray(this.size) && this.size[0] < 480) {
       this.size = [480, this.size[1] || 720];
@@ -3698,6 +4053,9 @@ function registerSmartDetailerNode(nodeType) {
     // Workflow load: underlying widgets just got their saved values; refresh
     // every cell input so the grid reflects them.
     this._smartDetailerRefresh?.();
+    // The picker re-selects the saved preset id from node.properties so the
+    // "currently active" indicator survives reload.
+    this._smartDetailerReloadPresets?.();
     return ret;
   };
 }
