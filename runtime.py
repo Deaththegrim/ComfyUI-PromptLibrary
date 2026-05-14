@@ -134,9 +134,12 @@ def oom_safe_vae_decode(vae, latent, *, mode: str = "true",
     if not (needs_tile and hasattr(vae, "decode_tiled")):
         return vae.decode(samples)
     while True:
+        # comfy's decode_tiled_ internally uses tile_x // 2 for the steps calc,
+        # so overlap must stay strictly < tile // 2 or we hit div-by-zero.
+        eff_overlap = min(overlap, max(8, tile // 4))
         try:
             try:
-                return vae.decode_tiled(samples, tile_x=tile, tile_y=tile, overlap=overlap)
+                return vae.decode_tiled(samples, tile_x=tile, tile_y=tile, overlap=eff_overlap)
             except TypeError:
                 return vae.decode_tiled(samples, tile_x=tile, tile_y=tile)
         except Exception as exc:
@@ -169,10 +172,13 @@ def oom_safe_vae_encode(vae, image, *, mode: str = "true",
     if not (needs_tile and hasattr(vae, "encode_tiled")):
         return {"samples": vae.encode(image)}
     while True:
+        # comfy's encode_tiled_ internally uses tile_x // 2 for the steps calc,
+        # so overlap must stay strictly < tile // 2 or we hit div-by-zero.
+        eff_overlap = min(overlap, max(8, tile // 4))
         try:
             try:
                 return {"samples": vae.encode_tiled(
-                    image, tile_x=tile, tile_y=tile, overlap=overlap)}
+                    image, tile_x=tile, tile_y=tile, overlap=eff_overlap)}
             except TypeError:
                 return {"samples": vae.encode_tiled(
                     image, tile_x=tile, tile_y=tile)}
