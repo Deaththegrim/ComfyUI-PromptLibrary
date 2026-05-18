@@ -1140,6 +1140,27 @@ def extract_workflow_metadata(prompt: dict | None) -> dict:
     return out
 
 
+# PNG tEXt chunks are Latin-1; any codepoint > 0xFF makes Pillow silently
+# promote the chunk to iTXt, which Civitai's A1111 parser ignores.
+_LATIN1_FALLBACKS = {
+    "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "--",
+    "―": "--", "‘": "'", "’": "'", "‚": ",", "“": '"',
+    "”": '"', "„": '"', "…": "...", " ": " ", " ": " ",
+    " ": " ", " ": " ",
+}
+
+
+def _to_latin1_safe(s: str) -> str:
+    if s is None:
+        return s
+    out = s.translate({ord(k): v for k, v in _LATIN1_FALLBACKS.items()})
+    try:
+        out.encode("latin-1")
+        return out
+    except UnicodeEncodeError:
+        return out.encode("latin-1", errors="replace").decode("latin-1")
+
+
 def build_a1111_parameters(
     *,
     positive: str,
@@ -1491,7 +1512,7 @@ class CivitaiSaveImage:
             print(f"[CivitaiSave] library snapshot extraction failed: {e}")
             library_snapshot = None
         if library_snapshot is not None:
-            library_snapshot_text = json.dumps(library_snapshot, ensure_ascii=False)
+            library_snapshot_text = json.dumps(library_snapshot)
 
         try:
             import comfy.model_management as _mm
@@ -1514,7 +1535,7 @@ class CivitaiSaveImage:
             pil = Image.fromarray(arr)
 
             png_info = PngImagePlugin.PngInfo()
-            png_info.add_text("parameters", params)
+            png_info.add_text("parameters", _to_latin1_safe(params))
             if prompt_text is not None:
                 png_info.add_text("prompt", prompt_text)
             if library_snapshot_text is not None:

@@ -54,6 +54,7 @@ except ImportError:
     sys.exit(2)
 
 from civitai_save import (  # noqa: E402
+    _to_latin1_safe,
     build_a1111_parameters,
     extract_workflow_metadata,
     get_cached_sha256,
@@ -195,7 +196,7 @@ def _backfill_one(png: Path, *, dry_run: bool, verbose: bool) -> str:
                     continue
                 if isinstance(value, str):
                     png_info.add_text(key, value)
-            png_info.add_text("parameters", params)
+            png_info.add_text("parameters", _to_latin1_safe(params))
             tmp = png.with_suffix(".png.tmp")
             img.save(tmp, format="PNG", pnginfo=png_info, compress_level=4)
         tmp.replace(png)
