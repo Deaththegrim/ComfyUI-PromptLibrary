@@ -32,11 +32,11 @@ def read_chunks(path: Path) -> dict:
     Returns {} on a non-PNG / unreadable file rather than raising — the
     folder walker leans on that to skip bad files quietly."""
     try:
-        img = Image.open(path)
-        img.load()
+        with Image.open(path) as img:
+            img.load()
+            return dict(img.info or {})
     except Exception:
         return {}
-    return dict(img.info or {})
 
 
 def parse_library_snapshot(chunks: dict) -> dict | None:
