@@ -37,10 +37,30 @@ if str(_REPO_ROOT) not in sys.path:
 
 
 _DEFAULT_LIBRARY = _REPO_ROOT / "data" / "prompts.json"
-_LIVE_INSTALL_LIBRARY = Path(
-    "/home/junie/comfy/ComfyUI/custom_nodes/ComfyUI-PromptLibrary/data/prompts.json")
 _VALID_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 _SAFE_ID_RE_TEXT = "[A-Za-z0-9_-]{1,64}"
+
+_COMFY_ROOT_CANDIDATES = (
+    Path.home() / "comfy" / "ComfyUI",
+    Path.home() / "ComfyUI",
+)
+
+
+def _comfy_root() -> Path | None:
+    """Find the live ComfyUI install root. Prefers folder_paths.base_path
+    (set when ComfyUI is on the import path), falls back to conventional
+    locations."""
+    try:
+        import folder_paths  # type: ignore
+        base = getattr(folder_paths, "base_path", None)
+        if base and Path(base).is_dir():
+            return Path(base)
+    except Exception:
+        pass
+    for root in _COMFY_ROOT_CANDIDATES:
+        if root.is_dir():
+            return root
+    return None
 
 
 def _resolve_lora_path(name: str) -> str | None:
@@ -53,23 +73,23 @@ def _resolve_lora_path(name: str) -> str | None:
         path = folder_paths.get_full_path("loras", name)
         return path if path and os.path.isfile(path) else None
     except Exception:
-        # Fallback: probe a couple of conventional locations. Users running
-        # this script on a stock Comfy install will land here.
-        candidates = [
-            Path("/home/junie/comfy/ComfyUI/models/loras") / name,
-            Path.home() / "ComfyUI" / "models" / "loras" / name,
-        ]
-        for c in candidates:
-            if c.is_file():
-                return str(c)
-        return None
+        pass
+    root = _comfy_root()
+    if root is not None:
+        candidate = root / "models" / "loras" / name
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 def _pick_library_path(arg: str | None) -> Path:
     if arg:
         return Path(arg)
-    if _LIVE_INSTALL_LIBRARY.is_file():
-        return _LIVE_INSTALL_LIBRARY
+    root = _comfy_root()
+    if root is not None:
+        live = root / "custom_nodes" / "ComfyUI-PromptLibrary" / "data" / "prompts.json"
+        if live.is_file():
+            return live
     return _DEFAULT_LIBRARY
 
 

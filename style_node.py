@@ -47,16 +47,30 @@ def _resolve_lora_path(name: str) -> str | None:
 # Keep the most recently used LoRA tensors in memory so a workflow that
 # re-runs with the same stack doesn't re-read every safetensors file from
 # disk on every queue. Cap at 4 — enough for a typical style + character
-# combo, small enough that VRAM/RAM doesn't bloat from idle nodes.
-_LORA_CACHE: list[tuple[str, dict]] = []
+# combo, small enough that VRAM/RAM doesn't bloat from idle nodes. Cache
+# entries carry (path, size, mtime) so an in-place swap of a safetensors
+# file invalidates automatically instead of silently serving stale weights.
+_LORA_CACHE: list[tuple[str, int, int, dict]] = []
 _LORA_CACHE_MAX = 4
 _LORA_CACHE_LOCK = threading.Lock()
 
 
+def _lora_file_signature(path: str) -> tuple[int, int]:
+    """(size, int(mtime)) for cache invalidation. Returns (0, 0) when stat
+    fails — caller falls through to load_torch_file which will raise the
+    real error."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return (0, 0)
+    return (st.st_size, int(st.st_mtime))
+
+
 def _load_lora_cached(path: str) -> dict:
+    size, mtime = _lora_file_signature(path)
     with _LORA_CACHE_LOCK:
-        for cached_path, sd in _LORA_CACHE:
-            if cached_path == path:
+        for cpath, csize, cmtime, sd in _LORA_CACHE:
+            if cpath == path and csize == size and cmtime == mtime:
                 return sd
     # Load outside the lock — file IO can be hundreds of ms and we don't want
     # to serialize concurrent runs that happen to want different LoRAs.
@@ -64,10 +78,13 @@ def _load_lora_cached(path: str) -> dict:
     with _LORA_CACHE_LOCK:
         # A racing caller may have populated this entry while we were loading;
         # if so use theirs and let our copy be GC'd. Cheap dedupe.
-        for cached_path, cached_sd in _LORA_CACHE:
-            if cached_path == path:
+        for cpath, csize, cmtime, cached_sd in _LORA_CACHE:
+            if cpath == path and csize == size and cmtime == mtime:
                 return cached_sd
-        _LORA_CACHE.append((path, sd))
+        # Drop any stale entries for this path (different size/mtime) so the
+        # cache doesn't pin a copy of the old weights after a file swap.
+        _LORA_CACHE[:] = [e for e in _LORA_CACHE if e[0] != path]
+        _LORA_CACHE.append((path, size, mtime, sd))
         while len(_LORA_CACHE) > _LORA_CACHE_MAX:
             _LORA_CACHE.pop(0)
     return sd
