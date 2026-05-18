@@ -2783,9 +2783,8 @@ def _recompress_thumbnail_for_export(img_path: "Path") -> tuple[bytes, str] | No
     smaller thumbnails the export shipped, not a re-bloat back to 400."""
     try:
         from PIL import Image
-        pil = Image.open(img_path)
-        if pil.mode != "RGB":
-            pil = pil.convert("RGB")
+        with Image.open(img_path) as src:
+            pil = src.convert("RGB") if src.mode != "RGB" else src.copy()
         pil.thumbnail((_EXPORT_THUMBNAIL_MAX_EDGE, _EXPORT_THUMBNAIL_MAX_EDGE))
         buf = io.BytesIO()
         pil.save(buf, format="JPEG", quality=_EXPORT_THUMBNAIL_JPEG_QUALITY,

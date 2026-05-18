@@ -34,6 +34,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -571,14 +572,31 @@ def _refine_to_blend_mask(
 # Module-level wildcard CLIP encoding cache. Survives across detail() calls
 # so a batched workflow that reuses the same wildcard + checkpoint encodes
 # ONCE total, not once per queue. Bounded LRU to cap memory — keys are
-# (id(clip), wildcard_text); values are the encoded conditioning tensor.
+# (stable_clip_uid, wildcard_text); values are the encoded conditioning tensor.
 _WILDCARD_CACHE: OrderedDict[tuple[int, str], Any] = OrderedDict()
 _WILDCARD_CACHE_MAX = 32
+_CLIP_UID_ATTR = "_grimm_wildcard_uid"
+
+
+def _stable_clip_uid(clip) -> int:
+    """A clip-object identity that survives across detail() calls and doesn't
+    collide after GC. id() recycles memory addresses, so a freshly loaded
+    CLIP at the same address as a freed one would falsely hit the cache and
+    return a tensor encoded by the OLD weights. Stamp the clip with a uuid
+    on first sight and reuse it forever."""
+    uid = getattr(clip, _CLIP_UID_ATTR, None)
+    if uid is None:
+        uid = uuid.uuid4().int
+        try:
+            setattr(clip, _CLIP_UID_ATTR, uid)
+        except (AttributeError, TypeError):
+            return id(clip)
+    return uid
 
 
 def _encode_wildcard_cached(clip, wildcard_text: str, positive):
     """ConditioningConcat the wildcard onto positive. The encoded wildcard
-    tensor is cached at module level by (id(clip), text) — same prompt + same
+    tensor is cached at module level by (stable_clip_uid, text) — same prompt + same
     CLIP runs CLIPTextEncode once total, not once per detected bbox or per
     queued image."""
     if not wildcard_text or not wildcard_text.strip():
@@ -587,7 +605,7 @@ def _encode_wildcard_cached(clip, wildcard_text: str, positive):
         _resolve_comfy_helpers()
         if _CLIP_TEXT_ENCODE is None:  # still missing
             return positive
-    key = (id(clip), wildcard_text)
+    key = (_stable_clip_uid(clip), wildcard_text)
     wc_cond = _WILDCARD_CACHE.get(key)
     if wc_cond is None:
         (wc_cond,) = _CLIP_TEXT_ENCODE.encode(clip, wildcard_text)
@@ -1304,12 +1322,13 @@ class GrimmRibbitySmartDetailer:
         ensure_unload_hook()
 
         # Purge wildcard-cache entries from a previous CLIP. Under
-        # --no-cache-models, comfy reloads CLIP per prompt → id(clip) changes
-        # → stale entries pin encoded conditioning tensors on GPU until the
-        # next purge. Doing this at the start (not the end) ensures stale
-        # entries don't survive across the call where they could be reached.
-        current_clip_id = id(clip)
-        for stale_key in [k for k in _WILDCARD_CACHE if k[0] != current_clip_id]:
+        # --no-cache-models, comfy reloads CLIP per prompt → the stable uid
+        # changes → stale entries would pin encoded conditioning tensors on
+        # GPU until the next purge. Doing this at the start (not the end)
+        # ensures stale entries don't survive across the call where they
+        # could be reached.
+        current_clip_uid = _stable_clip_uid(clip)
+        for stale_key in [k for k in _WILDCARD_CACHE if k[0] != current_clip_uid]:
             _WILDCARD_CACHE.pop(stale_key, None)
 
         # Build the plan: ordered list of (target, bbox_model_name, threshold,
