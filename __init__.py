@@ -4005,6 +4005,15 @@ except Exception as _e:
     print(f"[PromptLibrary] Upscale SDXL unavailable: {_e}")
     _upscaler_node, _upscaler_label = {}, {}
 
+try:
+    from .wan22 import (
+        NODE_CLASS_MAPPINGS as _wan22_node,
+        NODE_DISPLAY_NAME_MAPPINGS as _wan22_label,
+    )
+except Exception as _e:
+    print(f"[PromptLibrary] Wan2.2 nodes unavailable: {_e}")
+    _wan22_node, _wan22_label = {}, {}
+
 NODE_CLASS_MAPPINGS = {
     "PromptLibrary": PromptLibrary,
     "PromptLibraryMulti": PromptLibraryMulti,
@@ -4027,6 +4036,7 @@ NODE_CLASS_MAPPINGS = {
     **_comic_page_node,
     **_style_node,
     **_upscaler_node,
+    **_wan22_node,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptLibrary": "GrimmRibbity — Library",
@@ -4050,6 +4060,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **_comic_page_label,
     **_style_label,
     **_upscaler_label,
+    **_wan22_label,
 }
 WEB_DIRECTORY = "./web"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
