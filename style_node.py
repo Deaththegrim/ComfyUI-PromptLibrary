@@ -121,9 +121,12 @@ def _concat_conditioning(base, addition):
         t1 = entry[0]
         try:
             merged = torch.cat((t1, cond_from), dim=1)
-        except Exception:
+        except Exception as e:
             # Shape mismatch (mixed model classes, etc.) — keep the base
             # entry untouched rather than crashing the workflow.
+            _log.warning("PromptLibraryStyle: conditioning concat failed (base shape %s vs "
+                        "addition shape %s); style conditioning not applied: %s",
+                        tuple(t1.shape), tuple(cond_from.shape), e)
             merged = t1
         out.append([merged, entry[1].copy()])
     return out

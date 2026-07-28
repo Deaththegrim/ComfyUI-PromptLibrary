@@ -781,7 +781,7 @@ class PromptLibraryMulti:
         for n in range(1, cls.PANELS + 1):
             ids = [p.strip() for p in (kwargs.get(f"prompt_id_{n}") or "").split(",") if p.strip()]
             sep = kwargs.get(f"separator_{n}", ", ")
-            sigs.append(sep.join(items.get(pid, "") for pid in ids))
+            sigs.append(sep.join(items[pid] for pid in ids if pid in items))
         return "".join(sigs)
 
     def load_prompts(self, **kwargs):

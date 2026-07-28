@@ -826,6 +826,11 @@ def _walk_model_chain(prompt: dict, start_node_id: str | None):
 
         # Unknown node — give the `model` input one last try (covers most
         # third-party passthroughs we haven't catalogued).
+        if ctype and ctype not in {*_LORA_LOADER_TYPES, _RGTHREE_LORA_STACK_TYPE,
+                                    _RGTHREE_POWER_LORA_TYPE, *_MODEL_LOADER_TYPES,
+                                    *_SDXL_TUPLE_PACK_TYPES, *_MODEL_PASSTHROUGH_TYPES}:
+            print(f"[CivitaiSave] LoRA chain walk: unknown node type {ctype!r}; "
+                  f"LoRA collection may be incomplete")
         current = _link_source(inputs.get("model"))
     return None, list(reversed(loras))
 
@@ -1151,8 +1156,6 @@ _LATIN1_FALLBACKS = {
 
 
 def _to_latin1_safe(s: str) -> str:
-    if s is None:
-        return s
     out = s.translate({ord(k): v for k, v in _LATIN1_FALLBACKS.items()})
     try:
         out.encode("latin-1")
@@ -1413,10 +1416,10 @@ class CivitaiSaveImage:
         )
         model_resolved = resolve_model_path(model_label) if model_label else None
         if model_label and not model_resolved:
+            actual_model = meta.get("model_label")
             print(f"[CivitaiSave] model_override {model_label!r} doesn't resolve "
-                  f"to a known checkpoint — falling back to auto-detected "
-                  f"{meta.get('model_label')!r}")
-            model_label = meta.get("model_label")
+                  f"to a known checkpoint; metadata will use auto-detected {actual_model!r}")
+            model_label = actual_model
             model_resolved = resolve_model_path(model_label) if model_label else None
         model_name = model_resolved[0] if model_resolved else None
         model_sha = (get_cached_sha256(model_label, model_resolved[1])
