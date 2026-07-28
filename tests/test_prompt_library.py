@@ -1120,6 +1120,40 @@ class PromptLibraryTests(unittest.TestCase):
         out = node.load_prompts(prompt_id_1="a,nope", prompt_id_2="", prompt_id_3="")
         self.assertEqual(out[0], "alpha")
 
+    def test_multi_node_cache_consistency_on_deleted_entry(self):
+        """Verify IS_CHANGED changes when an entry is deleted, matching load_prompts."""
+        # Seed with two entries
+        self._seed_library([
+            {"id": "a", "text": "alpha"},
+            {"id": "b", "text": "bravo"},
+        ])
+        node = self.mod.PromptLibraryMulti()
+        kwargs = {
+            "prompt_id_1": "a,b",
+            "prompt_id_2": "",
+            "prompt_id_3": "",
+            "separator_1": ", ",
+            "separator_2": ", ",
+            "separator_3": ", ",
+        }
+        # Get initial signature and output
+        sig_before = node.IS_CHANGED(**kwargs)
+        out_before = node.load_prompts(**kwargs)
+        self.assertEqual(out_before[0], "alpha, bravo", "both ids should be present")
+
+        # Delete "b" from library
+        self._seed_library([{"id": "a", "text": "alpha"}])
+
+        # Get new signature and output
+        sig_after = node.IS_CHANGED(**kwargs)
+        out_after = node.load_prompts(**kwargs)
+
+        # Verify both change consistently
+        self.assertNotEqual(sig_before, sig_after, "IS_CHANGED should detect deletion")
+        self.assertEqual(out_after[0], "alpha", "output should skip deleted id")
+        # The crucial part: when the output content changes, IS_CHANGED must also change
+        # so cache invalidation works correctly
+
     # ---- Comic-strip nodes ---------------------------------------------
 
     def test_scene_node_joins_non_empty_fields(self):

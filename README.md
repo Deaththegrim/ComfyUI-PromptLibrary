@@ -6,6 +6,10 @@ A visual prompt manager + detailer + sampler suite for ComfyUI (formerly *Ribbit
 
 **~20 nodes**, one shared library, **zero ComfyUI custom-node dependencies** — every node imports only PyPI packages (torch, ultralytics, sam2, etc.) and ComfyUI core. Nodes that can leverage IPAdapter Plus (Character Anchor) lazy-import it at call time so the rest of the suite loads cleanly without it.
 
+## Specialist sweep — 2026-07-28
+
+`PromptLibraryMulti` IS_CHANGED now matches load_prompts (a deleted entry made the cache key disagree with the emitted text → stale/wrong output); conditioning-concat shape-mismatch warns instead of silently dropping the style; civitai model-override + LoRA-chain-truncation now warn (metadata was silently wrong/incomplete); `_to_latin1_safe` type fixed; +1 test.
+
 Highlights:
 - **Library / Style / Multi** — visual prompt picker with per-entry LoRA stacks; selection persists across page refreshes via three-tier mirroring (widget value → node properties → localStorage)
 - **Smart Detailer** — one node replaces the 3-node FaceDetailer chain. 6 detail targets (face / eyes / mouth / hands / feet / skin), SAM mask refinement, per-target threshold/denoise/max/steps/crop_factor overrides, color-coded detection-preview output. **No Impact Pack required** — uses `ultralytics` directly.
@@ -345,6 +349,12 @@ Going forward, new widgets land in `optional` so they don't shift required-widge
 ### "Smart Detailer output is black / has weird color artifacts"
 
 The detail pass pipeline used to skip a NaN scrub between VAE decode and the alpha-blend composite, so a sample-time NaN propagated into the final image and downstream `clip(0,1).astype(uint8)` casts produced black pixels. Fixed in v0.49.0 — `nan_to_num` runs after every refined-image path. If you still see this on v0.49.0+, share the console log; there's a different bug.
+
+## Maintenance — periodic specialist sweeps
+
+Last full code-specialist sweep: **2026-07-28** (see the `sweep/specialist-suite-fixes` branch / PR).
+
+A specialist sweep is a multi-axis review — bug/logic review, silent-failure hunt, type-design, comment-accuracy, test-coverage, and blind-spot passes — with every fix adversarially re-verified before it lands. These passes catch the quiet correctness/robustness bugs (swallowed errors, unrecoverable saves, non-atomic writes, silent divergences) that accumulate between feature work and never show up in a demo. **Worth re-running every few months, or after any large feature push.** Local findings archive: `~/vault/code-sweep/`.
 
 ## Credits
 
